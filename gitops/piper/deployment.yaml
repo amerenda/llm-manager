@@ -36,7 +36,7 @@ spec:
               mountPath: /voices
       containers:
         - name: piper-agent
-          image: amerenda/llm-manager:piper-41ea30bee108ee30c70e414c4a42ff907a4dcebd
+          image: amerenda/llm-manager:piper-d2f0e19c5ae59923d5dd2b0668a2baf112a66649
           ports:
             - containerPort: 8091
           env:
