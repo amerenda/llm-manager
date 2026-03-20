@@ -1,185 +1,324 @@
 # llm-manager
 
-Manages local LLM inference (Ollama + ComfyUI) across GPU nodes in a k3s cluster.
+Centralized GPU resource manager for a k3s home lab. Routes all AI inference
+workloads (Ollama text models, ComfyUI image generation) through a stateless
+k8s backend. GPU nodes self-register; the backend tracks them in PostgreSQL and
+proxies requests with load balancing.
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│  murderbot (GPU host, bare metal)                                   │
-│                                                                     │
-│  ┌───────────────────┐   ┌──────────────┐   ┌──────────────────┐   │
-│  │ Ollama            │   │ ComfyUI      │   │ llm-agent        │   │
-│  │ localhost:11434   │   │ localhost:   │   │ port: 8090       │   │
-│  │ (bare metal)      │   │ 8188         │   │ (docker compose) │   │
-│  │                   │   │ (docker      │   │                  │   │
-│  │  text models      │   │  compose)    │   │ wraps both ^     │   │
-│  └───────────────────┘   └──────────────┘   │ OpenAI-compat    │   │
-│                                             │ API + metrics    │   │
-│  /opt/models/                               └──────────────────┘   │
-│    checkpoints/                                      ▲             │
-│    lora/                                             │ HTTP        │
-│    vae/                                              │             │
-└─────────────────────────────────────────────────────│─────────────┘
-                                                       │
-                              ┌────────────────────────┘
-                              │
-┌─────────────────────────────▼───────────────────────────────────────┐
-│  k3s cluster (GPU-labeled nodes)                                    │
-│                                                                     │
-│  ┌────────────────────────────────────────────────────────────────┐ │
-│  │  llm-manager backend  (DaemonSet, port 8081)                   │ │
-│  │                                                                │ │
-│  │  ┌──────────────────┐  ┌──────────────────┐                   │ │
-│  │  │ Moltbook agents  │  │ LLM proxy API    │                   │ │
-│  │  │ (slots 1-6)      │  │ /v1/chat/...     │  ◄── apps        │ │
-│  │  │                  │  │ /v1/images/...   │                   │ │
-│  │  └──────────────────┘  └──────────────────┘                   │ │
-│  │                                                                │ │
-│  │  ┌──────────────────┐  ┌──────────────────┐                   │ │
-│  │  │ App registry     │  │ /metrics         │  ◄── Prometheus   │ │
-│  │  │ (PostgreSQL)     │  │ (backend +       │                   │ │
-│  │  │                  │  │  agent fwd)      │                   │ │
-│  │  └──────────────────┘  └──────────────────┘                   │ │
-│  └────────────────────────────────────────────────────────────────┘ │
-│                                                                     │
-│  ┌──────────────┐                                                   │
-│  │  PostgreSQL  │  DATABASE_URL=postgresql://llm:llm@postgres/     │ │
-│  │  (StatefulSet│  llmmanager                                      │ │
-│  └──────────────┘                                                   │
-└─────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────────┐
+│  GPU Host (murderbot, bare metal, 10.100.20.19)                          │
+│                                                                          │
+│  Ollama :11434 ──┐                                                       │
+│  ComfyUI :8188 ──┤── llm-agent :8090 (docker compose)                   │
+│                  │   - PSK-authenticated REST API                         │
+│                  │   - Self-registers with backend on startup             │
+│                  │   - Sends heartbeat every 30s                          │
+└──────────────────┼───────────────────────────────────────────────────────┘
+                   │
+              HTTPS (TLS via cert-manager)
+              https://llm-manager-backend.amer.dev
+                   │
+┌──────────────────┼───────────────────────────────────────────────────────┐
+│  k3s cluster     ▼                                                       │
+│                                                                          │
+│  Traefik (10.100.20.203:443) ──► llm-manager-backend :8081               │
+│      ClusterIP Service                                                   │
+│                                                                          │
+│  llm-manager-backend (Deployment, 1 replica)                             │
+│  ├── Runner registry (active GPU nodes, heartbeat < 90s)                 │
+│  ├── Moltbook agent runner (slots 1–6, DB-backed state)                  │
+│  ├── OpenAI-compatible proxy: /v1/chat/completions, /v1/images/...       │
+│  ├── App registry (API key auth for external apps)                       │
+│  └── Prometheus metrics                                                  │
+│                                                                          │
+│  PostgreSQL :5432 (Longhorn-backed PVC, daily S3 backup)                 │
+│  llm-manager UI  :80  → https://llm-manager.amer.dev (tailscale-only)   │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+### External app integration
+
+```
+moltbook-frontend → moltbook-controller → llm-manager-backend (https)
+home-assistant    → /v1/chat/completions (API key)
+voice assistants  → /v1/chat/completions (API key)
 ```
 
 ## Components
 
-### `agent/` — LLM Agent (runs on GPU host)
+### `agent/` — LLM Agent (runs on each GPU host)
 
-Docker compose service that runs on murderbot alongside Ollama and ComfyUI.
+Docker Compose service deployed on the GPU machine alongside Ollama and ComfyUI.
 
-- **Port:** 8090
-- **Proxies:** Ollama (11434), ComfyUI (8188)
-- **Metrics:** GPU VRAM, CPU, memory, request counters
+- **Port:** 8090 (PSK-authenticated on all endpoints except `/health`, `/metrics`)
+- **Wraps:** Ollama (text inference) + ComfyUI (image generation)
+- **Auth:** All requests require `X-Agent-PSK` header matching `LLM_MANAGER_AGENT_PSK`
 
-See [agent/README.md](agent/README.md) for installation instructions.
+See [agent/README.md](agent/README.md) for installation.
 
-### `backend/` — Backend (k8s DaemonSet)
+### `backend/` — Backend (k8s Deployment)
 
-Expanded from the moltbook-manager backend. Runs on each GPU-labeled k8s node.
+Stateless service running in k8s. Discovers GPU runners from DB (heartbeat < 90s).
 
 - **Port:** 8081
-- **Connects to:** local llm-agent at `http://localhost:8090`
-- **Persists to:** PostgreSQL (`DATABASE_URL`)
-- **Provides:** OpenAI-compatible API proxy, app registry, moltbook agent management
+- **State:** PostgreSQL only — no local files, no volumes
+- **Replicas:** 1 (scale to 2 requires distributed locking for moltbook runners)
 
-## Quick start (development)
+### `ui/` — React dashboard
 
-### Agent (on GPU host)
+Vite+React SPA served by nginx in k8s. Proxies `/api/*` to the backend container.
+Accessible at `https://llm-manager.amer.dev` — tailscale-only middleware applied.
+
+---
+
+## Networking & DNS
+
+### How agents reach the backend
+
+All agent → backend traffic goes over **HTTPS** via `llm-manager-backend.amer.dev`.
+This hostname is created automatically by `external-dns` from the backend `Ingress`
+annotation (`external-dns.alpha.kubernetes.io/hostname`). DNS A records point to the
+Traefik load balancer IP (10.100.20.203).
+
+```
+agent → https://llm-manager-backend.amer.dev → Traefik → ClusterIP → backend pod
+```
+
+No NodePort is exposed. The backend ingress does **not** apply the tailscale-only
+middleware — PSK authentication (header `X-Agent-PSK`) protects all runner endpoints.
+
+### DNS resolution requirement on GPU hosts
+
+`amer.dev` records are hosted on **DigitalOcean DNS** (public authoritative DNS).
+However, Debian's default `nsswitch.conf` has:
+
+```
+hosts: files myhostname mdns4_minimal [NOTFOUND=return] dns
+```
+
+The `[NOTFOUND=return]` causes `mdns4_minimal` to short-circuit lookups before the
+real DNS server is consulted. This prevents `llm-manager-backend.amer.dev` from
+resolving on the GPU host and inside Docker containers.
+
+**Fix** — edit `/etc/nsswitch.conf` on each GPU host:
+
+```diff
+-hosts: files myhostname mdns4_minimal [NOTFOUND=return] dns
++hosts: files myhostname mdns4_minimal dns
+```
+
+No daemon restart needed. Verify with: `getent hosts llm-manager-backend.amer.dev`
+
+### Agent `AGENT_ADDRESS` must use a stable IP
+
+The backend pod needs to reach back to the agent for proxied requests. Use the
+host's stable LAN IP, not an mDNS `.amer.home` or `.local` name — those won't
+resolve from inside k8s pods.
+
+```bash
+# Good
+AGENT_ADDRESS=http://10.100.20.19:8090
+
+# Bad — mDNS names don't resolve from k8s pods
+AGENT_ADDRESS=http://murderbot.amer.home:8090
+```
+
+### Traffic path summary
+
+| Direction | Path | Auth | TLS |
+|-----------|------|------|-----|
+| agent → backend (register/heartbeat) | `https://llm-manager-backend.amer.dev` | `X-Agent-PSK` header | Yes (cert-manager) |
+| backend → agent (proxy inference) | `http://<agent-ip>:8090` | `X-Agent-PSK` header | No (LAN) |
+| browser → UI | `https://llm-manager.amer.dev` | Tailscale IP allowlist | Yes |
+| apps → backend API | `https://llm-manager-backend.amer.dev` | `Authorization: Bearer <api_key>` | Yes |
+
+> **Note:** Backend → agent traffic is unencrypted (LAN only, PSK still validates identity).
+> If the agent host is on a different network segment, consider a tunnel or adding TLS
+> to the agent container.
+
+---
+
+## Agent Installation
+
+### Prerequisites
+
+- Docker + Docker Compose with NVIDIA runtime
+- Ollama running on the host (not in Docker) at port 11434
+- LAN access to the k3s cluster
+
+### Setup
 
 ```bash
 cd agent/
-bash install.sh
-# or manually:
+cp .env.example .env
+# Edit .env — set LLM_MANAGER_AGENT_PSK, BACKEND_URL, AGENT_ADDRESS
+nano .env
+
 docker compose up -d
+docker compose logs -f   # confirm "Registered with backend as runner_id=N"
 ```
 
-### Backend (local dev)
+### `.env` reference
 
 ```bash
-cd backend/
-pip install -r requirements.txt
-DATABASE_URL=postgresql://llm:llm@localhost:5432/llmmanager \
-  AGENT_URL=http://localhost:8090 \
-  python main.py
+# PSK — must match llm-manager-agent-psk Bitwarden secret / k8s ExternalSecret
+LLM_MANAGER_AGENT_PSK=your-psk-here
+
+# Backend URL — always use HTTPS (PSK would be in cleartext over HTTP)
+BACKEND_URL=https://llm-manager-backend.amer.dev
+
+# This host's stable LAN IP (mDNS names won't resolve from k8s pods)
+AGENT_ADDRESS=http://10.100.20.19:8090
 ```
 
+### Auto-start on boot
+
+```bash
+bash install.sh   # installs systemd user service
+```
+
+---
+
 ## Backend API
+
+### Runner Management
+
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| POST | `/api/runners/register` | PSK | Agent self-registration on startup |
+| POST | `/api/runners/heartbeat` | PSK | Agent heartbeat (every 30s) |
+| GET  | `/api/runners` | PSK | List active runners (last 90s) |
 
 ### LLM Management
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/llm/status` | Agent status (GPU, models, ComfyUI) |
+| GET | `/api/llm/status` | GPU stats, loaded models, ComfyUI state |
 | GET | `/api/llm/models` | List all models (text + image) |
 | POST | `/api/llm/models/pull` | Pull an Ollama model |
 | DELETE | `/api/llm/models/{model}` | Unload model from VRAM |
 | POST | `/api/llm/comfyui/checkpoint` | Switch ComfyUI checkpoint |
 | GET | `/api/llm/checkpoints` | List available checkpoints |
 
-### OpenAI-Compatible Proxy
+All LLM endpoints accept `?runner_id=N` to target a specific GPU node.
+
+### OpenAI-Compatible Inference
 
 | Method | Path | Description |
 |--------|------|-------------|
 | POST | `/v1/chat/completions` | Chat completions (streaming supported) |
-| POST | `/v1/images/generations` | Image generation |
+| POST | `/v1/images/generations` | Image generation via ComfyUI |
+
+Apps authenticate with `Authorization: Bearer <api_key>` (get key from `/api/apps/register`).
 
 ### App Registry
 
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/apps` | List registered apps |
-| POST | `/api/apps/register` | Register app → returns api_key |
-| POST | `/api/apps/heartbeat` | Update app last_seen (Bearer auth) |
+| POST | `/api/apps/register` | Register app → returns `api_key` |
+| POST | `/api/apps/heartbeat` | Update app `last_seen` (Bearer auth) |
 | DELETE | `/api/apps/{api_key}` | Deregister app |
 
-### Moltbook (existing)
+### Moltbook Agents
 
 | Method | Path | Description |
 |--------|------|-------------|
-| GET | `/api/agents` | List moltbook agent slots |
+| GET | `/api/agents` | List agent slots 1–6 |
 | PATCH | `/api/agents/{slot}` | Update agent config |
 | POST | `/api/agents/{slot}/start` | Start agent |
 | POST | `/api/agents/{slot}/stop` | Stop agent |
 | GET | `/api/agents/{slot}/activity` | Recent activity log |
-| POST | `/api/agents/{slot}/register` | Register with moltbook.com |
+| POST | `/api/agents/{slot}/register` | Register with moltbook |
 
 ### Metrics
 
 | Path | Description |
 |------|-------------|
-| `GET /metrics` | Prometheus — backend metrics + forwarded agent metrics |
+| GET `/metrics` | Prometheus — backend + forwarded agent metrics |
+| GET `/health` | Liveness/readiness probe |
 
-## Environment variables
+---
 
-### Agent
+## Environment Variables
+
+### Agent (`agent/.env`)
 
 | Variable | Default | Description |
 |----------|---------|-------------|
+| `LLM_MANAGER_AGENT_PSK` | *(required)* | Shared PSK — must match backend |
+| `BACKEND_URL` | *(required)* | Backend HTTPS URL for self-registration |
+| `AGENT_ADDRESS` | *(required)* | This host's address (stable LAN IP) |
 | `OLLAMA_URL` | `http://host.docker.internal:11434` | Ollama URL |
 | `COMFYUI_URL` | `http://host.docker.internal:8188` | ComfyUI URL |
-| `COMFYUI_OUTPUT_DIR` | `/outputs` | Output image directory (in container) |
+| `COMFYUI_OUTPUT_DIR` | `/outputs` | Output directory (in container) |
 
-### Backend
+### Backend (`gitops/backend/deployment.yaml`)
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `DATABASE_URL` | `postgresql://llm:llm@localhost:5432/llmmanager` | PostgreSQL DSN |
-| `AGENT_URL` | `http://localhost:8090` | Local llm-agent URL |
-| `OLLAMA_BASE_URL` | `http://host.docker.internal:11434` | Ollama URL (for direct VRAM checks) |
+| Variable | Source | Description |
+|----------|--------|-------------|
+| `DATABASE_URL` | ExternalSecret `postgres-credentials` | PostgreSQL DSN |
+| `LLM_MANAGER_AGENT_PSK` | ExternalSecret `agent-psk` | PSK for runner auth |
 
-## Database schema
+---
 
-```sql
--- LLM nodes seen in the last 5 minutes
-CREATE TABLE llm_agents (
-    id SERIAL PRIMARY KEY,
-    node_name TEXT UNIQUE NOT NULL,
-    host TEXT NOT NULL,
-    port INT NOT NULL DEFAULT 8090,
-    last_seen TIMESTAMPTZ,
-    capabilities JSONB DEFAULT '{}'::jsonb,
-    created_at TIMESTAMPTZ DEFAULT NOW()
-);
+## Database
 
--- Apps registered to use the LLM proxy API
-CREATE TABLE registered_apps (
-    id SERIAL PRIMARY KEY,
-    name TEXT UNIQUE NOT NULL,
-    base_url TEXT,
-    api_key TEXT UNIQUE NOT NULL,
-    last_seen TIMESTAMPTZ,
-    metadata JSONB DEFAULT '{}'::jsonb,
-    created_at TIMESTAMPTZ DEFAULT NOW()
-);
+PostgreSQL 16 in the `llm-manager` namespace. Schema is created automatically by
+`init_db()` on first backend startup.
+
+**Storage:** Longhorn PVC (`postgres-data`, 10Gi, 3 replicas)
+
+**Backup:** Daily at 2am to `s3://amerenda-backups@us/k3s/dean` via Longhorn
+recurring job. The PVC has `recurring-job-group.longhorn.io/default: enabled`.
+
+**Disaster recovery:** If the PVC is lost, restore from the last Longhorn backup.
+All runner registrations are ephemeral (agents re-register on restart). Moltbook
+agent configs, state, conversation history, and peer data are lost without a backup.
+
+---
+
+## Secrets
+
+All secrets are in Bitwarden and synced via External Secrets Operator:
+
+| Bitwarden key | k8s Secret | Field | Used by |
+|--------------|-----------|-------|---------|
+| `llm-manager-agent-psk` | `agent-psk` | `psk` | backend deployment, agent `.env` |
+| `llm-manager-postgres-password` | `postgres-credentials` | `postgres-password` | postgres deployment |
+| `llm-manager-postgres-url` | `postgres-credentials` | `postgres-url` | backend deployment |
+
+---
+
+## GitOps
+
+Manifests live in `gitops/`. ArgoCD (via `root-app.yaml` in `amerenda-k3s`) applies
+them with `directory.recurse: true`.
+
+```
+gitops/
+├── namespace.yaml
+├── middleware.yaml          # tailscale-only IP allowlist
+├── ingress.yaml             # UI: llm-manager.amer.dev (tailscale-only)
+├── servicemonitor.yaml      # Prometheus scrape config
+├── backend/
+│   ├── deployment.yaml
+│   ├── service.yaml         # ClusterIP :8081
+│   ├── ingress.yaml         # Backend: llm-manager-backend.amer.dev (no tailscale, PSK auth)
+│   └── externalsecret.yaml  # agent-psk
+├── postgres/
+│   ├── deployment.yaml
+│   ├── service.yaml
+│   ├── pvc.yaml             # Longhorn, 10Gi
+│   └── externalsecret.yaml  # postgres-credentials
+└── ui/
+    ├── deployment.yaml
+    └── service.yaml
 ```
 
-Tables are created automatically on first startup via `init_db()`.
+CI (`.github/workflows/build.yaml`) builds and pushes Docker images on every push
+to `main`, then updates the image tags in `gitops/backend/deployment.yaml` and
+`gitops/ui/deployment.yaml` via a commit.
