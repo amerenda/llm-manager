@@ -16,10 +16,9 @@ export interface LlmStatus {
 // A model entry from GET /api/llm/models
 export interface LlmModel {
   id: string
-  name: string
   type: 'text' | 'image'
-  size_gb: number
-  is_loaded: boolean
+  owned_by: string
+  created: number
 }
 
 // A registered GPU/TTS runner from GET /api/runners

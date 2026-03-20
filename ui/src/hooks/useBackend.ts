@@ -40,7 +40,7 @@ export function useLlmStatus() {
 export function useLlmModels() {
   return useQuery<LlmModel[]>({
     queryKey: ['llm-models'],
-    queryFn: () => get('/api/llm/models'),
+    queryFn: () => get<{ data: LlmModel[] }>('/api/llm/models').then(r => r.data),
     refetchInterval: 15_000,
   })
 }

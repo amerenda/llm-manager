@@ -84,44 +84,26 @@ function TextModelsSection() {
             <thead>
               <tr className="border-b border-gray-800 text-xs text-gray-500 uppercase tracking-wide">
                 <th className="text-left px-4 py-3 font-medium">Model</th>
-                <th className="text-left px-4 py-3 font-medium">Size</th>
-                <th className="text-left px-4 py-3 font-medium">Status</th>
                 <th className="px-4 py-3" />
               </tr>
             </thead>
             <tbody>
               {textModels.map((m: LlmModel) => (
                 <tr key={m.id} className="border-b border-gray-800 last:border-0 hover:bg-gray-800/40 transition-colors">
-                  <td className="px-4 py-3 text-gray-200 font-medium truncate max-w-xs">{m.name}</td>
-                  <td className="px-4 py-3 text-gray-400 tabular-nums">{m.size_gb.toFixed(1)} GB</td>
-                  <td className="px-4 py-3">
-                    {m.is_loaded ? (
-                      <span className="inline-flex items-center gap-1 bg-green-900/40 text-green-400 text-xs px-2 py-0.5 rounded-full">
-                        <span className="w-1.5 h-1.5 rounded-full bg-green-400" />
-                        Loaded
-                      </span>
-                    ) : (
-                      <span className="inline-flex items-center gap-1 bg-gray-800 text-gray-500 text-xs px-2 py-0.5 rounded-full">
-                        <span className="w-1.5 h-1.5 rounded-full bg-gray-600" />
-                        Available
-                      </span>
-                    )}
-                  </td>
+                  <td className="px-4 py-3 text-gray-200 font-medium truncate max-w-xs">{m.id}</td>
                   <td className="px-4 py-3 text-right">
                     <div className="flex items-center justify-end gap-2">
-                      {!m.is_loaded && (
-                        <button
-                          onClick={() => pull.mutate(m.name)}
-                          disabled={pull.isPending}
-                          title="Load model"
-                          className="flex items-center gap-1 text-xs bg-brand-900/50 hover:bg-brand-800/50 text-brand-300 px-2.5 py-1 rounded-lg transition-colors disabled:opacity-40"
-                        >
-                          {pull.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Download className="w-3 h-3" />}
-                          Load
-                        </button>
-                      )}
                       <button
-                        onClick={() => del.mutate(m.name)}
+                        onClick={() => pull.mutate(m.id)}
+                        disabled={pull.isPending}
+                        title="Load model"
+                        className="flex items-center gap-1 text-xs bg-brand-900/50 hover:bg-brand-800/50 text-brand-300 px-2.5 py-1 rounded-lg transition-colors disabled:opacity-40"
+                      >
+                        {pull.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Download className="w-3 h-3" />}
+                        Load
+                      </button>
+                      <button
+                        onClick={() => del.mutate(m.id)}
                         disabled={del.isPending}
                         title="Delete model"
                         className="p-1.5 rounded-lg bg-gray-800 hover:bg-red-900/50 hover:text-red-400 text-gray-500 transition-colors"
