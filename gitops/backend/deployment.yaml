@@ -39,6 +39,11 @@ spec:
                 secretKeyRef:
                   name: agent-psk
                   key: psk
+            - name: LLM_MANAGER_REGISTRATION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: registration-secret
+                  key: secret
           readinessProbe:
             httpGet:
               path: /health

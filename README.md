@@ -199,11 +199,36 @@ bash install.sh   # installs systemd user service
 | GET | `/api/llm/status` | GPU stats, loaded models, ComfyUI state |
 | GET | `/api/llm/models` | List all models (text + image) |
 | POST | `/api/llm/models/pull` | Pull an Ollama model |
+| POST | `/api/llm/models/load` | Load model into VRAM (keep_alive=-1) |
+| POST | `/api/llm/models/unload` | Unload model from VRAM |
 | DELETE | `/api/llm/models/{model}` | Unload model from VRAM |
 | POST | `/api/llm/comfyui/checkpoint` | Switch ComfyUI checkpoint |
 | GET | `/api/llm/checkpoints` | List available checkpoints |
 
 All LLM endpoints accept `?runner_id=N` to target a specific GPU node.
+
+### Profiles
+
+Profiles define named configurations of models/checkpoints to load on GPU runners.
+Each profile supports safe/unsafe model variants, instance counts, and advanced
+parameters (context window, temperature, etc).
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/profiles` | List all profiles |
+| POST | `/api/profiles` | Create profile |
+| GET | `/api/profiles/{id}` | Get profile with entries |
+| PATCH | `/api/profiles/{id}` | Update profile (name, unsafe_enabled) |
+| DELETE | `/api/profiles/{id}` | Delete profile (not default) |
+| POST | `/api/profiles/{id}/models` | Add model entry |
+| PATCH | `/api/profiles/{id}/models/{eid}` | Update model entry |
+| DELETE | `/api/profiles/{id}/models/{eid}` | Remove model entry |
+| POST | `/api/profiles/{id}/images` | Add image checkpoint entry |
+| DELETE | `/api/profiles/{id}/images/{eid}` | Remove image entry |
+| POST | `/api/profiles/{id}/activate` | Activate profile on runner |
+| POST | `/api/profiles/{id}/deactivate` | Return runner to ad-hoc mode |
+| GET | `/api/profiles/activations` | List all runner-profile mappings |
+| GET | `/api/profiles/list` | App-authenticated profile discovery |
 
 ### OpenAI-Compatible Inference
 
@@ -214,14 +239,29 @@ All LLM endpoints accept `?runner_id=N` to target a specific GPU node.
 
 Apps authenticate with `Authorization: Bearer <api_key>` (get key from `/api/apps/register`).
 
-### App Registry
+### App Registry & Auto-Discovery
+
+Apps can register manually via the UI or auto-discover via the discovery endpoint.
+Auto-discovery requires a shared registration secret (Bitwarden: `llm-manager-registration-secret`).
 
 | Method | Path | Description |
 |--------|------|-------------|
 | GET | `/api/apps` | List registered apps |
-| POST | `/api/apps/register` | Register app → returns `api_key` |
+| POST | `/api/apps/register` | Manual register → returns `api_key` |
+| POST | `/api/apps/discover` | Auto-discovery (registration secret required) |
+| POST | `/api/apps/{id}/approve` | Approve pending app → pushes key to app |
+| PATCH | `/api/apps/{id}/permissions` | Toggle profile switching permission |
 | POST | `/api/apps/heartbeat` | Update app `last_seen` (Bearer auth) |
 | DELETE | `/api/apps/{api_key}` | Deregister app |
+
+**Auto-discovery flow:**
+
+1. App starts with `LLM_MANAGER_URL` and `LLM_MANAGER_REGISTRATION_SECRET` env vars
+2. App calls `POST /api/apps/discover` with `{name, base_url, registration_secret}`
+3. First time: app appears as "pending" in llm-manager UI
+4. Admin approves in UI → llm-manager pushes API key to `{base_url}/.well-known/llm-manager/register`
+5. On subsequent restarts, discover returns `{status: "approved", api_key: "..."}` — app holds key in memory
+6. App uses key for heartbeats and API calls (fully stateless)
 
 ### Moltbook Agents
 
@@ -262,6 +302,7 @@ Apps authenticate with `Authorization: Bearer <api_key>` (get key from `/api/app
 |----------|--------|-------------|
 | `DATABASE_URL` | ExternalSecret `postgres-credentials` | PostgreSQL DSN |
 | `LLM_MANAGER_AGENT_PSK` | ExternalSecret `agent-psk` | PSK for runner auth |
+| `LLM_MANAGER_REGISTRATION_SECRET` | ExternalSecret `registration-secret` | Shared secret for app auto-discovery |
 
 ---
 
@@ -288,6 +329,7 @@ All secrets are in Bitwarden and synced via External Secrets Operator:
 | Bitwarden key | k8s Secret | Field | Used by |
 |--------------|-----------|-------|---------|
 | `llm-manager-agent-psk` | `agent-psk` | `psk` | backend deployment, agent `.env` |
+| `llm-manager-registration-secret` | `registration-secret` | `secret` | backend deployment, client apps |
 | `llm-manager-postgres-password` | `postgres-credentials` | `postgres-password` | postgres deployment |
 | `llm-manager-postgres-url` | `postgres-credentials` | `postgres-url` | backend deployment |
 
@@ -322,3 +364,32 @@ gitops/
 CI (`.github/workflows/build.yaml`) builds and pushes Docker images on every push
 to `main`, then updates the image tags in `gitops/backend/deployment.yaml` and
 `gitops/ui/deployment.yaml` via a commit.
+
+---
+
+## Future: LLMRouter Integration
+
+[LLMRouter](https://github.com/ulab-uiuc/LLMRouter) (UIUC) and
+[RouteLLM](https://github.com/lm-sys/RouteLLM) (LMSYS/Berkeley) are **query-level
+routing** libraries. They analyze incoming prompts and decide which model should
+handle them (e.g., "simple question → 7B model, complex reasoning → 32B model").
+
+**They are complementary, not replacements** for llm-manager:
+
+- LLMRouter/RouteLLM pick the best model per query (prompt classification)
+- llm-manager manages the infrastructure (VRAM, model lifecycle, GPU runners)
+- Neither routing library can load/unload models, manage VRAM, or orchestrate GPUs
+
+**When it would make sense to add:**
+
+- When running multiple models concurrently (e.g., second GPU added, enough VRAM
+  for both 7B and 32B models loaded simultaneously)
+- A routing layer would sit in front of `/v1/chat/completions` and auto-select
+  the right model per query, while llm-manager ensures the models are loaded
+- Not useful with a single model loaded — there's nothing to route between
+
+**Key projects:**
+
+- `llmrouter-lib` (pip) — 16+ routing algorithms (KNN, SVM, BERT, Elo), Gradio UI
+- `routellm` (pip) — Strong/weak model routing, OpenAI-compatible drop-in server
+- NVIDIA LLM Router Blueprint — Intent classification with Qwen 1.7B or CLIP

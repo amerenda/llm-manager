@@ -4,6 +4,7 @@ import { Dashboard } from './pages/Dashboard'
 import { Models } from './pages/Models'
 import { Apps } from './pages/Apps'
 import { Runners } from './pages/Runners'
+import { Profiles } from './pages/Profiles'
 
 export default function App() {
   return (
@@ -14,6 +15,7 @@ export default function App() {
           <Route path="/" element={<Dashboard />} />
           <Route path="/runners" element={<Runners />} />
           <Route path="/models" element={<Models />} />
+          <Route path="/profiles" element={<Profiles />} />
           <Route path="/apps" element={<Apps />} />
         </Routes>
       </main>

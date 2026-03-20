@@ -45,6 +45,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 AGENT_PSK = os.environ.get("LLM_MANAGER_AGENT_PSK", "")
+REGISTRATION_SECRET = os.environ.get("LLM_MANAGER_REGISTRATION_SECRET", "")
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://llm:llm@localhost:5432/llmmanager")
 NODE = socket.gethostname()
 API_BASE = "https://www.moltbook.com/api/v1"
@@ -690,6 +691,9 @@ async def list_apps():
         key = a_copy.get("api_key", "")
         a_copy["api_key_preview"] = key[:8] + "..." if len(key) >= 8 else key
         del a_copy["api_key"]
+        # Ensure new fields are present (for backwards compatibility)
+        a_copy.setdefault("status", "active")
+        a_copy.setdefault("allow_profile_switch", False)
         result.append(a_copy)
     return result
 
@@ -743,6 +747,391 @@ async def remove_app(api_key: str):
         raise HTTPException(status_code=404, detail="App not found")
     _inc_request("/api/apps/delete", "DELETE", 200)
     return {"ok": True}
+
+
+# ── App discovery ────────────────────────────────────────────────────────────
+
+class AppDiscoverRequest(BaseModel):
+    name: str
+    base_url: str
+    registration_secret: str
+    capabilities: list[str] = []
+
+
+@app.post("/api/apps/discover")
+async def discover_app_endpoint(req: AppDiscoverRequest):
+    """Auto-discovery endpoint. Apps call this on startup to register or retrieve their key."""
+    _inc_request("/api/apps/discover", "POST", 200)
+    if not REGISTRATION_SECRET:
+        raise HTTPException(400, "Registration secret not configured on server")
+    if req.registration_secret != REGISTRATION_SECRET:
+        raise HTTPException(403, "Invalid registration secret")
+    result = await db.discover_app(
+        app.state.db, req.name, req.base_url, req.capabilities
+    )
+    return result
+
+
+@app.post("/api/apps/{app_id}/approve")
+async def approve_app_endpoint(app_id: int):
+    """Approve a pending app and push the API key to it."""
+    _inc_request("/api/apps/approve", "POST", 200)
+    pool = app.state.db
+    api_key = await db.approve_app(pool, app_id)
+    if api_key is None:
+        raise HTTPException(404, "App not found")
+    # Get the app's base_url to push the key
+    app_row = await db.get_app_by_api_key(pool, api_key)
+    push_result = None
+    if app_row and app_row.get("base_url"):
+        try:
+            async with httpx.AsyncClient(timeout=10) as c:
+                r = await c.post(
+                    f"{app_row['base_url'].rstrip('/')}/.well-known/llm-manager/register",
+                    json={"api_key": api_key},
+                )
+                push_result = {"pushed": True, "status": r.status_code}
+        except Exception as e:
+            push_result = {"pushed": False, "error": str(e)}
+    return {"ok": True, "api_key": api_key, "push_result": push_result}
+
+
+class AppPermissionsRequest(BaseModel):
+    allow_profile_switch: bool
+
+
+@app.patch("/api/apps/{app_id}/permissions")
+async def update_app_permissions_endpoint(app_id: int, req: AppPermissionsRequest):
+    """Update permissions for an app."""
+    _inc_request("/api/apps/permissions", "PATCH", 200)
+    found = await db.update_app_permissions(app.state.db, app_id, req.allow_profile_switch)
+    if not found:
+        raise HTTPException(404, "App not found")
+    return {"ok": True}
+
+
+# ── Model load/unload (ad-hoc) ───────────────────────────────────────────────
+
+class ModelLoadRequest(BaseModel):
+    model: str
+    keep_alive: str = "-1"
+
+
+@app.post("/api/llm/models/load")
+async def llm_load_model(req: ModelLoadRequest, runner_id: Optional[int] = None):
+    """Load a model into VRAM on a runner."""
+    _inc_request("/api/llm/models/load", "POST", 200)
+    try:
+        client = await _get_runner_client(app.state.db, runner_id)
+        return await client.load_model(req.model, req.keep_alive)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise _agent_unavailable(f"Runner error: {e}")
+
+
+class ModelUnloadRequest(BaseModel):
+    model: str
+
+
+@app.post("/api/llm/models/unload")
+async def llm_unload_model(req: ModelUnloadRequest, runner_id: Optional[int] = None):
+    """Unload a model from VRAM on a runner."""
+    _inc_request("/api/llm/models/unload", "POST", 200)
+    try:
+        client = await _get_runner_client(app.state.db, runner_id)
+        return await client.unload_model(req.model)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise _agent_unavailable(f"Runner error: {e}")
+
+
+# ── Profiles ──────────────────────────────────────────────────────────────────
+
+class ProfileCreateRequest(BaseModel):
+    name: str
+    unsafe_enabled: bool = False
+
+
+class ProfileUpdateRequest(BaseModel):
+    name: Optional[str] = None
+    unsafe_enabled: Optional[bool] = None
+
+
+class ProfileModelEntryRequest(BaseModel):
+    model_safe: str
+    model_unsafe: Optional[str] = None
+    count: int = 1
+    label: Optional[str] = None
+    parameters: dict = {}
+
+
+class ProfileImageEntryRequest(BaseModel):
+    checkpoint_safe: str
+    checkpoint_unsafe: Optional[str] = None
+    label: Optional[str] = None
+    parameters: dict = {}
+
+
+class ProfileActivateRequest(BaseModel):
+    runner_id: int
+    force: bool = False
+
+
+@app.get("/api/profiles")
+async def list_profiles():
+    _inc_request("/api/profiles", "GET", 200)
+    return await db.get_all_profiles(app.state.db)
+
+
+@app.post("/api/profiles")
+async def create_profile(req: ProfileCreateRequest):
+    _inc_request("/api/profiles", "POST", 200)
+    profile_id = await db.create_profile(app.state.db, req.name, req.unsafe_enabled)
+    return {"ok": True, "id": profile_id}
+
+
+@app.get("/api/profiles/{profile_id}")
+async def get_profile(profile_id: int):
+    _inc_request("/api/profiles/detail", "GET", 200)
+    profile = await db.get_profile(app.state.db, profile_id)
+    if not profile:
+        raise HTTPException(404, "Profile not found")
+    return profile
+
+
+@app.patch("/api/profiles/{profile_id}")
+async def update_profile(profile_id: int, req: ProfileUpdateRequest):
+    _inc_request("/api/profiles/update", "PATCH", 200)
+    kwargs = {k: v for k, v in req.model_dump().items() if v is not None}
+    if not kwargs:
+        return {"ok": True}
+    found = await db.update_profile(app.state.db, profile_id, **kwargs)
+    if not found:
+        raise HTTPException(404, "Profile not found")
+    return {"ok": True}
+
+
+@app.delete("/api/profiles/{profile_id}")
+async def delete_profile(profile_id: int):
+    _inc_request("/api/profiles/delete", "DELETE", 200)
+    try:
+        found = await db.delete_profile(app.state.db, profile_id)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    if not found:
+        raise HTTPException(404, "Profile not found")
+    return {"ok": True}
+
+
+# ── Profile model entries ────────────────────────────────────────────────────
+
+@app.post("/api/profiles/{profile_id}/models")
+async def add_profile_model(profile_id: int, req: ProfileModelEntryRequest):
+    _inc_request("/api/profiles/models", "POST", 200)
+    entry_id = await db.add_profile_model_entry(
+        app.state.db, profile_id,
+        model_safe=req.model_safe,
+        model_unsafe=req.model_unsafe,
+        count=req.count,
+        label=req.label,
+        parameters=req.parameters,
+    )
+    return {"ok": True, "id": entry_id}
+
+
+@app.patch("/api/profiles/{profile_id}/models/{entry_id}")
+async def update_profile_model(profile_id: int, entry_id: int, req: ProfileModelEntryRequest):
+    _inc_request("/api/profiles/models/update", "PATCH", 200)
+    kwargs = {k: v for k, v in req.model_dump().items() if v is not None}
+    found = await db.update_profile_model_entry(app.state.db, entry_id, **kwargs)
+    if not found:
+        raise HTTPException(404, "Entry not found")
+    return {"ok": True}
+
+
+@app.delete("/api/profiles/{profile_id}/models/{entry_id}")
+async def delete_profile_model(profile_id: int, entry_id: int):
+    _inc_request("/api/profiles/models/delete", "DELETE", 200)
+    found = await db.delete_profile_model_entry(app.state.db, entry_id)
+    if not found:
+        raise HTTPException(404, "Entry not found")
+    return {"ok": True}
+
+
+# ── Profile image entries ────────────────────────────────────────────────────
+
+@app.post("/api/profiles/{profile_id}/images")
+async def add_profile_image(profile_id: int, req: ProfileImageEntryRequest):
+    _inc_request("/api/profiles/images", "POST", 200)
+    entry_id = await db.add_profile_image_entry(
+        app.state.db, profile_id,
+        checkpoint_safe=req.checkpoint_safe,
+        checkpoint_unsafe=req.checkpoint_unsafe,
+        label=req.label,
+        parameters=req.parameters,
+    )
+    return {"ok": True, "id": entry_id}
+
+
+@app.patch("/api/profiles/{profile_id}/images/{entry_id}")
+async def update_profile_image(profile_id: int, entry_id: int, req: ProfileImageEntryRequest):
+    _inc_request("/api/profiles/images/update", "PATCH", 200)
+    kwargs = {k: v for k, v in req.model_dump().items() if v is not None}
+    found = await db.update_profile_image_entry(app.state.db, entry_id, **kwargs)
+    if not found:
+        raise HTTPException(404, "Entry not found")
+    return {"ok": True}
+
+
+@app.delete("/api/profiles/{profile_id}/images/{entry_id}")
+async def delete_profile_image(profile_id: int, entry_id: int):
+    _inc_request("/api/profiles/images/delete", "DELETE", 200)
+    found = await db.delete_profile_image_entry(app.state.db, entry_id)
+    if not found:
+        raise HTTPException(404, "Entry not found")
+    return {"ok": True}
+
+
+# ── Profile activation ──────────────────────────────────────────────────────
+
+@app.post("/api/profiles/{profile_id}/activate")
+async def activate_profile_endpoint(
+    profile_id: int,
+    req: ProfileActivateRequest,
+    request: Request,
+):
+    """Activate a profile on a runner. Supports both UI calls and app API key auth."""
+    _inc_request("/api/profiles/activate", "POST", 200)
+    pool = app.state.db
+
+    # Check if this is an app calling via API key
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        api_key = auth.removeprefix("Bearer ").strip()
+        app_row = await db.get_app_by_api_key(pool, api_key)
+        if not app_row:
+            raise HTTPException(401, "Invalid API key")
+        if not app_row.get("allow_profile_switch"):
+            raise HTTPException(403, "App does not have profile switching permission")
+
+    # Validate profile exists
+    profile = await db.get_profile(pool, profile_id)
+    if not profile:
+        raise HTTPException(404, "Profile not found")
+
+    # Validate runner exists
+    runner = await db.get_runner_by_id(pool, req.runner_id)
+    if not runner:
+        raise HTTPException(404, "Runner not found or inactive")
+
+    # VRAM check
+    caps = runner.get("capabilities", {})
+    vram_total = caps.get("gpu_vram_total_bytes", 0)
+    vram_free = caps.get("gpu_vram_free_bytes", 0)
+    warnings = []
+
+    # Estimate VRAM needed (rough: query Ollama model sizes would be better, but
+    # for now we rely on the user's judgment + warning if many models)
+    model_count = sum(e.get("count", 1) for e in profile.get("model_entries", []))
+    if model_count > 3:
+        warnings.append(f"Profile loads {model_count} model instances — may exceed VRAM")
+
+    # Get the runner client for actual operations
+    try:
+        client = await _get_runner_client(pool, req.runner_id)
+    except HTTPException:
+        raise HTTPException(503, "Runner not reachable")
+
+    # Set activation status
+    await db.activate_profile(pool, req.runner_id, profile_id)
+
+    try:
+        # Step 1: Unload current models
+        if req.force:
+            # Force unload all loaded models
+            try:
+                status = await client.status()
+                for m in status.get("loaded_ollama_models", []):
+                    try:
+                        await client.unload_model(m["name"])
+                    except Exception as e:
+                        logger.warning("Failed to unload %s: %s", m["name"], e)
+            except Exception as e:
+                logger.warning("Could not get status for force-unload: %s", e)
+
+        # Step 2: Load profile models
+        use_unsafe = profile.get("unsafe_enabled", False)
+        for entry in profile.get("model_entries", []):
+            model = entry.get("model_unsafe") if use_unsafe and entry.get("model_unsafe") else entry["model_safe"]
+            for _ in range(entry.get("count", 1)):
+                try:
+                    await client.load_model(model)
+                except Exception as e:
+                    warnings.append(f"Failed to load {model}: {e}")
+
+        # Step 3: Switch image checkpoint if specified
+        for entry in profile.get("image_entries", []):
+            ckpt = entry.get("checkpoint_unsafe") if use_unsafe and entry.get("checkpoint_unsafe") else entry["checkpoint_safe"]
+            try:
+                await client.switch_checkpoint(ckpt)
+            except Exception as e:
+                warnings.append(f"Failed to switch checkpoint to {ckpt}: {e}")
+
+        await db.update_activation_status(pool, req.runner_id, "active")
+    except Exception as e:
+        await db.update_activation_status(pool, req.runner_id, "error")
+        raise HTTPException(500, f"Activation failed: {e}")
+
+    return {
+        "ok": True,
+        "profile": profile["name"],
+        "runner": runner["hostname"],
+        "warnings": warnings,
+        "vram_total_gb": round(vram_total / 1e9, 2) if vram_total else 0,
+        "vram_free_gb": round(vram_free / 1e9, 2) if vram_free else 0,
+    }
+
+
+@app.post("/api/profiles/{profile_id}/deactivate")
+async def deactivate_profile_endpoint(profile_id: int, runner_id: int):
+    _inc_request("/api/profiles/deactivate", "POST", 200)
+    await db.deactivate_profile(app.state.db, runner_id)
+    return {"ok": True}
+
+
+@app.get("/api/profiles/activations")
+async def list_activations():
+    _inc_request("/api/profiles/activations", "GET", 200)
+    return await db.get_all_activations(app.state.db)
+
+
+# ── Profile list for apps (authenticated by API key) ─────────────────────────
+
+@app.get("/api/profiles/list")
+async def list_profiles_for_apps(request: Request):
+    """Public-ish endpoint for apps to discover available profiles."""
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(401, "Missing or invalid Authorization header")
+    api_key = auth.removeprefix("Bearer ").strip()
+    app_row = await db.get_app_by_api_key(app.state.db, api_key)
+    if not app_row:
+        raise HTTPException(401, "Invalid API key")
+    profiles = await db.get_all_profiles(app.state.db)
+    # Return a slim view
+    return [
+        {
+            "id": p["id"],
+            "name": p["name"],
+            "is_default": p["is_default"],
+            "unsafe_enabled": p["unsafe_enabled"],
+            "model_entry_count": p.get("model_entry_count", 0),
+            "image_entry_count": p.get("image_entry_count", 0),
+        }
+        for p in profiles
+    ]
 
 
 # ── Prometheus metrics ────────────────────────────────────────────────────────

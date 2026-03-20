@@ -636,6 +636,32 @@ async def unload_model(model: str):
     return {"ok": True, "message": f"Model {model} unloaded from VRAM"}
 
 
+class LoadRequest(BaseModel):
+    model: str
+    keep_alive: str = "-1"  # -1 means forever
+
+
+@app.post("/v1/models/load")
+async def load_model(req: LoadRequest):
+    """Load a model into VRAM by sending a minimal generate request with keep_alive."""
+    requests_total.labels(node=NODE, endpoint="/v1/models/load", model=req.model).inc()
+    t0 = time.time()
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=120.0)) as c:
+            r = await c.post(
+                f"{OLLAMA_URL}/api/generate",
+                json={"model": req.model, "prompt": "", "keep_alive": req.keep_alive},
+            )
+            r.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Ollama unavailable: {e}")
+    finally:
+        request_duration.labels(node=NODE, endpoint="/v1/models/load", model=req.model).observe(time.time() - t0)
+    return {"ok": True, "message": f"Model {req.model} loaded into VRAM"}
+
+
 class CheckpointRequest(BaseModel):
     name: str
 

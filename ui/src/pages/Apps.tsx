@@ -1,6 +1,6 @@
 import { useState } from 'react'
-import { AppWindow, Plus, Loader2, CheckCircle2, AlertCircle, Copy, Check } from 'lucide-react'
-import { useApps, useRegisterApp } from '../hooks/useBackend'
+import { AppWindow, Plus, Loader2, CheckCircle2, AlertCircle, Copy, Check, ShieldCheck, Clock } from 'lucide-react'
+import { useApps, useRegisterApp, useApproveApp, useUpdateAppPermissions } from '../hooks/useBackend'
 import { StatusDot } from '../components/StatusDot'
 
 function relativeTime(iso: string | null): string {
@@ -44,12 +44,16 @@ function CopyButton({ text }: { text: string }) {
 export function Apps() {
   const apps = useApps()
   const register = useRegisterApp()
+  const approve = useApproveApp()
+  const updatePerms = useUpdateAppPermissions()
   const [name, setName] = useState('')
   const [url, setUrl] = useState('')
   const [generatedKey, setGeneratedKey] = useState<string | null>(null)
   const [regMsg, setRegMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
 
   const appList = apps.data ?? []
+  const pendingApps = appList.filter(a => a.status === 'pending')
+  const activeApps = appList.filter(a => a.status !== 'pending')
 
   async function handleRegister() {
     const trimName = name.trim()
@@ -79,11 +83,37 @@ export function Apps() {
         <h1 className="text-base font-semibold text-gray-200">Applications</h1>
       </div>
 
+      {/* Pending apps */}
+      {pendingApps.length > 0 && (
+        <div className="bg-yellow-900/20 border border-yellow-800/50 rounded-xl p-4 space-y-3">
+          <div className="flex items-center gap-2">
+            <Clock className="w-4 h-4 text-yellow-400" />
+            <h2 className="text-sm font-semibold text-yellow-300">Pending Approval</h2>
+          </div>
+          {pendingApps.map(a => (
+            <div key={a.id} className="flex items-center justify-between bg-gray-900/60 rounded-lg px-4 py-3">
+              <div>
+                <p className="text-sm text-gray-200 font-medium">{a.name}</p>
+                <p className="text-xs text-gray-500">{a.base_url}</p>
+              </div>
+              <button
+                onClick={() => approve.mutate(a.id)}
+                disabled={approve.isPending}
+                className="flex items-center gap-1.5 bg-green-700 hover:bg-green-600 disabled:opacity-40 text-white text-xs px-3 py-1.5 rounded-lg transition-colors"
+              >
+                {approve.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <CheckCircle2 className="w-3 h-3" />}
+                Approve
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+
       {/* App table */}
       <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
         {apps.isLoading ? (
           <div className="py-8 text-center text-gray-600 text-sm">Loading apps…</div>
-        ) : appList.length === 0 ? (
+        ) : activeApps.length === 0 ? (
           <div className="py-8 text-center text-gray-600 text-sm">
             No apps registered yet
           </div>
@@ -95,25 +125,41 @@ export function Apps() {
                 <th className="text-left px-4 py-3 font-medium">Name</th>
                 <th className="text-left px-4 py-3 font-medium hidden md:table-cell">URL</th>
                 <th className="text-left px-4 py-3 font-medium">Last Seen</th>
+                <th className="text-left px-4 py-3 font-medium">Permissions</th>
               </tr>
             </thead>
             <tbody>
-              {appList.map(app => (
-                <tr key={app.id} className="border-b border-gray-800 last:border-0 hover:bg-gray-800/40 transition-colors">
+              {activeApps.map(a => (
+                <tr key={a.id} className="border-b border-gray-800 last:border-0 hover:bg-gray-800/40 transition-colors">
                   <td className="px-4 py-3">
                     <div className="flex items-center gap-2">
-                      <StatusDot online={isOnline(app.last_seen)} />
-                      <span className={`text-xs ${isOnline(app.last_seen) ? 'text-green-400' : 'text-gray-500'}`}>
-                        {isOnline(app.last_seen) ? 'Online' : 'Offline'}
+                      <StatusDot online={isOnline(a.last_seen)} />
+                      <span className={`text-xs ${isOnline(a.last_seen) ? 'text-green-400' : 'text-gray-500'}`}>
+                        {isOnline(a.last_seen) ? 'Online' : 'Offline'}
                       </span>
                     </div>
                   </td>
-                  <td className="px-4 py-3 text-gray-200 font-medium">{app.name}</td>
+                  <td className="px-4 py-3 text-gray-200 font-medium">{a.name}</td>
                   <td className="px-4 py-3 text-gray-500 text-xs truncate max-w-xs hidden md:table-cell">
-                    {app.base_url}
+                    {a.base_url}
                   </td>
                   <td className="px-4 py-3 text-gray-500 text-xs tabular-nums">
-                    {relativeTime(app.last_seen)}
+                    {relativeTime(a.last_seen)}
+                  </td>
+                  <td className="px-4 py-3">
+                    <button
+                      onClick={() => updatePerms.mutate({ appId: a.id, allow_profile_switch: !a.allow_profile_switch })}
+                      disabled={updatePerms.isPending}
+                      title={a.allow_profile_switch ? 'Profile switching enabled' : 'Profile switching disabled'}
+                      className={`flex items-center gap-1 text-xs px-2 py-1 rounded-lg transition-colors ${
+                        a.allow_profile_switch
+                          ? 'bg-green-900/30 text-green-400 border border-green-800'
+                          : 'bg-gray-800 text-gray-500 border border-gray-700 hover:border-gray-600'
+                      }`}
+                    >
+                      <ShieldCheck className="w-3 h-3" />
+                      {a.allow_profile_switch ? 'Profiles' : 'No profiles'}
+                    </button>
                   </td>
                 </tr>
               ))}

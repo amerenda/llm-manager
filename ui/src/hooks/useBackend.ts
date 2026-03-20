@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import type { LlmStatus, LlmModel, RegisteredApp, Agent, Runner } from '../types'
+import type { LlmStatus, LlmModel, RegisteredApp, Agent, Runner, Profile, ProfileActivation } from '../types'
 
 // nginx proxies /api to the backend service
 async function get<T>(path: string): Promise<T> {
@@ -11,6 +11,16 @@ async function get<T>(path: string): Promise<T> {
 async function post<T>(path: string, body?: unknown): Promise<T> {
   const r = await fetch(path, {
     method: 'POST',
+    headers: body ? { 'Content-Type': 'application/json' } : {},
+    body: body ? JSON.stringify(body) : undefined,
+  })
+  if (!r.ok) throw new Error(`${r.status} ${await r.text()}`)
+  return r.json()
+}
+
+async function patch<T>(path: string, body?: unknown): Promise<T> {
+  const r = await fetch(path, {
+    method: 'PATCH',
     headers: body ? { 'Content-Type': 'application/json' } : {},
     body: body ? JSON.stringify(body) : undefined,
   })
@@ -114,6 +124,179 @@ export function useRunners() {
   return useQuery<Runner[]>({
     queryKey: ['runners'],
     queryFn: () => get('/api/runners'),
+    refetchInterval: 15_000,
+  })
+}
+
+// ── App management ───────────────────────────────────────────────────────────
+
+export function useApproveApp() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (appId: number) => post<{ ok: boolean; api_key: string }>(`/api/apps/${appId}/approve`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['apps'] }),
+  })
+}
+
+export function useUpdateAppPermissions() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ appId, allow_profile_switch }: { appId: number; allow_profile_switch: boolean }) =>
+      patch<{ ok: boolean }>(`/api/apps/${appId}/permissions`, { allow_profile_switch }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['apps'] }),
+  })
+}
+
+// ── Model load/unload ────────────────────────────────────────────────────────
+
+export function useLoadModel() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ model, runner_id }: { model: string; runner_id?: number }) =>
+      post<{ ok: boolean }>(`/api/llm/models/load${runner_id ? `?runner_id=${runner_id}` : ''}`, { model }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['llm-status'] })
+      qc.invalidateQueries({ queryKey: ['llm-models'] })
+    },
+  })
+}
+
+export function useUnloadModel() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ model, runner_id }: { model: string; runner_id?: number }) =>
+      post<{ ok: boolean }>(`/api/llm/models/unload${runner_id ? `?runner_id=${runner_id}` : ''}`, { model }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['llm-status'] })
+      qc.invalidateQueries({ queryKey: ['llm-models'] })
+    },
+  })
+}
+
+// ── Profiles ─────────────────────────────────────────────────────────────────
+
+export function useProfiles() {
+  return useQuery<Profile[]>({
+    queryKey: ['profiles'],
+    queryFn: () => get('/api/profiles'),
+    refetchInterval: 30_000,
+  })
+}
+
+export function useProfile(id: number) {
+  return useQuery<Profile>({
+    queryKey: ['profiles', id],
+    queryFn: () => get(`/api/profiles/${id}`),
+    enabled: id > 0,
+  })
+}
+
+export function useCreateProfile() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (data: { name: string; unsafe_enabled?: boolean }) =>
+      post<{ ok: boolean; id: number }>('/api/profiles', data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['profiles'] }),
+  })
+}
+
+export function useUpdateProfile() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ id, ...data }: { id: number; name?: string; unsafe_enabled?: boolean }) =>
+      patch<{ ok: boolean }>(`/api/profiles/${id}`, data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['profiles'] }),
+  })
+}
+
+export function useDeleteProfile() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (id: number) => del<{ ok: boolean }>(`/api/profiles/${id}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['profiles'] }),
+  })
+}
+
+export function useAddProfileModel() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ profileId, ...data }: {
+      profileId: number; model_safe: string; model_unsafe?: string;
+      count?: number; label?: string; parameters?: Record<string, unknown>
+    }) => post<{ ok: boolean; id: number }>(`/api/profiles/${profileId}/models`, data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['profiles'] }),
+  })
+}
+
+export function useUpdateProfileModel() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ profileId, entryId, ...data }: {
+      profileId: number; entryId: number; model_safe: string; model_unsafe?: string;
+      count?: number; label?: string; parameters?: Record<string, unknown>
+    }) => patch<{ ok: boolean }>(`/api/profiles/${profileId}/models/${entryId}`, data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['profiles'] }),
+  })
+}
+
+export function useDeleteProfileModel() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ profileId, entryId }: { profileId: number; entryId: number }) =>
+      del<{ ok: boolean }>(`/api/profiles/${profileId}/models/${entryId}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['profiles'] }),
+  })
+}
+
+export function useAddProfileImage() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ profileId, ...data }: {
+      profileId: number; checkpoint_safe: string; checkpoint_unsafe?: string;
+      label?: string; parameters?: Record<string, unknown>
+    }) => post<{ ok: boolean; id: number }>(`/api/profiles/${profileId}/images`, data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['profiles'] }),
+  })
+}
+
+export function useDeleteProfileImage() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ profileId, entryId }: { profileId: number; entryId: number }) =>
+      del<{ ok: boolean }>(`/api/profiles/${profileId}/images/${entryId}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['profiles'] }),
+  })
+}
+
+export function useActivateProfile() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ profileId, runner_id, force }: { profileId: number; runner_id: number; force?: boolean }) =>
+      post<{ ok: boolean; warnings: string[] }>(`/api/profiles/${profileId}/activate`, { runner_id, force }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['profiles'] })
+      qc.invalidateQueries({ queryKey: ['llm-status'] })
+      qc.invalidateQueries({ queryKey: ['profile-activations'] })
+    },
+  })
+}
+
+export function useDeactivateProfile() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ profileId, runner_id }: { profileId: number; runner_id: number }) =>
+      post<{ ok: boolean }>(`/api/profiles/${profileId}/deactivate?runner_id=${runner_id}`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['profiles'] })
+      qc.invalidateQueries({ queryKey: ['profile-activations'] })
+    },
+  })
+}
+
+export function useProfileActivations() {
+  return useQuery<ProfileActivation[]>({
+    queryKey: ['profile-activations'],
+    queryFn: () => get('/api/profiles/activations'),
     refetchInterval: 15_000,
   })
 }

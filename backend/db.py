@@ -29,6 +29,8 @@ CREATE TABLE IF NOT EXISTS registered_apps (
     name TEXT UNIQUE NOT NULL,
     base_url TEXT,
     api_key TEXT UNIQUE NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    allow_profile_switch BOOLEAN NOT NULL DEFAULT FALSE,
     last_seen TIMESTAMPTZ,
     metadata JSONB DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ DEFAULT NOW()
@@ -113,6 +115,47 @@ CREATE TABLE IF NOT EXISTS moltbook_peer_interactions (
     created_at TIMESTAMPTZ DEFAULT NOW(),
     PRIMARY KEY (slot, post_id, action)
 );
+
+CREATE TABLE IF NOT EXISTS profiles (
+    id SERIAL PRIMARY KEY,
+    name TEXT UNIQUE NOT NULL,
+    is_default BOOLEAN NOT NULL DEFAULT FALSE,
+    unsafe_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS profile_model_entries (
+    id SERIAL PRIMARY KEY,
+    profile_id INT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+    model_safe TEXT NOT NULL,
+    model_unsafe TEXT,
+    count INT NOT NULL DEFAULT 1,
+    label TEXT,
+    parameters JSONB DEFAULT '{}'::jsonb,
+    sort_order INT NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS profile_image_entries (
+    id SERIAL PRIMARY KEY,
+    profile_id INT NOT NULL REFERENCES profiles(id) ON DELETE CASCADE,
+    checkpoint_safe TEXT NOT NULL,
+    checkpoint_unsafe TEXT,
+    label TEXT,
+    parameters JSONB DEFAULT '{}'::jsonb,
+    sort_order INT NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS profile_activations (
+    id SERIAL PRIMARY KEY,
+    runner_id INT NOT NULL REFERENCES llm_runners(id) ON DELETE CASCADE,
+    profile_id INT REFERENCES profiles(id) ON DELETE SET NULL,
+    activation_status TEXT NOT NULL DEFAULT 'idle',
+    activated_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(runner_id)
+);
 """
 
 CREATE_INDEXES_SQL = """
@@ -121,6 +164,12 @@ CREATE INDEX IF NOT EXISTS idx_moltbook_activity_slot_created
 
 CREATE INDEX IF NOT EXISTS idx_moltbook_peer_posts_slot_peer
     ON moltbook_peer_posts (slot, peer_name);
+
+CREATE INDEX IF NOT EXISTS idx_profile_model_entries_profile
+    ON profile_model_entries (profile_id, sort_order);
+
+CREATE INDEX IF NOT EXISTS idx_profile_image_entries_profile
+    ON profile_image_entries (profile_id, sort_order);
 """
 
 
@@ -129,6 +178,14 @@ async def init_db(pool: asyncpg.Pool) -> None:
     async with pool.acquire() as conn:
         await conn.execute(CREATE_TABLES_SQL)
         await conn.execute(CREATE_INDEXES_SQL)
+        # Ensure the Default profile always exists
+        await conn.execute(
+            """
+            INSERT INTO profiles (name, is_default)
+            VALUES ('Default', TRUE)
+            ON CONFLICT (name) DO NOTHING
+            """
+        )
     logger.info("Database tables initialized")
 
 
@@ -186,17 +243,99 @@ async def register_app(
     async with pool.acquire() as conn:
         await conn.execute(
             """
-            INSERT INTO registered_apps (name, base_url, api_key)
-            VALUES ($1, $2, $3)
+            INSERT INTO registered_apps (name, base_url, api_key, status)
+            VALUES ($1, $2, $3, 'active')
             ON CONFLICT (name) DO UPDATE SET
                 base_url = EXCLUDED.base_url,
-                api_key = EXCLUDED.api_key
+                api_key = EXCLUDED.api_key,
+                status = 'active'
             """,
             name,
             base_url,
             api_key,
         )
     return api_key
+
+
+async def discover_app(
+    pool: asyncpg.Pool,
+    name: str,
+    base_url: str,
+    capabilities: list[str],
+) -> dict:
+    """Handle app discovery. Returns status and api_key if approved."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT id, name, api_key, status, allow_profile_switch FROM registered_apps WHERE name = $1",
+            name,
+        )
+    if row is None:
+        # New app — create as pending
+        api_key = secrets.token_urlsafe(32)
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO registered_apps (name, base_url, api_key, status, metadata)
+                VALUES ($1, $2, $3, 'pending', $4::jsonb)
+                ON CONFLICT (name) DO UPDATE SET
+                    base_url = EXCLUDED.base_url,
+                    status = 'pending',
+                    metadata = EXCLUDED.metadata
+                """,
+                name,
+                base_url,
+                api_key,
+                json.dumps({"capabilities": capabilities}),
+            )
+        return {"status": "pending"}
+    if row["status"] == "pending":
+        return {"status": "pending"}
+    # Already approved/active — return the api_key
+    return {"status": "approved", "api_key": row["api_key"]}
+
+
+async def approve_app(pool: asyncpg.Pool, app_id: int) -> Optional[str]:
+    """Approve a pending app. Returns the api_key or None if not found."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            UPDATE registered_apps SET status = 'active'
+            WHERE id = $1 RETURNING api_key, base_url
+            """,
+            app_id,
+        )
+    if row is None:
+        return None
+    return row["api_key"]
+
+
+async def update_app_permissions(
+    pool: asyncpg.Pool,
+    app_id: int,
+    allow_profile_switch: bool,
+) -> bool:
+    """Update app permissions. Returns False if not found."""
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "UPDATE registered_apps SET allow_profile_switch = $1 WHERE id = $2",
+            allow_profile_switch,
+            app_id,
+        )
+    return result.endswith("1")
+
+
+async def get_app_by_api_key(pool: asyncpg.Pool, api_key: str) -> Optional[dict]:
+    """Look up an app by its API key."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT id, name, base_url, api_key, status, allow_profile_switch,
+                   last_seen, metadata, created_at
+            FROM registered_apps WHERE api_key = $1
+            """,
+            api_key,
+        )
+    return dict(row) if row else None
 
 
 async def heartbeat_app(
@@ -223,7 +362,8 @@ async def get_apps(pool: asyncpg.Pool) -> list[dict]:
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT id, name, base_url, api_key, last_seen, metadata, created_at
+            SELECT id, name, base_url, api_key, status, allow_profile_switch,
+                   last_seen, metadata, created_at
             FROM registered_apps
             ORDER BY name
             """
@@ -695,3 +835,300 @@ async def prune_peer_posts(
             slot,
             keep_per_peer,
         )
+
+
+# ── Profiles ─────────────────────────────────────────────────────────────────
+
+async def create_profile(
+    pool: asyncpg.Pool,
+    name: str,
+    unsafe_enabled: bool = False,
+) -> int:
+    """Create a new profile. Returns the profile id."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO profiles (name, unsafe_enabled)
+            VALUES ($1, $2)
+            RETURNING id
+            """,
+            name,
+            unsafe_enabled,
+        )
+    return row["id"]
+
+
+async def get_profile(pool: asyncpg.Pool, profile_id: int) -> Optional[dict]:
+    """Return a profile with its model and image entries."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM profiles WHERE id = $1",
+            profile_id,
+        )
+        if row is None:
+            return None
+        profile = dict(row)
+        model_rows = await conn.fetch(
+            """
+            SELECT * FROM profile_model_entries
+            WHERE profile_id = $1 ORDER BY sort_order, id
+            """,
+            profile_id,
+        )
+        image_rows = await conn.fetch(
+            """
+            SELECT * FROM profile_image_entries
+            WHERE profile_id = $1 ORDER BY sort_order, id
+            """,
+            profile_id,
+        )
+    profile["model_entries"] = [dict(r) for r in model_rows]
+    profile["image_entries"] = [dict(r) for r in image_rows]
+    return profile
+
+
+async def get_all_profiles(pool: asyncpg.Pool) -> list[dict]:
+    """Return all profiles with entry counts."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT p.*,
+                   COALESCE(mc.cnt, 0) AS model_entry_count,
+                   COALESCE(ic.cnt, 0) AS image_entry_count
+            FROM profiles p
+            LEFT JOIN (
+                SELECT profile_id, COUNT(*) AS cnt
+                FROM profile_model_entries GROUP BY profile_id
+            ) mc ON mc.profile_id = p.id
+            LEFT JOIN (
+                SELECT profile_id, COUNT(*) AS cnt
+                FROM profile_image_entries GROUP BY profile_id
+            ) ic ON ic.profile_id = p.id
+            ORDER BY p.is_default DESC, p.name
+            """
+        )
+    return [dict(r) for r in rows]
+
+
+async def update_profile(pool: asyncpg.Pool, profile_id: int, **kwargs) -> bool:
+    """Update profile fields. Returns False if not found."""
+    if not kwargs:
+        return True
+    cols = list(kwargs.keys())
+    vals = list(kwargs.values())
+    set_clauses = ", ".join(f"{col} = ${i + 2}" for i, col in enumerate(cols))
+    sql = f"UPDATE profiles SET {set_clauses}, updated_at = NOW() WHERE id = $1"
+    async with pool.acquire() as conn:
+        result = await conn.execute(sql, profile_id, *vals)
+    return result.endswith("1")
+
+
+async def delete_profile(pool: asyncpg.Pool, profile_id: int) -> bool:
+    """Delete a profile. Prevents deleting the default profile. Returns False if not found."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT is_default FROM profiles WHERE id = $1", profile_id
+        )
+        if row is None:
+            return False
+        if row["is_default"]:
+            raise ValueError("Cannot delete the default profile")
+        result = await conn.execute("DELETE FROM profiles WHERE id = $1", profile_id)
+    return result.endswith("1")
+
+
+# ── Profile model entries ────────────────────────────────────────────────────
+
+async def add_profile_model_entry(
+    pool: asyncpg.Pool,
+    profile_id: int,
+    model_safe: str,
+    model_unsafe: Optional[str] = None,
+    count: int = 1,
+    label: Optional[str] = None,
+    parameters: Optional[dict] = None,
+) -> int:
+    """Add a model entry to a profile. Returns the entry id."""
+    async with pool.acquire() as conn:
+        # Get next sort_order
+        row = await conn.fetchrow(
+            "SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_order FROM profile_model_entries WHERE profile_id = $1",
+            profile_id,
+        )
+        next_order = row["next_order"]
+        row = await conn.fetchrow(
+            """
+            INSERT INTO profile_model_entries (profile_id, model_safe, model_unsafe, count, label, parameters, sort_order)
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
+            RETURNING id
+            """,
+            profile_id,
+            model_safe,
+            model_unsafe,
+            count,
+            label,
+            json.dumps(parameters or {}),
+            next_order,
+        )
+    return row["id"]
+
+
+async def update_profile_model_entry(pool: asyncpg.Pool, entry_id: int, **kwargs) -> bool:
+    """Update a model entry."""
+    if not kwargs:
+        return True
+    if "parameters" in kwargs and not isinstance(kwargs["parameters"], str):
+        kwargs["parameters"] = json.dumps(kwargs["parameters"])
+    cols = list(kwargs.keys())
+    vals = list(kwargs.values())
+    set_clauses = ", ".join(f"{col} = ${i + 2}" for i, col in enumerate(cols))
+    sql = f"UPDATE profile_model_entries SET {set_clauses} WHERE id = $1"
+    async with pool.acquire() as conn:
+        result = await conn.execute(sql, entry_id, *vals)
+    return result.endswith("1")
+
+
+async def delete_profile_model_entry(pool: asyncpg.Pool, entry_id: int) -> bool:
+    """Delete a model entry."""
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM profile_model_entries WHERE id = $1", entry_id
+        )
+    return result.endswith("1")
+
+
+# ── Profile image entries ────────────────────────────────────────────────────
+
+async def add_profile_image_entry(
+    pool: asyncpg.Pool,
+    profile_id: int,
+    checkpoint_safe: str,
+    checkpoint_unsafe: Optional[str] = None,
+    label: Optional[str] = None,
+    parameters: Optional[dict] = None,
+) -> int:
+    """Add an image entry to a profile. Returns the entry id."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_order FROM profile_image_entries WHERE profile_id = $1",
+            profile_id,
+        )
+        next_order = row["next_order"]
+        row = await conn.fetchrow(
+            """
+            INSERT INTO profile_image_entries (profile_id, checkpoint_safe, checkpoint_unsafe, label, parameters, sort_order)
+            VALUES ($1, $2, $3, $4, $5::jsonb, $6)
+            RETURNING id
+            """,
+            profile_id,
+            checkpoint_safe,
+            checkpoint_unsafe,
+            label,
+            json.dumps(parameters or {}),
+            next_order,
+        )
+    return row["id"]
+
+
+async def update_profile_image_entry(pool: asyncpg.Pool, entry_id: int, **kwargs) -> bool:
+    """Update an image entry."""
+    if not kwargs:
+        return True
+    if "parameters" in kwargs and not isinstance(kwargs["parameters"], str):
+        kwargs["parameters"] = json.dumps(kwargs["parameters"])
+    cols = list(kwargs.keys())
+    vals = list(kwargs.values())
+    set_clauses = ", ".join(f"{col} = ${i + 2}" for i, col in enumerate(cols))
+    sql = f"UPDATE profile_image_entries SET {set_clauses} WHERE id = $1"
+    async with pool.acquire() as conn:
+        result = await conn.execute(sql, entry_id, *vals)
+    return result.endswith("1")
+
+
+async def delete_profile_image_entry(pool: asyncpg.Pool, entry_id: int) -> bool:
+    """Delete an image entry."""
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM profile_image_entries WHERE id = $1", entry_id
+        )
+    return result.endswith("1")
+
+
+# ── Profile activations ──────────────────────────────────────────────────────
+
+async def activate_profile(
+    pool: asyncpg.Pool,
+    runner_id: int,
+    profile_id: int,
+) -> None:
+    """Set or update the active profile for a runner."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO profile_activations (runner_id, profile_id, activation_status, activated_at)
+            VALUES ($1, $2, 'activating', NOW())
+            ON CONFLICT (runner_id) DO UPDATE SET
+                profile_id = EXCLUDED.profile_id,
+                activation_status = 'activating',
+                activated_at = NOW()
+            """,
+            runner_id,
+            profile_id,
+        )
+
+
+async def update_activation_status(
+    pool: asyncpg.Pool,
+    runner_id: int,
+    status: str,
+) -> None:
+    """Update activation status for a runner (activating, active, error, idle)."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE profile_activations SET activation_status = $1 WHERE runner_id = $2",
+            status,
+            runner_id,
+        )
+
+
+async def deactivate_profile(pool: asyncpg.Pool, runner_id: int) -> None:
+    """Remove the active profile for a runner (return to ad-hoc mode)."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM profile_activations WHERE runner_id = $1",
+            runner_id,
+        )
+
+
+async def get_active_profile_for_runner(
+    pool: asyncpg.Pool,
+    runner_id: int,
+) -> Optional[dict]:
+    """Return the active profile for a runner, or None if ad-hoc."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT pa.runner_id, pa.profile_id, pa.activation_status, pa.activated_at,
+                   p.name AS profile_name, p.unsafe_enabled
+            FROM profile_activations pa
+            JOIN profiles p ON p.id = pa.profile_id
+            WHERE pa.runner_id = $1
+            """,
+            runner_id,
+        )
+    return dict(row) if row else None
+
+
+async def get_all_activations(pool: asyncpg.Pool) -> list[dict]:
+    """Return all runner-to-profile mappings."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT pa.runner_id, pa.profile_id, pa.activation_status, pa.activated_at,
+                   p.name AS profile_name
+            FROM profile_activations pa
+            LEFT JOIN profiles p ON p.id = pa.profile_id
+            ORDER BY pa.runner_id
+            """
+        )
+    return [dict(r) for r in rows]

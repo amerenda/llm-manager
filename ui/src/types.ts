@@ -47,11 +47,58 @@ export interface Runner {
 
 // A registered application from GET /api/apps
 export interface RegisteredApp {
-  id: string
+  id: number
   name: string
   base_url: string
+  status: string             // 'pending' | 'active'
+  allow_profile_switch: boolean
+  api_key_preview?: string
   last_seen: string | null   // ISO timestamp or null
   metadata: Record<string, unknown>
+}
+
+// ── Profiles ────────────────────────────────────────────────────────────────
+
+export interface Profile {
+  id: number
+  name: string
+  is_default: boolean
+  unsafe_enabled: boolean
+  model_entries: ProfileModelEntry[]
+  image_entries: ProfileImageEntry[]
+  model_entry_count?: number
+  image_entry_count?: number
+  created_at: string
+  updated_at: string
+}
+
+export interface ProfileModelEntry {
+  id: number
+  profile_id: number
+  model_safe: string
+  model_unsafe: string | null
+  count: number
+  label: string | null
+  parameters: Record<string, unknown>
+  sort_order: number
+}
+
+export interface ProfileImageEntry {
+  id: number
+  profile_id: number
+  checkpoint_safe: string
+  checkpoint_unsafe: string | null
+  label: string | null
+  parameters: Record<string, unknown>
+  sort_order: number
+}
+
+export interface ProfileActivation {
+  runner_id: number
+  profile_id: number | null
+  profile_name: string | null
+  activation_status: string
+  activated_at: string
 }
 
 // Moltbook agent from GET /api/agents

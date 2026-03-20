@@ -107,6 +107,27 @@ class LLMAgentClient:
                     if line:
                         yield line.encode() + b"\n"
 
+    async def load_model(self, model: str, keep_alive: str = "-1") -> dict:
+        """Load a model into VRAM with the given keep_alive."""
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=120.0)) as c:
+            r = await c.post(
+                f"{self.base_url}/v1/models/load",
+                json={"model": model, "keep_alive": keep_alive},
+                headers=self._headers,
+            )
+            r.raise_for_status()
+            return r.json()
+
+    async def unload_model(self, model: str) -> dict:
+        """Unload a model from VRAM."""
+        async with httpx.AsyncClient(timeout=self._timeout) as c:
+            r = await c.delete(
+                f"{self.base_url}/v1/models/{model}",
+                headers=self._headers,
+            )
+            r.raise_for_status()
+            return r.json()
+
     async def delete_model(self, model: str) -> dict:
         async with httpx.AsyncClient(timeout=self._timeout) as c:
             r = await c.delete(
