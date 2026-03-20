@@ -2,19 +2,18 @@ services:
   llm-agent:
     build: .
     container_name: llm-agent
-    ports:
-      - "8090:8090"
+    # host networking: agent binds directly on the host's IP/port 8090,
+    # and IP auto-detection in main.py correctly returns the host's LAN IP.
+    network_mode: host
     restart: unless-stopped
     env_file:
       - .env
     volumes:
       - /opt/models:/opt/models:ro
       - /home/alex/claude/projects/image/outputs:/outputs:ro
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     environment:
-      - OLLAMA_URL=http://host.docker.internal:11434
-      - COMFYUI_URL=http://host.docker.internal:8188
+      - OLLAMA_URL=http://localhost:11434
+      - COMFYUI_URL=http://localhost:8188
       - COMFYUI_OUTPUT_DIR=/outputs
     deploy:
       resources:

@@ -6,11 +6,9 @@ metadata:
   labels:
     app: llm-manager-backend
 spec:
-  type: NodePort
   selector:
     app: llm-manager-backend
   ports:
     - name: http
       port: 8081
       targetPort: 8081
-      nodePort: 30081

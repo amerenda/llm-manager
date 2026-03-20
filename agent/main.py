@@ -48,7 +48,24 @@ NODE = socket.gethostname()
 # PSK auth + self-registration
 AGENT_PSK = os.environ.get("LLM_MANAGER_AGENT_PSK", "")
 BACKEND_URL = os.environ.get("BACKEND_URL", "")
-AGENT_ADDRESS = os.environ.get("AGENT_ADDRESS", f"http://{NODE}:8090")
+
+
+def _detect_host_ip() -> str:
+    """Return the host's outbound IP — the interface used to reach the internet.
+    Works correctly when the agent runs with network_mode: host.
+    Falls back to hostname if detection fails.
+    """
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    except Exception:
+        return socket.gethostname()
+    finally:
+        s.close()
+
+
+AGENT_ADDRESS = os.environ.get("AGENT_ADDRESS") or f"http://{_detect_host_ip()}:8090"
 
 _RUNNER_ID: int | None = None
 
