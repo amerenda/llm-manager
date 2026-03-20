@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { AppWindow, Plus, Loader2, CheckCircle2, AlertCircle, Copy, Check, ShieldCheck, Clock } from 'lucide-react'
+import { AppWindow, Plus, Loader2, CheckCircle2, AlertCircle, Copy, Check, Shield, RefreshCw } from 'lucide-react'
 import { useApps, useRegisterApp, useApproveApp, useUpdateAppPermissions } from '../hooks/useBackend'
 import { StatusDot } from '../components/StatusDot'
 
@@ -87,7 +87,7 @@ export function Apps() {
       {pendingApps.length > 0 && (
         <div className="bg-yellow-900/20 border border-yellow-800/50 rounded-xl p-4 space-y-3">
           <div className="flex items-center gap-2">
-            <Clock className="w-4 h-4 text-yellow-400" />
+            <RefreshCw className="w-4 h-4 text-yellow-400" />
             <h2 className="text-sm font-semibold text-yellow-300">Pending Approval</h2>
           </div>
           {pendingApps.map(a => (
@@ -157,7 +157,7 @@ export function Apps() {
                           : 'bg-gray-800 text-gray-500 border border-gray-700 hover:border-gray-600'
                       }`}
                     >
-                      <ShieldCheck className="w-3 h-3" />
+                      <Shield className="w-3 h-3" />
                       {a.allow_profile_switch ? 'Profiles' : 'No profiles'}
                     </button>
                   </td>

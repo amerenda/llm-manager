@@ -1,8 +1,8 @@
 import { useState } from 'react'
 import {
   Sliders, Plus, Trash2, Loader2, ChevronDown, ChevronRight,
-  Play, Square, AlertTriangle, Shield, ShieldOff, Server,
-  Layers, Image, Settings2, Tag,
+  Play, Square, AlertCircle, Shield, ShieldOff, Server,
+  Layers, Image, RefreshCw,
 } from 'lucide-react'
 import {
   useProfiles, useProfile, useCreateProfile, useUpdateProfile, useDeleteProfile,
@@ -117,7 +117,7 @@ function ModelEntryRow({
           )}
           {entry.label && (
             <span className="text-[10px] bg-brand-900/40 text-brand-400 px-1.5 py-0.5 rounded flex items-center gap-0.5">
-              <Tag className="w-2.5 h-2.5" />{entry.label}
+              <Layers className="w-2.5 h-2.5" />{entry.label}
             </span>
           )}
         </div>
@@ -255,7 +255,7 @@ function AddModelForm({ profileId, unsafeEnabled }: { profileId: number; unsafeE
         onClick={() => setShowAdvanced(!showAdvanced)}
         className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-300 transition-colors"
       >
-        <Settings2 className="w-3 h-3" />
+        <RefreshCw className="w-3 h-3" />
         Advanced parameters
         {showAdvanced ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
       </button>
@@ -462,7 +462,7 @@ function ActivationPanel({ profileId, profileName }: { profileId: number; profil
             <ul className="mt-1 space-y-0.5">
               {result.warnings.map((w, i) => (
                 <li key={i} className="flex items-start gap-1">
-                  <AlertTriangle className="w-3 h-3 mt-0.5 flex-shrink-0" />
+                  <AlertCircle className="w-3 h-3 mt-0.5 flex-shrink-0" />
                   {w}
                 </li>
               ))}

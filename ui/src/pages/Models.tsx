@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Download, Trash2, Loader2, CheckCircle2, AlertCircle, Image, Layers, Cpu, Eject, Shield, ShieldOff } from 'lucide-react'
+import { Download, Trash2, Loader2, CheckCircle2, AlertCircle, Image, Layers, Cpu, Upload, Shield, ShieldOff } from 'lucide-react'
 import { useLlmModels, usePullModel, useDeleteModel, useCheckpoints, useSwitchCheckpoint, useLlmStatus, useLoadModel, useUnloadModel } from '../hooks/useBackend'
 import type { LlmModel } from '../types'
 
@@ -134,7 +134,7 @@ function TextModelsSection() {
                             title="Unload from VRAM"
                             className="flex items-center gap-1 text-xs bg-yellow-900/30 hover:bg-yellow-800/40 text-yellow-400 px-2.5 py-1 rounded-lg transition-colors disabled:opacity-40"
                           >
-                            {unload.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Eject className="w-3 h-3" />}
+                            {unload.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Upload className="w-3 h-3" />}
                             Unload
                           </button>
                         ) : (
