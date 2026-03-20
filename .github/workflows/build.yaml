@@ -67,9 +67,9 @@ jobs:
       - name: Update image tags in gitops manifests
         run: |
           SHA="${{ steps.sha.outputs.SHA }}"
-          sed -i "s|${{ env.BACKEND_IMAGE }}:backend-[a-f0-9]*|${{ env.BACKEND_IMAGE }}:backend-${SHA}|g" \
+          sed -i "s|${{ env.BACKEND_IMAGE }}:backend-[^[:space:]]*|${{ env.BACKEND_IMAGE }}:backend-${SHA}|g" \
             gitops/backend/daemonset.yaml
-          sed -i "s|${{ env.UI_IMAGE }}:ui-[a-f0-9]*|${{ env.UI_IMAGE }}:ui-${SHA}|g" \
+          sed -i "s|${{ env.UI_IMAGE }}:ui-[^[:space:]]*|${{ env.UI_IMAGE }}:ui-${SHA}|g" \
             gitops/ui/deployment.yaml
 
       - name: Commit updated image tags
