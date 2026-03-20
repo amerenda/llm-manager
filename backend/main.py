@@ -814,7 +814,7 @@ async def update_app_permissions_endpoint(app_id: int, req: AppPermissionsReques
 
 class ModelLoadRequest(BaseModel):
     model: str
-    keep_alive: str = "-1"
+    keep_alive: int = -1
 
 
 @app.post("/api/llm/models/load")

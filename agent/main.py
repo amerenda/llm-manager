@@ -638,7 +638,7 @@ async def unload_model(model: str):
 
 class LoadRequest(BaseModel):
     model: str
-    keep_alive: str = "-1"  # -1 means forever
+    keep_alive: int = -1  # -1 means forever (seconds), 0 means unload immediately
 
 
 @app.post("/v1/models/load")
