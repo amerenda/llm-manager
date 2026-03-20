@@ -3,6 +3,7 @@ name: Build and Push
 on:
   push:
     branches: [main]
+  workflow_dispatch:
 
 env:
   BACKEND_IMAGE: amerenda/llm-manager
