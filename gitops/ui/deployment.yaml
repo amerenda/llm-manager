@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-manager-ui
+  namespace: llm-manager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: llm-manager-ui
+  template:
+    metadata:
+      labels:
+        app: llm-manager-ui
+    spec:
+      affinity:
+        nodeAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              preference:
+                matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values:
+                      - murderbot
+      containers:
+        - name: ui
+          image: amerenda/llm-manager:ui-PLACEHOLDER
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 80
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi

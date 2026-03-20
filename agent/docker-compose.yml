@@ -1,0 +1,25 @@
+version: "3.8"
+
+services:
+  llm-agent:
+    build: .
+    container_name: llm-agent
+    ports:
+      - "8090:8090"
+    restart: unless-stopped
+    volumes:
+      - /opt/models:/opt/models:ro
+      - /home/alex/claude/projects/image/outputs:/outputs:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - OLLAMA_URL=http://host.docker.internal:11434
+      - COMFYUI_URL=http://host.docker.internal:8188
+      - COMFYUI_OUTPUT_DIR=/outputs
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

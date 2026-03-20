@@ -1,0 +1,592 @@
+"""
+LLM Agent — runs on the GPU host (murderbot).
+Wraps Ollama and ComfyUI, exposes HTTP API + Prometheus metrics.
+Port 8090.
+"""
+import asyncio
+import json
+import logging
+import os
+import socket
+import time
+import uuid
+from pathlib import Path
+from typing import AsyncGenerator, Optional
+
+import httpx
+import psutil
+import uvicorn
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from prometheus_client import (
+    CONTENT_TYPE_LATEST,
+    Counter,
+    Gauge,
+    Histogram,
+    generate_latest,
+)
+from pydantic import BaseModel
+
+try:
+    import pynvml
+    pynvml.nvmlInit()
+    _NVML_OK = True
+except Exception:
+    _NVML_OK = False
+
+logging.basicConfig(
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    level=logging.INFO,
+)
+logger = logging.getLogger(__name__)
+
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
+COMFYUI_URL = os.environ.get("COMFYUI_URL", "http://localhost:8188")
+COMFYUI_OUTPUT_DIR = os.environ.get("COMFYUI_OUTPUT_DIR", "/outputs")
+NODE = socket.gethostname()
+
+# ── Prometheus metrics ────────────────────────────────────────────────────────
+
+gpu_vram_used = Gauge("llm_agent_gpu_vram_used_bytes", "GPU VRAM used bytes", ["node"])
+gpu_vram_total = Gauge("llm_agent_gpu_vram_total_bytes", "GPU VRAM total bytes", ["node"])
+gpu_vram_util = Gauge("llm_agent_gpu_vram_utilization_pct", "GPU VRAM utilization %", ["node"])
+cpu_usage = Gauge("llm_agent_cpu_usage_pct", "CPU usage %", ["node"])
+mem_used = Gauge("llm_agent_memory_used_bytes", "Memory used bytes", ["node"])
+mem_total = Gauge("llm_agent_memory_total_bytes", "Memory total bytes", ["node"])
+ollama_models_loaded = Gauge("llm_agent_ollama_models_loaded", "Ollama loaded models count", ["node"])
+requests_total = Counter(
+    "llm_agent_requests_total", "Total requests", ["node", "endpoint", "model"]
+)
+request_duration = Histogram(
+    "llm_agent_request_duration_seconds",
+    "Request duration seconds",
+    ["node", "endpoint", "model"],
+)
+comfyui_running_gauge = Gauge("llm_agent_comfyui_running", "ComfyUI running (0/1)", ["node"])
+
+app = FastAPI(title="LLM Agent", version="1.0.0")
+
+
+# ── GPU helpers ───────────────────────────────────────────────────────────────
+
+def _gpu_stats() -> dict:
+    if not _NVML_OK:
+        return {"vram_used_bytes": 0, "vram_total_bytes": 0, "vram_pct": 0.0}
+    try:
+        handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+        info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+        pct = round(info.used / info.total * 100, 1) if info.total else 0.0
+        return {
+            "vram_used_bytes": info.used,
+            "vram_total_bytes": info.total,
+            "vram_pct": pct,
+        }
+    except Exception:
+        return {"vram_used_bytes": 0, "vram_total_bytes": 0, "vram_pct": 0.0}
+
+
+def _sys_stats() -> dict:
+    cpu = psutil.cpu_percent(interval=0.1)
+    vm = psutil.virtual_memory()
+    return {
+        "cpu_pct": cpu,
+        "mem_used_bytes": vm.used,
+        "mem_total_bytes": vm.total,
+        "mem_used_gb": round(vm.used / 1e9, 2),
+        "mem_total_gb": round(vm.total / 1e9, 2),
+    }
+
+
+def _update_gauges(gpu: dict, sys: dict, loaded_count: int, comfyui_ok: bool):
+    gpu_vram_used.labels(node=NODE).set(gpu["vram_used_bytes"])
+    gpu_vram_total.labels(node=NODE).set(gpu["vram_total_bytes"])
+    gpu_vram_util.labels(node=NODE).set(gpu["vram_pct"])
+    cpu_usage.labels(node=NODE).set(sys["cpu_pct"])
+    mem_used.labels(node=NODE).set(sys["mem_used_bytes"])
+    mem_total.labels(node=NODE).set(sys["mem_total_bytes"])
+    ollama_models_loaded.labels(node=NODE).set(loaded_count)
+    comfyui_running_gauge.labels(node=NODE).set(1 if comfyui_ok else 0)
+
+
+# ── Ollama helpers ─────────────────────────────────────────────────────────────
+
+async def _ollama_ok() -> bool:
+    try:
+        async with httpx.AsyncClient(timeout=3) as c:
+            r = await c.get(f"{OLLAMA_URL}/api/tags")
+            return r.status_code == 200
+    except Exception:
+        return False
+
+
+async def _comfyui_ok() -> bool:
+    try:
+        async with httpx.AsyncClient(timeout=3) as c:
+            r = await c.get(f"{COMFYUI_URL}/system_stats")
+            return r.status_code == 200
+    except Exception:
+        return False
+
+
+async def _ollama_loaded_models() -> list[dict]:
+    """Return list of currently loaded (in-VRAM) models from Ollama."""
+    try:
+        async with httpx.AsyncClient(timeout=5) as c:
+            r = await c.get(f"{OLLAMA_URL}/api/ps")
+            if r.status_code == 200:
+                models = r.json().get("models", [])
+                return [
+                    {
+                        "name": m["name"],
+                        "size_gb": round(m.get("size", 0) / 1e9, 2),
+                    }
+                    for m in models
+                ]
+    except Exception:
+        pass
+    return []
+
+
+async def _comfyui_checkpoints() -> list[str]:
+    checkpoint_dir = Path("/opt/models/checkpoints")
+    if not checkpoint_dir.exists():
+        return []
+    return sorted(
+        p.name for p in checkpoint_dir.iterdir()
+        if p.suffix in (".safetensors", ".ckpt", ".pt")
+    )
+
+
+async def _comfyui_active_checkpoint() -> Optional[str]:
+    """Try to get the currently loaded checkpoint from ComfyUI object_info."""
+    try:
+        async with httpx.AsyncClient(timeout=5) as c:
+            r = await c.get(f"{COMFYUI_URL}/object_info/CheckpointLoaderSimple")
+            if r.status_code == 200:
+                info = r.json()
+                node_info = info.get("CheckpointLoaderSimple", {})
+                input_info = node_info.get("input", {}).get("required", {})
+                ckpt_input = input_info.get("ckpt_name", [])
+                if isinstance(ckpt_input, list) and ckpt_input:
+                    options = ckpt_input[0]
+                    if isinstance(options, list) and options:
+                        return options[0]
+    except Exception:
+        pass
+    return None
+
+
+# ── Routes ────────────────────────────────────────────────────────────────────
+
+@app.get("/health")
+async def health():
+    ollama_up = await _ollama_ok()
+    comfyui_up = await _comfyui_ok()
+    return {"ok": True, "node": NODE, "ollama": ollama_up, "comfyui": comfyui_up}
+
+
+@app.get("/v1/status")
+async def status():
+    t0 = time.time()
+    gpu = _gpu_stats()
+    sys = _sys_stats()
+    loaded = await _ollama_loaded_models()
+    comfyui_up = await _comfyui_ok()
+    checkpoints = await _comfyui_checkpoints()
+    active_ckpt = await _comfyui_active_checkpoint() if comfyui_up else None
+
+    _update_gauges(gpu, sys, len(loaded), comfyui_up)
+    requests_total.labels(node=NODE, endpoint="/v1/status", model="").inc()
+    request_duration.labels(node=NODE, endpoint="/v1/status", model="").observe(time.time() - t0)
+
+    return {
+        "node": NODE,
+        "gpu_vram_used_bytes": gpu["vram_used_bytes"],
+        "gpu_vram_total_bytes": gpu["vram_total_bytes"],
+        "gpu_vram_pct": gpu["vram_pct"],
+        "gpu_vram_used_gb": round(gpu["vram_used_bytes"] / 1e9, 2),
+        "gpu_vram_total_gb": round(gpu["vram_total_bytes"] / 1e9, 2),
+        "cpu_pct": sys["cpu_pct"],
+        "mem_used_gb": sys["mem_used_gb"],
+        "mem_total_gb": sys["mem_total_gb"],
+        "loaded_ollama_models": loaded,
+        "comfyui_running": comfyui_up,
+        "comfyui_checkpoints": checkpoints,
+        "comfyui_active_checkpoint": active_ckpt,
+    }
+
+
+@app.get("/v1/models")
+async def list_models():
+    t0 = time.time()
+    result = []
+
+    # Ollama text models
+    try:
+        async with httpx.AsyncClient(timeout=5) as c:
+            r = await c.get(f"{OLLAMA_URL}/api/tags")
+            if r.status_code == 200:
+                for m in r.json().get("models", []):
+                    result.append({
+                        "id": m["name"],
+                        "object": "model",
+                        "created": int(time.time()),
+                        "owned_by": "ollama",
+                        "type": "text",
+                    })
+    except Exception as e:
+        logger.warning("Ollama models unavailable: %s", e)
+
+    # ComfyUI image models
+    for ckpt in await _comfyui_checkpoints():
+        result.append({
+            "id": ckpt,
+            "object": "model",
+            "created": int(time.time()),
+            "owned_by": "comfyui",
+            "type": "image",
+        })
+
+    requests_total.labels(node=NODE, endpoint="/v1/models", model="").inc()
+    request_duration.labels(node=NODE, endpoint="/v1/models", model="").observe(time.time() - t0)
+
+    return {"object": "list", "data": result}
+
+
+@app.post("/v1/chat/completions")
+async def chat_completions(request: Request):
+    body = await request.json()
+    model = body.get("model", "")
+    stream = body.get("stream", False)
+    t0 = time.time()
+
+    requests_total.labels(node=NODE, endpoint="/v1/chat/completions", model=model).inc()
+
+    # Convert OpenAI format to Ollama format
+    ollama_body = {
+        "model": model,
+        "messages": body.get("messages", []),
+        "stream": stream,
+    }
+    if "temperature" in body:
+        ollama_body.setdefault("options", {})["temperature"] = body["temperature"]
+    if "max_tokens" in body:
+        ollama_body.setdefault("options", {})["num_predict"] = body["max_tokens"]
+    if "top_p" in body:
+        ollama_body.setdefault("options", {})["top_p"] = body["top_p"]
+
+    if stream:
+        async def _stream_gen() -> AsyncGenerator[bytes, None]:
+            try:
+                async with httpx.AsyncClient(timeout=300) as c:
+                    async with c.stream(
+                        "POST",
+                        f"{OLLAMA_URL}/api/chat",
+                        json=ollama_body,
+                        timeout=300,
+                    ) as resp:
+                        if resp.status_code != 200:
+                            err = await resp.aread()
+                            yield b"data: " + json.dumps({"error": err.decode()}).encode() + b"\n\n"
+                            return
+                        async for line in resp.aiter_lines():
+                            if not line:
+                                continue
+                            try:
+                                chunk = json.loads(line)
+                            except json.JSONDecodeError:
+                                continue
+                            # Convert Ollama streaming chunk to OpenAI SSE format
+                            content = chunk.get("message", {}).get("content", "")
+                            done = chunk.get("done", False)
+                            openai_chunk = {
+                                "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
+                                "object": "chat.completion.chunk",
+                                "created": int(time.time()),
+                                "model": model,
+                                "choices": [{
+                                    "index": 0,
+                                    "delta": {"content": content} if not done else {},
+                                    "finish_reason": "stop" if done else None,
+                                }],
+                            }
+                            yield b"data: " + json.dumps(openai_chunk).encode() + b"\n\n"
+                            if done:
+                                yield b"data: [DONE]\n\n"
+                                break
+            except Exception as e:
+                yield b"data: " + json.dumps({"error": str(e)}).encode() + b"\n\n"
+            finally:
+                request_duration.labels(
+                    node=NODE, endpoint="/v1/chat/completions", model=model
+                ).observe(time.time() - t0)
+
+        return StreamingResponse(_stream_gen(), media_type="text/event-stream")
+
+    else:
+        try:
+            async with httpx.AsyncClient(timeout=300) as c:
+                r = await c.post(f"{OLLAMA_URL}/api/chat", json=ollama_body)
+                if r.status_code != 200:
+                    raise HTTPException(status_code=r.status_code, detail=r.text)
+                data = r.json()
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=503, detail=f"Ollama unavailable: {e}")
+
+        request_duration.labels(
+            node=NODE, endpoint="/v1/chat/completions", model=model
+        ).observe(time.time() - t0)
+
+        msg = data.get("message", {})
+        return {
+            "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
+            "object": "chat.completion",
+            "created": int(time.time()),
+            "model": model,
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": msg.get("role", "assistant"),
+                    "content": msg.get("content", ""),
+                },
+                "finish_reason": "stop",
+            }],
+            "usage": {
+                "prompt_tokens": data.get("prompt_eval_count", 0),
+                "completion_tokens": data.get("eval_count", 0),
+                "total_tokens": (
+                    data.get("prompt_eval_count", 0) + data.get("eval_count", 0)
+                ),
+            },
+        }
+
+
+def _build_txt2img_workflow(prompt: str, checkpoint: str, width: int, height: int) -> dict:
+    """Build a minimal ComfyUI API workflow for txt2img."""
+    return {
+        "3": {
+            "class_type": "KSampler",
+            "inputs": {
+                "seed": int(time.time()) % 2**32,
+                "steps": 20,
+                "cfg": 7.0,
+                "sampler_name": "euler",
+                "scheduler": "normal",
+                "denoise": 1.0,
+                "model": ["4", 0],
+                "positive": ["6", 0],
+                "negative": ["7", 0],
+                "latent_image": ["5", 0],
+            },
+        },
+        "4": {
+            "class_type": "CheckpointLoaderSimple",
+            "inputs": {"ckpt_name": checkpoint},
+        },
+        "5": {
+            "class_type": "EmptyLatentImage",
+            "inputs": {"batch_size": 1, "height": height, "width": width},
+        },
+        "6": {
+            "class_type": "CLIPTextEncode",
+            "inputs": {"clip": ["4", 1], "text": prompt},
+        },
+        "7": {
+            "class_type": "CLIPTextEncode",
+            "inputs": {"clip": ["4", 1], "text": "ugly, bad anatomy, blurry, deformed"},
+        },
+        "8": {
+            "class_type": "VAEDecode",
+            "inputs": {"samples": ["3", 0], "vae": ["4", 2]},
+        },
+        "9": {
+            "class_type": "SaveImage",
+            "inputs": {"filename_prefix": "llm_agent", "images": ["8", 0]},
+        },
+    }
+
+
+class ImageGenRequest(BaseModel):
+    prompt: str
+    model: str = "v1-5-pruned-emaonly.safetensors"
+    n: int = 1
+    size: str = "512x512"
+
+
+@app.post("/v1/images/generations")
+async def generate_image(req: ImageGenRequest):
+    t0 = time.time()
+    requests_total.labels(node=NODE, endpoint="/v1/images/generations", model=req.model).inc()
+
+    if not await _comfyui_ok():
+        raise HTTPException(status_code=503, detail="ComfyUI is not running")
+
+    try:
+        width, height = (int(x) for x in req.size.split("x"))
+    except ValueError:
+        width, height = 512, 512
+
+    workflow = _build_txt2img_workflow(req.prompt, req.model, width, height)
+    client_id = uuid.uuid4().hex
+
+    try:
+        async with httpx.AsyncClient(timeout=30) as c:
+            r = await c.post(
+                f"{COMFYUI_URL}/prompt",
+                json={"prompt": workflow, "client_id": client_id},
+            )
+            if r.status_code != 200:
+                raise HTTPException(status_code=r.status_code, detail=f"ComfyUI error: {r.text}")
+            prompt_id = r.json()["prompt_id"]
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"ComfyUI submit failed: {e}")
+
+    # Poll for completion (up to 5 minutes)
+    deadline = time.time() + 300
+    output_filename: Optional[str] = None
+    while time.time() < deadline:
+        await asyncio.sleep(2)
+        try:
+            async with httpx.AsyncClient(timeout=10) as c:
+                r = await c.get(f"{COMFYUI_URL}/history/{prompt_id}")
+                if r.status_code == 200:
+                    history = r.json()
+                    if prompt_id in history:
+                        prompt_result = history[prompt_id]
+                        outputs = prompt_result.get("outputs", {})
+                        for node_id, node_output in outputs.items():
+                            images = node_output.get("images", [])
+                            if images:
+                                output_filename = images[0]["filename"]
+                                break
+                        if output_filename:
+                            break
+        except Exception as e:
+            logger.warning("ComfyUI poll error: %s", e)
+
+    request_duration.labels(
+        node=NODE, endpoint="/v1/images/generations", model=req.model
+    ).observe(time.time() - t0)
+
+    if not output_filename:
+        raise HTTPException(status_code=504, detail="ComfyUI generation timed out")
+
+    return {
+        "created": int(time.time()),
+        "data": [{"url": f"/v1/images/outputs/{output_filename}"}],
+    }
+
+
+@app.get("/v1/images/outputs/{filename}")
+async def get_image(filename: str):
+    # Sanitize filename to prevent path traversal
+    safe_name = Path(filename).name
+    path = Path(COMFYUI_OUTPUT_DIR) / safe_name
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="Image not found")
+    return FileResponse(str(path))
+
+
+class PullRequest(BaseModel):
+    model: str
+
+
+@app.post("/v1/models/pull")
+async def pull_model(req: PullRequest):
+    requests_total.labels(node=NODE, endpoint="/v1/models/pull", model=req.model).inc()
+
+    async def _stream_pull() -> AsyncGenerator[bytes, None]:
+        try:
+            async with httpx.AsyncClient(timeout=600) as c:
+                async with c.stream(
+                    "POST",
+                    f"{OLLAMA_URL}/api/pull",
+                    json={"name": req.model, "stream": True},
+                ) as resp:
+                    async for line in resp.aiter_lines():
+                        if line:
+                            yield line.encode() + b"\n"
+        except Exception as e:
+            yield json.dumps({"error": str(e)}).encode() + b"\n"
+
+    return StreamingResponse(_stream_pull(), media_type="application/x-ndjson")
+
+
+@app.delete("/v1/models/{model:path}")
+async def unload_model(model: str):
+    """Unload a model from VRAM by setting keep_alive=0."""
+    requests_total.labels(node=NODE, endpoint="/v1/models/delete", model=model).inc()
+    try:
+        async with httpx.AsyncClient(timeout=30) as c:
+            r = await c.post(
+                f"{OLLAMA_URL}/api/generate",
+                json={"model": model, "keep_alive": 0},
+            )
+            if r.status_code not in (200, 404):
+                raise HTTPException(status_code=r.status_code, detail=r.text)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Ollama unavailable: {e}")
+    return {"ok": True, "message": f"Model {model} unloaded from VRAM"}
+
+
+class CheckpointRequest(BaseModel):
+    name: str
+
+
+@app.post("/v1/comfyui/checkpoint")
+async def switch_checkpoint(req: CheckpointRequest):
+    """Switch ComfyUI checkpoint by queuing a no-op workflow that loads the model."""
+    if not await _comfyui_ok():
+        raise HTTPException(status_code=503, detail="ComfyUI is not running")
+
+    # Verify checkpoint exists
+    ckpt_path = Path("/opt/models/checkpoints") / req.name
+    if not ckpt_path.exists():
+        raise HTTPException(status_code=404, detail=f"Checkpoint not found: {req.name}")
+
+    # Submit a minimal workflow just to load the checkpoint
+    workflow = {
+        "1": {
+            "class_type": "CheckpointLoaderSimple",
+            "inputs": {"ckpt_name": req.name},
+        },
+    }
+    try:
+        async with httpx.AsyncClient(timeout=30) as c:
+            r = await c.post(
+                f"{COMFYUI_URL}/prompt",
+                json={"prompt": workflow},
+            )
+            if r.status_code != 200:
+                raise HTTPException(status_code=r.status_code, detail=f"ComfyUI error: {r.text}")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"ComfyUI unavailable: {e}")
+
+    return {"ok": True, "checkpoint": req.name}
+
+
+@app.get("/metrics")
+async def metrics():
+    # Update gauges before scrape
+    gpu = _gpu_stats()
+    sys = _sys_stats()
+    loaded = await _ollama_loaded_models()
+    comfyui_up = await _comfyui_ok()
+    _update_gauges(gpu, sys, len(loaded), comfyui_up)
+
+    return StreamingResponse(
+        iter([generate_latest().decode()]),
+        media_type=CONTENT_TYPE_LATEST,
+    )
+
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8090, log_level="info")
