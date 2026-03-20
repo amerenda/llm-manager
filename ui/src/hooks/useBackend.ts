@@ -82,7 +82,7 @@ export function useDeleteModel() {
 export function useCheckpoints() {
   return useQuery<string[]>({
     queryKey: ['checkpoints'],
-    queryFn: () => get('/api/llm/checkpoints'),
+    queryFn: () => get<{ checkpoints: string[] }>('/api/llm/checkpoints').then(r => r.checkpoints),
     refetchInterval: 30_000,
   })
 }
