@@ -46,7 +46,7 @@ COMFYUI_OUTPUT_DIR = os.environ.get("COMFYUI_OUTPUT_DIR", "/outputs")
 NODE = socket.gethostname()
 
 # PSK auth + self-registration
-AGENT_PSK = os.environ.get("AGENT_PSK", "")
+AGENT_PSK = os.environ.get("LLM_MANAGER_AGENT_PSK", "")
 BACKEND_URL = os.environ.get("BACKEND_URL", "")
 AGENT_ADDRESS = os.environ.get("AGENT_ADDRESS", f"http://{NODE}:8090")
 

@@ -34,7 +34,7 @@ spec:
                 secretKeyRef:
                   name: postgres-credentials
                   key: postgres-url
-            - name: AGENT_PSK
+            - name: LLM_MANAGER_AGENT_PSK
               valueFrom:
                 secretKeyRef:
                   name: agent-psk

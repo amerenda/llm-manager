@@ -44,7 +44,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-AGENT_PSK = os.environ.get("AGENT_PSK", "")
+AGENT_PSK = os.environ.get("LLM_MANAGER_AGENT_PSK", "")
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://llm:llm@localhost:5432/llmmanager")
 NODE = socket.gethostname()
 API_BASE = "https://www.moltbook.com/api/v1"

@@ -19,7 +19,7 @@ cp agent/.env.example agent/.env
 
 Edit `.env`:
 ```
-AGENT_PSK=<value from Bitwarden: llm-manager-agent-psk>
+LLM_MANAGER_AGENT_PSK=<value from Bitwarden: llm-manager-agent-psk>
 BACKEND_URL=http://llm-manager-backend.llm-manager.svc.cluster.local:8081
 AGENT_ADDRESS=http://murderbot.amer.home:8090
 ```
@@ -67,7 +67,7 @@ The backend pod sends this automatically when proxying requests.
 
 | Variable | Default | Description |
 |---|---|---|
-| `AGENT_PSK` | _(empty)_ | Pre-shared key for backend auth. If empty, auth is disabled (dev only) |
+| `LLM_MANAGER_AGENT_PSK` | _(empty)_ | Pre-shared key for backend auth. If empty, auth is disabled (dev only) |
 | `BACKEND_URL` | _(empty)_ | Backend URL for self-registration. If empty, registration is skipped |
 | `AGENT_ADDRESS` | `http://<hostname>:8090` | Externally-reachable address of this agent |
 | `OLLAMA_URL` | `http://host.docker.internal:11434` | Ollama base URL |
