@@ -149,6 +149,26 @@ class LLMAgentClient:
             r.raise_for_status()
             return r.json()
 
+    # ── ComfyUI lifecycle ─────────────────────────────────────────────────────
+
+    async def start_comfyui(self) -> dict:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=60.0)) as c:
+            r = await c.post(
+                f"{self.base_url}/v1/comfyui/start",
+                headers=self._headers,
+            )
+            r.raise_for_status()
+            return r.json()
+
+    async def stop_comfyui(self) -> dict:
+        async with httpx.AsyncClient(timeout=self._timeout) as c:
+            r = await c.post(
+                f"{self.base_url}/v1/comfyui/stop",
+                headers=self._headers,
+            )
+            r.raise_for_status()
+            return r.json()
+
     # ── Health check ──────────────────────────────────────────────────────────
 
     async def is_reachable(self) -> bool:

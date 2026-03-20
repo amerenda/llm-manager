@@ -598,6 +598,30 @@ async def llm_switch_checkpoint(req: CheckpointSwitchRequest, runner_id: Optiona
         raise _agent_unavailable(f"Runner error: {e}")
 
 
+@app.post("/api/llm/comfyui/start")
+async def llm_start_comfyui(runner_id: Optional[int] = None):
+    _inc_request("/api/llm/comfyui/start", "POST", 200)
+    try:
+        client = await _get_runner_client(app.state.db, runner_id)
+        return await client.start_comfyui()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise _agent_unavailable(f"Runner error: {e}")
+
+
+@app.post("/api/llm/comfyui/stop")
+async def llm_stop_comfyui(runner_id: Optional[int] = None):
+    _inc_request("/api/llm/comfyui/stop", "POST", 200)
+    try:
+        client = await _get_runner_client(app.state.db, runner_id)
+        return await client.stop_comfyui()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise _agent_unavailable(f"Runner error: {e}")
+
+
 @app.get("/api/llm/checkpoints")
 async def llm_checkpoints(runner_id: Optional[int] = None):
     _inc_request("/api/llm/checkpoints", "GET", 200)

@@ -87,6 +87,27 @@ export function useCheckpoints() {
   })
 }
 
+export function useStartComfyui() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () => post<{ ok: boolean }>('/api/llm/comfyui/start'),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['llm-status'] })
+      qc.invalidateQueries({ queryKey: ['checkpoints'] })
+    },
+  })
+}
+
+export function useStopComfyui() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () => post<{ ok: boolean }>('/api/llm/comfyui/stop'),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['llm-status'] })
+    },
+  })
+}
+
 export function useSwitchCheckpoint() {
   const qc = useQueryClient()
   return useMutation({

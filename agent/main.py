@@ -43,7 +43,18 @@ logger = logging.getLogger(__name__)
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 COMFYUI_URL = os.environ.get("COMFYUI_URL", "http://localhost:8188")
 COMFYUI_OUTPUT_DIR = os.environ.get("COMFYUI_OUTPUT_DIR", "/outputs")
+COMFYUI_IMAGE = os.environ.get("COMFYUI_IMAGE", "murderbot-image-comfyui:latest")
+COMFYUI_CONTAINER = os.environ.get("COMFYUI_CONTAINER", "comfyui")
 NODE = socket.gethostname()
+
+# Docker client for managing ComfyUI container
+try:
+    import docker as docker_lib
+    _docker = docker_lib.from_env()
+    _DOCKER_OK = True
+except Exception:
+    _docker = None
+    _DOCKER_OK = False
 
 # PSK auth + self-registration
 AGENT_PSK = os.environ.get("LLM_MANAGER_AGENT_PSK", "")
@@ -698,6 +709,73 @@ async def switch_checkpoint(req: CheckpointRequest):
         raise HTTPException(status_code=503, detail=f"ComfyUI unavailable: {e}")
 
     return {"ok": True, "checkpoint": req.name}
+
+
+# ── ComfyUI lifecycle ────────────────────────────────────────────────────────
+
+@app.post("/v1/comfyui/start")
+async def start_comfyui():
+    """Start the ComfyUI container."""
+    if not _DOCKER_OK:
+        raise HTTPException(503, "Docker not available")
+
+    try:
+        container = _docker.containers.get(COMFYUI_CONTAINER)
+        if container.status == "running":
+            return {"ok": True, "message": "ComfyUI already running"}
+        container.start()
+        return {"ok": True, "message": "ComfyUI started"}
+    except docker_lib.errors.NotFound:
+        pass
+
+    # Container doesn't exist — create and start it
+    try:
+        # First try to find the image
+        try:
+            _docker.images.get(COMFYUI_IMAGE)
+        except docker_lib.errors.ImageNotFound:
+            # Try building from the image project directory
+            raise HTTPException(404, f"ComfyUI image '{COMFYUI_IMAGE}' not found. Build it first.")
+
+        _docker.containers.run(
+            COMFYUI_IMAGE,
+            name=COMFYUI_CONTAINER,
+            detach=True,
+            ports={"8188/tcp": 8188},
+            volumes={
+                "/opt/models/checkpoints": {"bind": "/app/models/checkpoints", "mode": "rw"},
+                "/opt/models/lora": {"bind": "/app/models/loras", "mode": "rw"},
+                "/opt/models/vae": {"bind": "/app/models/vae", "mode": "rw"},
+                COMFYUI_OUTPUT_DIR: {"bind": "/app/output", "mode": "rw"},
+            },
+            device_requests=[
+                docker_lib.types.DeviceRequest(count=-1, capabilities=[["gpu"]])
+            ],
+            restart_policy={"Name": "unless-stopped"},
+        )
+        return {"ok": True, "message": "ComfyUI container created and started"}
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(500, f"Failed to start ComfyUI: {e}")
+
+
+@app.post("/v1/comfyui/stop")
+async def stop_comfyui():
+    """Stop the ComfyUI container."""
+    if not _DOCKER_OK:
+        raise HTTPException(503, "Docker not available")
+
+    try:
+        container = _docker.containers.get(COMFYUI_CONTAINER)
+        if container.status != "running":
+            return {"ok": True, "message": "ComfyUI already stopped"}
+        container.stop(timeout=10)
+        return {"ok": True, "message": "ComfyUI stopped"}
+    except docker_lib.errors.NotFound:
+        return {"ok": True, "message": "ComfyUI container not found (already stopped)"}
+    except Exception as e:
+        raise HTTPException(500, f"Failed to stop ComfyUI: {e}")
 
 
 @app.get("/metrics")

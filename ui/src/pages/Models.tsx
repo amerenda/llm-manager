@@ -1,6 +1,6 @@
 import { useState } from 'react'
-import { Download, Trash2, Loader2, CheckCircle2, AlertCircle, Image, Layers, Cpu, Upload, Shield, ShieldOff } from 'lucide-react'
-import { useLlmModels, usePullModel, useDeleteModel, useCheckpoints, useSwitchCheckpoint, useLlmStatus, useLoadModel, useUnloadModel } from '../hooks/useBackend'
+import { Download, Trash2, Loader2, CheckCircle2, AlertCircle, Image, Layers, Cpu, Upload, Shield, ShieldOff, Play, Square } from 'lucide-react'
+import { useLlmModels, usePullModel, useDeleteModel, useCheckpoints, useSwitchCheckpoint, useLlmStatus, useLoadModel, useUnloadModel, useStartComfyui, useStopComfyui } from '../hooks/useBackend'
 import type { LlmModel } from '../types'
 
 function stripExt(filename: string): string {
@@ -173,6 +173,8 @@ function ImageModelsSection() {
   const status = useLlmStatus()
   const checkpoints = useCheckpoints()
   const switchCp = useSwitchCheckpoint()
+  const startComfy = useStartComfyui()
+  const stopComfy = useStopComfyui()
   const [switching, setSwitching] = useState<string | null>(null)
 
   const comfyRunning = status.data?.comfyui_running ?? false
@@ -190,16 +192,37 @@ function ImageModelsSection() {
 
   return (
     <section className="space-y-4">
-      <div className="flex items-center gap-2">
-        <Image className="w-4 h-4 text-brand-400" />
-        <h2 className="text-base font-semibold text-gray-200">Image Models (ComfyUI)</h2>
-        <span className={`ml-1 text-xs px-2 py-0.5 rounded-full ${
-          comfyRunning
-            ? 'bg-green-900/40 text-green-400'
-            : 'bg-gray-800 text-gray-500'
-        }`}>
-          {comfyRunning ? 'Running' : 'Stopped'}
-        </span>
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <Image className="w-4 h-4 text-brand-400" />
+          <h2 className="text-base font-semibold text-gray-200">Image Models (ComfyUI)</h2>
+          <span className={`ml-1 text-xs px-2 py-0.5 rounded-full ${
+            comfyRunning
+              ? 'bg-green-900/40 text-green-400'
+              : 'bg-gray-800 text-gray-500'
+          }`}>
+            {comfyRunning ? 'Running' : 'Stopped'}
+          </span>
+        </div>
+        {comfyRunning ? (
+          <button
+            onClick={() => stopComfy.mutate()}
+            disabled={stopComfy.isPending}
+            className="flex items-center gap-1.5 text-xs bg-red-900/30 hover:bg-red-800/40 text-red-400 px-3 py-1.5 rounded-lg transition-colors disabled:opacity-40"
+          >
+            {stopComfy.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Square className="w-3 h-3" />}
+            Stop ComfyUI
+          </button>
+        ) : (
+          <button
+            onClick={() => startComfy.mutate()}
+            disabled={startComfy.isPending}
+            className="flex items-center gap-1.5 text-xs bg-green-900/30 hover:bg-green-800/40 text-green-400 px-3 py-1.5 rounded-lg transition-colors disabled:opacity-40"
+          >
+            {startComfy.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />}
+            Start ComfyUI
+          </button>
+        )}
       </div>
 
       {checkpoints.isLoading ? (
