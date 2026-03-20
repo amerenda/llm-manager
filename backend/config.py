@@ -1,10 +1,6 @@
-"""Agent configuration persistence."""
-import json
-from pathlib import Path
+"""Agent configuration models (Pydantic only — no file I/O)."""
 from typing import Optional
 from pydantic import BaseModel
-
-CONFIG_DIR = Path("/data/agents")
 
 
 class AgentPersona(BaseModel):
@@ -73,77 +69,61 @@ class PeerDatabase(BaseModel):
     commented_post_ids: list[str] = []
 
 
-def _config_path(slot: int) -> Path:
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    return CONFIG_DIR / f"agent_{slot}_config.json"
+# ── DB reconstruction helpers ─────────────────────────────────────────────────
+
+def config_from_db(row: dict) -> AgentConfig:
+    """Reconstruct AgentConfig from a moltbook_configs DB row dict."""
+    persona = AgentPersona(
+        name=row.get("name", "Agent"),
+        description=row.get("description", "A curious AI agent on Moltbook."),
+        tone=row.get("tone", "friendly, conversational"),
+        topics=row.get("topics", ["technology", "daily life"]),
+    )
+    schedule = AgentSchedule(
+        post_interval_minutes=row.get("post_interval_minutes", 120),
+        active_hours_start=row.get("active_hours_start", 8),
+        active_hours_end=row.get("active_hours_end", 22),
+    )
+    behavior = AgentBehavior(
+        max_post_length=row.get("max_post_length", 280),
+        auto_reply=row.get("auto_reply", True),
+        auto_like=row.get("auto_like", False),
+        reply_to_own_threads=row.get("reply_to_own_threads", False),
+        post_jitter_pct=row.get("post_jitter_pct", 20),
+        karma_throttle=row.get("karma_throttle", False),
+        karma_throttle_threshold=row.get("karma_throttle_threshold", 10),
+        karma_throttle_multiplier=row.get("karma_throttle_multiplier", 2.0),
+        target_submolts=row.get("target_submolts", []),
+        auto_dm_approve=row.get("auto_dm_approve", False),
+        receive_peer_likes=row.get("receive_peer_likes", False),
+        receive_peer_comments=row.get("receive_peer_comments", False),
+        send_peer_likes=row.get("send_peer_likes", True),
+        send_peer_comments=row.get("send_peer_comments", True),
+    )
+    return AgentConfig(
+        slot=row["slot"],
+        enabled=row.get("enabled", False),
+        model=row.get("model", "qwen2.5:7b"),
+        api_key=row.get("api_key", ""),
+        registered=row.get("registered", False),
+        claimed=row.get("claimed", False),
+        persona=persona,
+        schedule=schedule,
+        behavior=behavior,
+    )
 
 
-def _state_path(slot: int) -> Path:
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    return CONFIG_DIR / f"agent_{slot}_state.json"
-
-
-def _activity_path(slot: int) -> Path:
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    return CONFIG_DIR / f"agent_{slot}_activity.jsonl"
-
-
-def load_config(slot: int) -> AgentConfig:
-    path = _config_path(slot)
-    if path.exists():
-        return AgentConfig.model_validate_json(path.read_text())
-    return AgentConfig(slot=slot)
-
-
-def save_config(config: AgentConfig) -> None:
-    _config_path(config.slot).write_text(config.model_dump_json(indent=2))
-
-
-def load_state(slot: int) -> AgentState:
-    path = _state_path(slot)
-    if path.exists():
-        return AgentState.model_validate_json(path.read_text())
-    return AgentState(slot=slot)
-
-
-def save_state(state: AgentState) -> None:
-    _state_path(state.slot).write_text(state.model_dump_json(indent=2))
-
-
-def append_activity(slot: int, action: str, detail: str) -> None:
-    from datetime import datetime, timezone
-    entry = {
-        "ts": datetime.now(timezone.utc).isoformat(),
-        "action": action,
-        "detail": detail,
-    }
-    with _activity_path(slot).open("a") as f:
-        f.write(json.dumps(entry) + "\n")
-
-
-def read_activity(slot: int, n: int = 50) -> list[dict]:
-    path = _activity_path(slot)
-    if not path.exists():
-        return []
-    lines = path.read_text().strip().splitlines()
-    return [json.loads(l) for l in lines[-n:]][::-1]
-
-
-def _peer_db_path(slot: int) -> Path:
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    return CONFIG_DIR / f"agent_{slot}_peers.json"
-
-
-def load_peer_db(slot: int) -> PeerDatabase:
-    path = _peer_db_path(slot)
-    if path.exists():
-        return PeerDatabase.model_validate_json(path.read_text())
-    return PeerDatabase(slot=slot)
-
-
-def save_peer_db(db: PeerDatabase) -> None:
-    _peer_db_path(db.slot).write_text(db.model_dump_json(indent=2))
-
-
-def load_all_configs() -> list[AgentConfig]:
-    return [load_config(i) for i in range(1, 7)]
+def state_from_db(row: dict) -> AgentState:
+    """Reconstruct AgentState from a moltbook_state DB row dict."""
+    last_hb = row.get("last_heartbeat")
+    if last_hb is not None and not isinstance(last_hb, str):
+        # asyncpg returns datetime objects for TIMESTAMPTZ
+        last_hb = last_hb.isoformat()
+    return AgentState(
+        slot=row["slot"],
+        karma=row.get("karma", 0),
+        last_heartbeat=last_hb,
+        last_post_time=float(row.get("last_post_time", 0)),
+        next_post_time=float(row.get("next_post_time", 0)),
+        pending_dm_requests=row.get("pending_dm_requests", []),
+    )

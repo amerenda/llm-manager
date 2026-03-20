@@ -6,14 +6,14 @@ import re
 import time
 from datetime import datetime, timezone
 
+import asyncpg
 import httpx
 
+import db
 from config import (
     AgentConfig, AgentState, PeerDatabase, PeerPost,
-    append_activity, load_state, save_state,
-    load_peer_db, save_peer_db
+    config_from_db, state_from_db,
 )
-
 from moltbook_client import MoltbookClient
 
 logger = logging.getLogger(__name__)
@@ -22,18 +22,29 @@ HEARTBEAT_INTERVAL = 30 * 60  # 30 min
 
 
 class AgentRunner:
-    def __init__(self, config: AgentConfig, ollama_base: str, ollama_model: str):
+    def __init__(
+        self,
+        config: AgentConfig,
+        pool: asyncpg.Pool,
+        ollama_base: str,
+        ollama_model: str,
+        psk: str = "",
+    ):
         self.config = config
         self.slot = config.slot
+        self.pool = pool
         self.ollama_base = ollama_base
         self.ollama_model = ollama_model
         self.client = MoltbookClient(config.api_key)
-        self.state: AgentState = load_state(self.slot)
+        # State is loaded lazily on first heartbeat
+        self.state: AgentState = AgentState(slot=self.slot)
         self._task: asyncio.Task | None = None
         self.running = False
+        # PSK stored for potential future use (e.g. agent API calls)
+        self._psk = psk
 
-    def log(self, action: str, detail: str):
-        append_activity(self.slot, action, detail)
+    async def log(self, action: str, detail: str):
+        await db.append_moltbook_activity(self.pool, self.slot, action, detail)
         logger.info("[agent-%d] [%s] %s", self.slot, action, detail)
 
     async def _llm(self, prompt: str, system: str | None = None) -> str:
@@ -99,13 +110,79 @@ class AgentRunner:
                     pass
             raise
 
+    async def _load_state(self) -> None:
+        """Load state from DB into self.state."""
+        row = await db.get_moltbook_state(self.pool, self.slot)
+        self.state = state_from_db(row)
+
+    async def _save_state(self) -> None:
+        """Persist self.state to DB."""
+        await db.upsert_moltbook_state(
+            self.pool,
+            self.slot,
+            karma=self.state.karma,
+            last_heartbeat=self.state.last_heartbeat,
+            last_post_time=self.state.last_post_time,
+            next_post_time=self.state.next_post_time,
+            pending_dm_requests=self.state.pending_dm_requests,
+        )
+
+    async def _load_peer_db(self) -> PeerDatabase:
+        """Build PeerDatabase from DB tables."""
+        raw_posts = await db.get_peer_posts(self.pool, self.slot)
+        liked_ids = await db.get_interacted_post_ids(self.pool, self.slot, "liked")
+        commented_ids = await db.get_interacted_post_ids(self.pool, self.slot, "commented")
+
+        peers: dict[str, list[PeerPost]] = {}
+        for peer_name, posts in raw_posts.items():
+            peers[peer_name] = [
+                PeerPost(
+                    post_id=p["post_id"],
+                    title=p["title"],
+                    content_preview=p["content_preview"],
+                    seen_at=(
+                        p["seen_at"].isoformat()
+                        if not isinstance(p["seen_at"], str)
+                        else p["seen_at"]
+                    ),
+                )
+                for p in posts
+            ]
+
+        return PeerDatabase(
+            slot=self.slot,
+            peers=peers,
+            liked_post_ids=liked_ids,
+            commented_post_ids=commented_ids,
+        )
+
+    async def _save_peer_db(self, peer_db: PeerDatabase) -> None:
+        """Persist peer posts and interactions to DB."""
+        for peer_name, posts in peer_db.peers.items():
+            for pp in posts:
+                await db.upsert_peer_post(
+                    self.pool,
+                    self.slot,
+                    peer_name,
+                    pp.post_id,
+                    pp.title,
+                    pp.content_preview,
+                )
+
+        # Prune to keep_per_peer=20
+        await db.prune_peer_posts(self.pool, self.slot, keep_per_peer=20)
+
+        # Interactions are recorded in place during operations — nothing extra to flush here
+
     async def run_heartbeat(self):
-        self.log("heartbeat", "Starting")
+        # Load fresh state from DB each heartbeat
+        await self._load_state()
+        await self.log("heartbeat", "Starting")
         try:
             home = await self.client.home()
             self.state.karma = home.get("your_account", {}).get("karma", self.state.karma)
             self.state.last_heartbeat = datetime.now(timezone.utc).isoformat()
-            save_state(self.state)
+            await self._save_state()
 
             if self.config.behavior.auto_reply:
                 for activity in home.get("activity_on_your_posts", []):
@@ -123,10 +200,10 @@ class AgentRunner:
             # Passive: keep peer database updated from feed observations
             await self._update_peer_db()
 
-            self.log("heartbeat", f"Done — karma: {self.state.karma}")
+            await self.log("heartbeat", f"Done — karma: {self.state.karma}")
         except Exception as e:
             logger.error("Heartbeat error slot %d: %s", self.slot, e)
-            self.log("error", str(e))
+            await self.log("error", str(e))
 
     async def _handle_post_activity(self, activity: dict):
         post_id = activity.get("post_id") or activity.get("id")
@@ -156,7 +233,7 @@ class AgentRunner:
                     await asyncio.sleep(25)
             await self.client.mark_notifications_read(post_id)
             if replied:
-                self.log("replied", f"Replied to {replied} comments on {post_id}")
+                await self.log("replied", f"Replied to {replied} comments on {post_id}")
         except Exception as e:
             logger.error("Post activity error: %s", e)
 
@@ -168,21 +245,21 @@ class AgentRunner:
             if self.config.behavior.auto_dm_approve:
                 try:
                     await self.client.dm_approve(cid)
-                    self.log("dm_approved", f"Auto-approved DM from {requester}: '{preview}'")
+                    await self.log("dm_approved", f"Auto-approved DM from {requester}: '{preview}'")
                 except Exception as e:
                     logger.error("Auto DM approve error: %s", e)
             else:
-                self.log("dm_request_pending", f"DM from {requester}: '{preview}'")
+                await self.log("dm_request_pending", f"DM from {requester}: '{preview}'")
                 if cid not in self.state.pending_dm_requests:
                     self.state.pending_dm_requests.append(cid)
-        save_state(self.state)
+        await self._save_state()
 
     async def _browse_and_engage(self):
         try:
             feed = await self.client.feed(sort="new", limit=15)
             own_name = self.config.persona.name
             upvoted = commented = 0
-            db = load_peer_db(self.slot)
+            peer_db = await self._load_peer_db()
             for post in feed.get("posts", []):
                 pid = post.get("id")
                 if not pid:
@@ -191,7 +268,7 @@ class AgentRunner:
                 if post_author == own_name:
                     continue  # never upvote or comment on own posts
                 # skip if we already liked this post via peer interaction
-                if pid not in db.liked_post_ids:
+                if pid not in peer_db.liked_post_ids:
                     try:
                         await self.client.upvote_post(pid)
                         upvoted += 1
@@ -215,14 +292,13 @@ class AgentRunner:
                             except Exception:
                                 pass
             if upvoted or commented:
-                self.log("browsed", f"Upvoted {upvoted}, commented {commented}")
+                await self.log("browsed", f"Upvoted {upvoted}, commented {commented}")
         except Exception as e:
             logger.error("Browse error: %s", e)
 
     async def _reply_to_own_threads(self):
         """Continue agent's own recent posts as threads."""
         try:
-            # Get agent's recent posts from feed filtered by own name
             feed = await self.client.feed(sort="new", limit=30)
             own_name = self.config.persona.name
             own_posts = [
@@ -248,7 +324,7 @@ class AgentRunner:
                         await self._post_with_challenge(
                             self.client.create_comment, pid, continuation
                         )
-                        self.log("thread_reply", f"Continued thread on '{post.get('title')}'")
+                        await self.log("thread_reply", f"Continued thread on '{post.get('title')}'")
                         await asyncio.sleep(20)
                     except Exception as e:
                         logger.error("Thread reply error: %s", e)
@@ -269,7 +345,7 @@ class AgentRunner:
         if self.state.next_post_time == 0:
             jitter = 1.0 + random.uniform(-beh.post_jitter_pct / 100, beh.post_jitter_pct / 100)
             self.state.next_post_time = self.state.last_post_time + interval_secs * jitter
-            save_state(self.state)
+            await self._save_state()
 
         if now < self.state.next_post_time:
             return
@@ -304,17 +380,15 @@ class AgentRunner:
             # Schedule next post with fresh jitter
             jitter = 1.0 + random.uniform(-beh.post_jitter_pct / 100, beh.post_jitter_pct / 100)
             self.state.next_post_time = now + interval_secs * jitter
-            save_state(self.state)
-            self.log("posted", f"New post: '{title}' → m/{submolt}")
+            await self._save_state()
+            await self.log("posted", f"New post: '{title}' → m/{submolt}")
         except Exception as e:
             logger.error("Post error: %s", e)
 
     async def _update_peer_db(self, peer_names: list[str] | None = None) -> None:
         """Scan feed and record posts from peer agents. If peer_names is None, tracks all non-self authors."""
         try:
-            from datetime import datetime, timezone
             feed = await self.client.feed(sort="new", limit=30)
-            db = load_peer_db(self.slot)
             own_name = self.config.persona.name
             for post in feed.get("posts", []):
                 author = post.get("author", {}).get("name", "")
@@ -327,52 +401,45 @@ class AgentRunner:
                 pid = post.get("id")
                 if not pid:
                     continue
-                # Add to peer db if not already tracked
-                existing_ids = {p.post_id for p in db.peers.get(author, [])}
-                if pid not in existing_ids:
-                    entry = PeerPost(
-                        post_id=pid,
-                        title=post.get("title", ""),
-                        content_preview=post.get("content", "")[:200],
-                        seen_at=datetime.now(timezone.utc).isoformat(),
-                    )
-                    if author not in db.peers:
-                        db.peers[author] = []
-                    db.peers[author].append(entry)
-                    # Keep only last 20 posts per peer
-                    db.peers[author] = db.peers[author][-20:]
-            # Trim liked/commented lists to avoid unbounded growth
-            db.liked_post_ids = db.liked_post_ids[-200:]
-            db.commented_post_ids = db.commented_post_ids[-200:]
-            save_peer_db(db)
+                await db.upsert_peer_post(
+                    self.pool,
+                    self.slot,
+                    author,
+                    pid,
+                    post.get("title", ""),
+                    post.get("content", "")[:200],
+                )
+            # Prune to keep last 20 per peer
+            await db.prune_peer_posts(self.pool, self.slot, keep_per_peer=20)
         except Exception as e:
             logger.error("Peer DB update error slot %d: %s", self.slot, e)
 
     async def interact_with_peers(self, peer_names: list[str]) -> None:
         """Interact with known peer agent posts using the peer database."""
-        self.log("peer_interact", f"Engaging with peers: {', '.join(peer_names)}")
+        await self.log("peer_interact", f"Engaging with peers: {', '.join(peer_names)}")
         await self._update_peer_db(peer_names)
-        db = load_peer_db(self.slot)
+        peer_db = await self._load_peer_db()
         beh = self.config.behavior
         own_name = self.config.persona.name
         liked = 0
         commented = 0
 
-        for peer_name, posts in db.peers.items():
+        for peer_name, posts in peer_db.peers.items():
             if peer_name == own_name:
                 continue
             for pp in posts[-5:]:  # most recent 5 posts per peer
                 pid = pp.post_id
 
-                if beh.send_peer_likes and pid not in db.liked_post_ids:
+                if beh.send_peer_likes and pid not in peer_db.liked_post_ids:
                     try:
                         await self.client.upvote_post(pid)
-                        db.liked_post_ids.append(pid)
+                        await db.record_interaction(self.pool, self.slot, pid, "liked")
+                        peer_db.liked_post_ids.append(pid)
                         liked += 1
                     except Exception:
                         pass
 
-                if beh.send_peer_comments and pid not in db.commented_post_ids:
+                if beh.send_peer_comments and pid not in peer_db.commented_post_ids:
                     comment = await self._llm(
                         f'Your peer agent {peer_name} posted:\n'
                         f'"{pp.title}"\n{pp.content_preview}\n\n'
@@ -381,14 +448,14 @@ class AgentRunner:
                     if comment:
                         try:
                             await self._post_with_challenge(self.client.create_comment, pid, comment)
-                            db.commented_post_ids.append(pid)
+                            await db.record_interaction(self.pool, self.slot, pid, "commented")
+                            peer_db.commented_post_ids.append(pid)
                             commented += 1
                             await asyncio.sleep(20)
                         except Exception as e:
                             logger.error("Peer comment error: %s", e)
 
-        save_peer_db(db)
-        self.log("peer_interact", f"Liked {liked}, commented {commented} peer posts")
+        await self.log("peer_interact", f"Liked {liked}, commented {commented} peer posts")
 
     async def _loop(self):
         self.running = True

@@ -1,21 +1,21 @@
 """
 LLM Manager Backend API.
-Runs as a k8s DaemonSet on GPU-labeled nodes.
+Runs as a stateless k8s Deployment on port 8081.
 Combines Moltbook agent management with LLM proxy + app registry.
-Port 8081.
+LLM runners self-register via PSK instead of being polled.
 """
 import asyncio
 import logging
 import os
+import re
 import socket
-import time
 from contextlib import asynccontextmanager
 from typing import Optional
 
 import asyncpg
 import httpx
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from prometheus_client import (
@@ -26,16 +26,15 @@ from prometheus_client import (
 )
 from pydantic import BaseModel
 
+import db
 from config import (
     AgentConfig, AgentPersona, AgentSchedule, AgentBehavior,
-    load_config, save_config, load_all_configs,
-    load_state, read_activity,
+    config_from_db, state_from_db,
 )
 from db import (
-    init_db, upsert_agent, get_agents as db_get_agents,
+    init_db,
     register_app, heartbeat_app, get_apps, deregister_app,
 )
-from gpu import detect_gpu, check_model_fit, vram_for_model
 from agent_runner import AgentRunner
 from llm_agent import LLMAgentClient
 
@@ -45,13 +44,12 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-OLLAMA_BASE = os.environ.get("OLLAMA_BASE_URL", "http://host.docker.internal:11434")
-API_BASE = "https://www.moltbook.com/api/v1"
+AGENT_PSK = os.environ.get("AGENT_PSK", "")
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://llm:llm@localhost:5432/llmmanager")
-AGENT_URL = os.environ.get("AGENT_URL", "http://localhost:8090")
 NODE = socket.gethostname()
+API_BASE = "https://www.moltbook.com/api/v1"
 
-# Global agent runners (slot 1-3)
+# Global agent runners (slot 1-6)
 runners: dict[int, AgentRunner] = {}
 
 # ── Prometheus metrics ────────────────────────────────────────────────────────
@@ -71,12 +69,20 @@ def _inc_request(endpoint: str, method: str, status: int):
     api_requests_total.labels(endpoint=endpoint, method=method, status=str(status)).inc()
 
 
-# ── Agent client helper ───────────────────────────────────────────────────────
+# ── Runner helpers ─────────────────────────────────────────────────────────────
 
-def _agent_client() -> LLMAgentClient:
-    """Parse AGENT_URL and return an LLMAgentClient."""
-    url = AGENT_URL.rstrip("/")
-    # strip http(s)://
+async def _get_runner_client(pool: asyncpg.Pool, runner_id: Optional[int] = None) -> LLMAgentClient:
+    """Return an LLMAgentClient pointed at an active runner."""
+    runners_list = await db.get_active_runners(pool)
+    if not runners_list:
+        raise HTTPException(503, "No active llm-runners available")
+    if runner_id is not None:
+        r = next((x for x in runners_list if x["id"] == runner_id), None)
+        if not r:
+            raise HTTPException(404, "Runner not found or inactive")
+    else:
+        r = runners_list[0]
+    url = r["address"].rstrip("/")
     if "://" in url:
         url = url.split("://", 1)[1]
     if ":" in url:
@@ -85,102 +91,71 @@ def _agent_client() -> LLMAgentClient:
     else:
         host = url
         port = 8090
-    return LLMAgentClient(host=host, port=port)
+    return LLMAgentClient(host=host, port=port, psk=AGENT_PSK)
 
 
-def _make_runner(config: AgentConfig) -> AgentRunner:
-    return AgentRunner(config, ollama_base=OLLAMA_BASE, ollama_model=config.model)
+async def _get_runner_ollama_base(pool: asyncpg.Pool, runner_id: Optional[int] = None) -> str:
+    """Get Ollama URL for a runner. Replaces the runner port with 11434."""
+    runners_list = await db.get_active_runners(pool)
+    if not runners_list:
+        raise HTTPException(503, "No active llm-runners available")
+    if runner_id is not None:
+        r = next((x for x in runners_list if x["id"] == runner_id), None)
+        if not r:
+            r = runners_list[0]
+    else:
+        r = runners_list[0]
+    # runner address is like http://murderbot.amer.home:8090
+    # ollama is on the same host at port 11434
+    addr = r["address"]
+    return re.sub(r':\d+$', ':11434', addr)
 
 
-# ── Background task: agent heartbeat ─────────────────────────────────────────
-
-async def _agent_heartbeat_loop(app: FastAPI):
-    """Periodically check the local llm-agent and update the DB."""
-    while True:
-        await asyncio.sleep(60)
-        try:
-            client = _agent_client()
-            if await client.is_reachable():
-                status = await client.status()
-                capabilities = {
-                    "gpu_vram_total_bytes": status.get("gpu_vram_total_bytes", 0),
-                    "gpu_vram_used_bytes": status.get("gpu_vram_used_bytes", 0),
-                    "comfyui_running": status.get("comfyui_running", False),
-                    "loaded_models": [m["name"] for m in status.get("loaded_ollama_models", [])],
-                }
-                await upsert_agent(
-                    app.state.db,
-                    node_name=NODE,
-                    host="localhost",
-                    port=8090,
-                    capabilities=capabilities,
-                )
-                logger.debug("Agent heartbeat OK")
-            else:
-                logger.warning("Local llm-agent not reachable at %s", AGENT_URL)
-        except Exception as e:
-            logger.error("Agent heartbeat loop error: %s", e)
+def _make_runner(config: AgentConfig, pool: asyncpg.Pool, ollama_base: str) -> AgentRunner:
+    return AgentRunner(
+        config,
+        pool=pool,
+        ollama_base=ollama_base,
+        ollama_model=config.model,
+        psk=AGENT_PSK,
+    )
 
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 1. Connect to PostgreSQL
-    try:
-        pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10)
-        app.state.db = pool
-        await init_db(pool)
-        logger.info("Database connected: %s", DATABASE_URL)
-    except Exception as e:
-        logger.error("Failed to connect to database: %s", e)
-        app.state.db = None
+    pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10)
+    app.state.db = pool
+    await init_db(pool)
+    logger.info("Database connected: %s", DATABASE_URL)
 
-    # 2. Try to register local agent in DB
-    if app.state.db:
-        try:
-            client = _agent_client()
-            if await client.is_reachable():
-                status = await client.status()
-                capabilities = {
-                    "gpu_vram_total_bytes": status.get("gpu_vram_total_bytes", 0),
-                    "comfyui_running": status.get("comfyui_running", False),
-                }
-                await upsert_agent(
-                    pool,
-                    node_name=NODE,
-                    host="localhost",
-                    port=8090,
-                    capabilities=capabilities,
+    # Auto-start enabled moltbook agents from DB
+    for row in await db.get_all_moltbook_configs(pool):
+        if row["enabled"] and row["api_key"]:
+            config = config_from_db(row)
+            try:
+                ollama_base = await _get_runner_ollama_base(pool, row.get("llm_runner_id"))
+            except HTTPException:
+                logger.warning(
+                    "No runners available for slot %d, deferring start", row["slot"]
                 )
-                logger.info("Registered local llm-agent in DB")
-            else:
-                logger.warning("Local llm-agent not reachable at startup; will retry in background")
-        except Exception as e:
-            logger.warning("Could not register agent at startup: %s", e)
-
-    # 3. Start agent heartbeat background task
-    heartbeat_task = asyncio.create_task(_agent_heartbeat_loop(app))
-
-    # 4. Auto-start moltbook agents that are enabled and have an API key
-    for config in load_all_configs():
-        if config.enabled and config.api_key:
-            r = _make_runner(config)
+                continue
+            r = _make_runner(config, pool, ollama_base)
             runners[config.slot] = r
             r.start()
-            logger.info("Auto-started moltbook agent %d (%s)", config.slot, config.persona.name)
+            logger.info(
+                "Auto-started moltbook agent %d (%s)", config.slot, config.persona.name
+            )
 
     yield
 
-    # Shutdown
-    heartbeat_task.cancel()
     for r in runners.values():
         r.stop()
-    if app.state.db:
-        await app.state.db.close()
+    await pool.close()
 
 
-app = FastAPI(title="LLM Manager Backend", version="1.0.0", lifespan=lifespan)
+app = FastAPI(title="LLM Manager Backend", version="2.0.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -197,57 +172,104 @@ async def health():
     return {"ok": True, "service": "llm-manager-backend", "node": NODE, "db": db_ok}
 
 
-# ── Existing: GPU & Ollama models ─────────────────────────────────────────────
+# ── GPU info (placeholder — backend is no longer on the GPU node) ─────────────
 
 @app.get("/api/gpu")
 async def gpu_info():
-    return detect_gpu() or {"name": "No NVIDIA GPU detected", "vram_total_gb": 0}
+    return {"message": "GPU info available via /api/llm/status"}
 
 
-@app.get("/api/models")
-async def list_models():
-    try:
-        async with httpx.AsyncClient(timeout=5) as client:
-            r = await client.get(f"{OLLAMA_BASE}/api/tags")
-            r.raise_for_status()
-            models = r.json().get("models", [])
-            return [
-                {
-                    "name": m["name"],
-                    "size_gb": round(m.get("size", 0) / 1e9, 1),
-                    "vram_estimate_gb": vram_for_model(m["name"]),
-                }
-                for m in models
-            ]
-    except Exception as e:
-        raise HTTPException(status_code=503, detail=f"Cannot reach Ollama: {e}")
+# ── LLM Runner registration ───────────────────────────────────────────────────
+
+class RunnerRegisterRequest(BaseModel):
+    hostname: str
+    address: str
+    port: int = 8090
+    capabilities: dict = {}
 
 
-@app.post("/api/vram-check")
-async def vram_check(body: dict):
-    models = body.get("models", [])
-    gpu = detect_gpu()
-    return check_model_fit(models, gpu)
+@app.post("/api/runners/register")
+async def register_runner(
+    req: RunnerRegisterRequest,
+    x_agent_psk: Optional[str] = Header(None),
+):
+    if AGENT_PSK and x_agent_psk != AGENT_PSK:
+        raise HTTPException(401, "Invalid PSK")
+    runner_id = await db.register_runner(
+        app.state.db, req.hostname, req.address, req.port, req.capabilities
+    )
+    return {"ok": True, "runner_id": runner_id}
 
 
-# ── Existing: Moltbook Agent Config ───────────────────────────────────────────
+class RunnerHeartbeatRequest(BaseModel):
+    runner_id: int
+    capabilities: dict = {}
+
+
+@app.post("/api/runners/heartbeat")
+async def runner_heartbeat(
+    req: RunnerHeartbeatRequest,
+    x_agent_psk: Optional[str] = Header(None),
+):
+    if AGENT_PSK and x_agent_psk != AGENT_PSK:
+        raise HTTPException(401, "Invalid PSK")
+    found = await db.heartbeat_runner(app.state.db, req.runner_id, req.capabilities)
+    if not found:
+        raise HTTPException(404, "Runner not found")
+    return {"ok": True}
+
+
+@app.get("/api/runners")
+async def list_runners():
+    return await db.get_active_runners(app.state.db)
+
+
+# ── Moltbook agent config ─────────────────────────────────────────────────────
 
 @app.get("/api/agents")
 async def get_moltbook_agents():
-    configs = load_all_configs()
+    pool = app.state.db
+    configs = await db.get_all_moltbook_configs(pool)
     result = []
-    for c in configs:
-        state = load_state(c.slot)
+    for row in configs:
+        state_row = await db.get_moltbook_state(pool, row["slot"])
+        state = state_from_db(state_row)
         result.append({
-            "slot": c.slot,
-            "enabled": c.enabled,
-            "model": c.model,
-            "registered": c.registered,
-            "claimed": c.claimed,
-            "running": c.slot in runners and runners[c.slot].running,
-            "persona": c.persona.model_dump(),
-            "schedule": c.schedule.model_dump(),
-            "behavior": c.behavior.model_dump(),
+            "slot": row["slot"],
+            "enabled": row["enabled"],
+            "model": row["model"],
+            "api_key": row["api_key"],
+            "registered": row["registered"],
+            "claimed": row["claimed"],
+            "llm_runner_id": row.get("llm_runner_id"),
+            "running": row["slot"] in runners and runners[row["slot"]].running,
+            "persona": {
+                "name": row["name"],
+                "description": row["description"],
+                "tone": row["tone"],
+                "topics": row["topics"],
+            },
+            "schedule": {
+                "post_interval_minutes": row["post_interval_minutes"],
+                "active_hours_start": row["active_hours_start"],
+                "active_hours_end": row["active_hours_end"],
+            },
+            "behavior": {
+                "max_post_length": row["max_post_length"],
+                "auto_reply": row["auto_reply"],
+                "auto_like": row["auto_like"],
+                "reply_to_own_threads": row["reply_to_own_threads"],
+                "post_jitter_pct": row["post_jitter_pct"],
+                "karma_throttle": row["karma_throttle"],
+                "karma_throttle_threshold": row["karma_throttle_threshold"],
+                "karma_throttle_multiplier": row["karma_throttle_multiplier"],
+                "target_submolts": row["target_submolts"],
+                "auto_dm_approve": row["auto_dm_approve"],
+                "receive_peer_likes": row["receive_peer_likes"],
+                "receive_peer_comments": row["receive_peer_comments"],
+                "send_peer_likes": row["send_peer_likes"],
+                "send_peer_comments": row["send_peer_comments"],
+            },
             "state": state.model_dump(),
         })
     moltbook_agents_running_gauge.set(
@@ -259,6 +281,7 @@ async def get_moltbook_agents():
 class AgentUpdateRequest(BaseModel):
     enabled: Optional[bool] = None
     model: Optional[str] = None
+    llm_runner_id: Optional[int] = None
     persona: Optional[dict] = None
     schedule: Optional[dict] = None
     behavior: Optional[dict] = None
@@ -268,58 +291,98 @@ class AgentUpdateRequest(BaseModel):
 async def update_moltbook_agent(slot: int, req: AgentUpdateRequest):
     if slot not in range(1, 7):
         raise HTTPException(status_code=404, detail="Slot must be 1-6")
-    config = load_config(slot)
+    pool = app.state.db
+
+    # Load current row to merge partial updates
+    row = await db.get_moltbook_config(pool, slot)
+
+    updates: dict = {}
 
     if req.enabled is not None:
-        config.enabled = req.enabled
+        updates["enabled"] = req.enabled
     if req.model is not None:
-        config.model = req.model
-    if req.persona:
-        config.persona = AgentPersona(**{**config.persona.model_dump(), **req.persona})
-    if req.schedule:
-        config.schedule = AgentSchedule(**{**config.schedule.model_dump(), **req.schedule})
-    if req.behavior:
-        config.behavior = AgentBehavior(**{**config.behavior.model_dump(), **req.behavior})
+        updates["model"] = req.model
+    if req.llm_runner_id is not None:
+        updates["llm_runner_id"] = req.llm_runner_id
 
-    save_config(config)
+    if req.persona:
+        if "name" in req.persona:
+            updates["name"] = req.persona["name"]
+        if "description" in req.persona:
+            updates["description"] = req.persona["description"]
+        if "tone" in req.persona:
+            updates["tone"] = req.persona["tone"]
+        if "topics" in req.persona:
+            updates["topics"] = req.persona["topics"]
+
+    if req.schedule:
+        for field in ("post_interval_minutes", "active_hours_start", "active_hours_end"):
+            if field in req.schedule:
+                updates[field] = req.schedule[field]
+
+    if req.behavior:
+        for field in (
+            "max_post_length", "auto_reply", "auto_like", "reply_to_own_threads",
+            "post_jitter_pct", "karma_throttle", "karma_throttle_threshold",
+            "karma_throttle_multiplier", "target_submolts", "auto_dm_approve",
+            "receive_peer_likes", "receive_peer_comments", "send_peer_likes",
+            "send_peer_comments",
+        ):
+            if field in req.behavior:
+                updates[field] = req.behavior[field]
+
+    if updates:
+        await db.upsert_moltbook_config(pool, slot, **updates)
 
     # Restart runner if it's active
     if slot in runners:
         runners[slot].stop()
         del runners[slot]
-    if config.enabled and config.api_key:
-        r = _make_runner(config)
-        runners[slot] = r
-        r.start()
+
+    # Re-load updated config and restart if enabled
+    updated_row = await db.get_moltbook_config(pool, slot)
+    if updated_row["enabled"] and updated_row["api_key"]:
+        config = config_from_db(updated_row)
+        try:
+            ollama_base = await _get_runner_ollama_base(pool, updated_row.get("llm_runner_id"))
+            r = _make_runner(config, pool, ollama_base)
+            runners[slot] = r
+            r.start()
+        except HTTPException:
+            logger.warning("No runners available for slot %d after update", slot)
 
     return {"ok": True}
 
 
-# ── Existing: Moltbook Agent Lifecycle ────────────────────────────────────────
+# ── Moltbook agent lifecycle ──────────────────────────────────────────────────
 
 @app.post("/api/agents/{slot}/start")
 async def start_moltbook_agent(slot: int):
-    config = load_config(slot)
-    if not config.api_key:
+    pool = app.state.db
+    row = await db.get_moltbook_config(pool, slot)
+    if not row["api_key"]:
         raise HTTPException(status_code=400, detail="Agent not registered — no API key")
     if slot in runners and runners[slot].running:
         return {"ok": True, "message": "Already running"}
-    r = _make_runner(config)
+    config = config_from_db(row)
+    try:
+        ollama_base = await _get_runner_ollama_base(pool, row.get("llm_runner_id"))
+    except HTTPException:
+        raise HTTPException(503, "No active llm-runners available to start agent")
+    r = _make_runner(config, pool, ollama_base)
     runners[slot] = r
     r.start()
-    config.enabled = True
-    save_config(config)
+    await db.upsert_moltbook_config(pool, slot, enabled=True)
     return {"ok": True, "message": f"Agent {slot} started"}
 
 
 @app.post("/api/agents/{slot}/stop")
 async def stop_moltbook_agent(slot: int):
+    pool = app.state.db
     if slot in runners:
         runners[slot].stop()
         del runners[slot]
-    config = load_config(slot)
-    config.enabled = False
-    save_config(config)
+    await db.upsert_moltbook_config(pool, slot, enabled=False)
     return {"ok": True, "message": f"Agent {slot} stopped"}
 
 
@@ -348,7 +411,7 @@ async def interact_with_peers(slot: int):
 
 @app.get("/api/agents/{slot}/activity")
 async def get_agent_activity(slot: int, n: int = 50):
-    return read_activity(slot, n)
+    return await db.read_moltbook_activity(app.state.db, slot, n)
 
 
 class PostRequest(BaseModel):
@@ -366,7 +429,7 @@ async def manual_post(slot: int, req: PostRequest):
         result = await r._post_with_challenge(
             r.client.create_post, req.submolt, req.title, req.content
         )
-        r.log("manual_post", f"Posted: '{req.title}'")
+        await r.log("manual_post", f"Posted: '{req.title}'")
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -381,8 +444,9 @@ class RegisterRequest(BaseModel):
 async def register_moltbook_agent(slot: int, req: RegisterRequest):
     if slot not in range(1, 7):
         raise HTTPException(status_code=404)
-    config = load_config(slot)
-    if config.registered and config.api_key:
+    pool = app.state.db
+    row = await db.get_moltbook_config(pool, slot)
+    if row["registered"] and row["api_key"]:
         raise HTTPException(status_code=400, detail="Already registered")
     try:
         async with httpx.AsyncClient(timeout=30) as client:
@@ -396,11 +460,14 @@ async def register_moltbook_agent(slot: int, req: RegisterRequest):
         api_key = data.get("api_key") or data.get("token") or data.get("key")
         if not api_key:
             raise HTTPException(status_code=502, detail=f"No API key in response: {data}")
-        config.api_key = api_key
-        config.registered = True
-        config.persona.name = req.name
-        config.persona.description = req.description
-        save_config(config)
+        await db.upsert_moltbook_config(
+            pool,
+            slot,
+            api_key=api_key,
+            registered=True,
+            name=req.name,
+            description=req.description,
+        )
         return {
             "ok": True,
             "api_key_preview": api_key[:8] + "...",
@@ -412,23 +479,25 @@ async def register_moltbook_agent(slot: int, req: RegisterRequest):
 
 @app.post("/api/agents/{slot}/mark-claimed")
 async def mark_claimed(slot: int):
-    config = load_config(slot)
-    config.claimed = True
-    save_config(config)
+    await db.upsert_moltbook_config(app.state.db, slot, claimed=True)
     return {"ok": True}
 
 
 @app.post("/api/agents/{slot}/dm/approve/{conv_id}")
 async def approve_dm(slot: int, conv_id: str):
+    pool = app.state.db
     if slot not in runners:
         raise HTTPException(status_code=400, detail="Agent not running")
     r = runners[slot]
     result = await r.client.dm_approve(conv_id)
     if conv_id in r.state.pending_dm_requests:
         r.state.pending_dm_requests.remove(conv_id)
-    from config import save_state
-    save_state(r.state)
-    r.log("dm_approved", f"Approved DM {conv_id}")
+    await db.upsert_moltbook_state(
+        pool,
+        slot,
+        pending_dm_requests=r.state.pending_dm_requests,
+    )
+    await r.log("dm_approved", f"Approved DM {conv_id}")
     return result
 
 
@@ -439,43 +508,40 @@ async def delete_moltbook_agent(slot: int):
     if slot in runners:
         runners[slot].stop()
         del runners[slot]
-    # Reset to defaults
-    config = AgentConfig(slot=slot)
-    save_config(config)
-    # Clear state, activity, and peer database files
-    from config import _state_path, _activity_path, _peer_db_path
-    for path in (_state_path(slot), _activity_path(slot), _peer_db_path(slot)):
-        if path.exists():
-            path.unlink()
+    await db.delete_moltbook_config(app.state.db, slot)
     return {"ok": True}
 
 
-# ── New: LLM Management ───────────────────────────────────────────────────────
+# ── LLM proxy — all ops target active runner(s) ───────────────────────────────
 
-def _agent_unavailable(detail: str = "Local llm-agent is not reachable") -> HTTPException:
+def _agent_unavailable(detail: str = "No active llm-runner available") -> HTTPException:
     return HTTPException(status_code=503, detail=detail)
 
 
 @app.get("/api/llm/status")
-async def llm_status():
+async def llm_status(runner_id: Optional[int] = None):
     _inc_request("/api/llm/status", "GET", 200)
     try:
-        client = _agent_client()
+        client = await _get_runner_client(app.state.db, runner_id)
         return await client.status()
+    except HTTPException:
+        raise
     except Exception as e:
         _inc_request("/api/llm/status", "GET", 503)
-        raise _agent_unavailable(f"Agent error: {e}")
+        raise _agent_unavailable(f"Runner error: {e}")
 
 
 @app.get("/api/llm/models")
-async def llm_models():
+async def llm_models(runner_id: Optional[int] = None):
     _inc_request("/api/llm/models", "GET", 200)
     try:
-        client = _agent_client()
+        client = await _get_runner_client(app.state.db, runner_id)
         return await client.models()
+    except HTTPException:
+        raise
     except Exception as e:
         _inc_request("/api/llm/models", "GET", 503)
-        raise _agent_unavailable(f"Agent error: {e}")
+        raise _agent_unavailable(f"Runner error: {e}")
 
 
 class LLMPullRequest(BaseModel):
@@ -483,30 +549,34 @@ class LLMPullRequest(BaseModel):
 
 
 @app.post("/api/llm/models/pull")
-async def llm_pull_model(req: LLMPullRequest):
+async def llm_pull_model(req: LLMPullRequest, runner_id: Optional[int] = None):
     _inc_request("/api/llm/models/pull", "POST", 200)
     try:
-        client = _agent_client()
+        client = await _get_runner_client(app.state.db, runner_id)
 
         async def _stream():
             async for chunk in client.pull_model(req.model):
                 yield chunk
 
         return StreamingResponse(_stream(), media_type="application/x-ndjson")
+    except HTTPException:
+        raise
     except Exception as e:
-        raise _agent_unavailable(f"Agent error: {e}")
+        raise _agent_unavailable(f"Runner error: {e}")
 
 
 @app.delete("/api/llm/models/{model:path}")
-async def llm_delete_model(model: str):
+async def llm_delete_model(model: str, runner_id: Optional[int] = None):
     _inc_request("/api/llm/models/delete", "DELETE", 200)
     try:
-        client = _agent_client()
+        client = await _get_runner_client(app.state.db, runner_id)
         return await client.delete_model(model)
+    except HTTPException:
+        raise
     except httpx.HTTPStatusError as e:
         raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
     except Exception as e:
-        raise _agent_unavailable(f"Agent error: {e}")
+        raise _agent_unavailable(f"Runner error: {e}")
 
 
 class CheckpointSwitchRequest(BaseModel):
@@ -514,32 +584,36 @@ class CheckpointSwitchRequest(BaseModel):
 
 
 @app.post("/api/llm/comfyui/checkpoint")
-async def llm_switch_checkpoint(req: CheckpointSwitchRequest):
+async def llm_switch_checkpoint(req: CheckpointSwitchRequest, runner_id: Optional[int] = None):
     _inc_request("/api/llm/comfyui/checkpoint", "POST", 200)
     try:
-        client = _agent_client()
+        client = await _get_runner_client(app.state.db, runner_id)
         return await client.switch_checkpoint(req.name)
+    except HTTPException:
+        raise
     except httpx.HTTPStatusError as e:
         raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
     except Exception as e:
-        raise _agent_unavailable(f"Agent error: {e}")
+        raise _agent_unavailable(f"Runner error: {e}")
 
 
 @app.get("/api/llm/checkpoints")
-async def llm_checkpoints():
+async def llm_checkpoints(runner_id: Optional[int] = None):
     _inc_request("/api/llm/checkpoints", "GET", 200)
     try:
-        client = _agent_client()
+        client = await _get_runner_client(app.state.db, runner_id)
         status = await client.status()
         return {"checkpoints": status.get("comfyui_checkpoints", [])}
+    except HTTPException:
+        raise
     except Exception as e:
-        raise _agent_unavailable(f"Agent error: {e}")
+        raise _agent_unavailable(f"Runner error: {e}")
 
 
-# ── New: OpenAI-compatible proxy ──────────────────────────────────────────────
+# ── OpenAI-compatible proxy ───────────────────────────────────────────────────
 
 @app.post("/v1/chat/completions")
-async def proxy_chat_completions(request: Request):
+async def proxy_chat_completions(request: Request, runner_id: Optional[int] = None):
     body = await request.json()
     model = body.get("model", "")
     stream = body.get("stream", False)
@@ -547,9 +621,7 @@ async def proxy_chat_completions(request: Request):
     _inc_request("/v1/chat/completions", "POST", 200)
 
     try:
-        client = _agent_client()
-        if not await client.is_reachable():
-            raise _agent_unavailable()
+        client = await _get_runner_client(app.state.db, runner_id)
 
         if stream:
             async def _forward_stream():
@@ -578,30 +650,32 @@ async def proxy_chat_completions(request: Request):
         raise
     except Exception as e:
         _inc_request("/v1/chat/completions", "POST", 503)
-        raise _agent_unavailable(f"Agent error: {e}")
+        raise _agent_unavailable(f"Runner error: {e}")
 
 
 @app.post("/v1/images/generations")
-async def proxy_image_generations(request: Request):
+async def proxy_image_generations(request: Request, runner_id: Optional[int] = None):
     body = await request.json()
     _inc_request("/v1/images/generations", "POST", 200)
     try:
-        client = _agent_client()
+        client = await _get_runner_client(app.state.db, runner_id)
         return await client.generate_image(
             prompt=body.get("prompt", ""),
             model=body.get("model", "v1-5-pruned-emaonly.safetensors"),
             n=body.get("n", 1),
             size=body.get("size", "512x512"),
         )
+    except HTTPException:
+        raise
     except httpx.HTTPStatusError as e:
         _inc_request("/v1/images/generations", "POST", e.response.status_code)
         raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
     except Exception as e:
         _inc_request("/v1/images/generations", "POST", 503)
-        raise _agent_unavailable(f"Agent error: {e}")
+        raise _agent_unavailable(f"Runner error: {e}")
 
 
-# ── New: App Registry ─────────────────────────────────────────────────────────
+# ── App registry ──────────────────────────────────────────────────────────────
 
 @app.get("/api/apps")
 async def list_apps():
@@ -610,7 +684,6 @@ async def list_apps():
     _inc_request("/api/apps", "GET", 200)
     apps = await get_apps(app.state.db)
     registered_apps_gauge.set(len(apps))
-    # Redact full api_key, show only prefix
     result = []
     for a in apps:
         a_copy = dict(a)
@@ -648,7 +721,6 @@ async def app_heartbeat(request: Request, body: AppHeartbeatRequest):
     if not app.state.db:
         raise HTTPException(status_code=503, detail="Database not available")
 
-    # Extract Bearer token from Authorization header
     auth = request.headers.get("Authorization", "")
     if not auth.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Missing or invalid Authorization header")
@@ -673,11 +745,10 @@ async def remove_app(api_key: str):
     return {"ok": True}
 
 
-# ── New: Prometheus metrics ───────────────────────────────────────────────────
+# ── Prometheus metrics ────────────────────────────────────────────────────────
 
 @app.get("/metrics")
 async def metrics_endpoint():
-    # Update gauges
     running_count = sum(1 for r in runners.values() if r.running)
     moltbook_agents_running_gauge.set(running_count)
 
@@ -688,20 +759,9 @@ async def metrics_endpoint():
         except Exception:
             pass
 
-    # Backend prometheus metrics
     backend_metrics = generate_latest().decode()
-
-    # Forward agent metrics if available
-    agent_metrics = ""
-    try:
-        client = _agent_client()
-        agent_metrics = await client.metrics_raw()
-    except Exception:
-        pass
-
-    combined = backend_metrics + "\n" + agent_metrics
     return StreamingResponse(
-        iter([combined]),
+        iter([backend_metrics]),
         media_type=CONTENT_TYPE_LATEST,
     )
 

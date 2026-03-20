@@ -45,6 +45,13 @@ COMFYUI_URL = os.environ.get("COMFYUI_URL", "http://localhost:8188")
 COMFYUI_OUTPUT_DIR = os.environ.get("COMFYUI_OUTPUT_DIR", "/outputs")
 NODE = socket.gethostname()
 
+# PSK auth + self-registration
+AGENT_PSK = os.environ.get("AGENT_PSK", "")
+BACKEND_URL = os.environ.get("BACKEND_URL", "")
+AGENT_ADDRESS = os.environ.get("AGENT_ADDRESS", f"http://{NODE}:8090")
+
+_RUNNER_ID: int | None = None
+
 # ── Prometheus metrics ────────────────────────────────────────────────────────
 
 gpu_vram_used = Gauge("llm_agent_gpu_vram_used_bytes", "GPU VRAM used bytes", ["node"])
@@ -64,7 +71,84 @@ request_duration = Histogram(
 )
 comfyui_running_gauge = Gauge("llm_agent_comfyui_running", "ComfyUI running (0/1)", ["node"])
 
-app = FastAPI(title="LLM Agent", version="1.0.0")
+from contextlib import asynccontextmanager
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    global _RUNNER_ID
+    if BACKEND_URL and AGENT_ADDRESS:
+        try:
+            caps = await _build_capabilities()
+            async with httpx.AsyncClient(timeout=10) as c:
+                r = await c.post(
+                    f"{BACKEND_URL}/api/runners/register",
+                    json={
+                        "hostname": NODE,
+                        "address": AGENT_ADDRESS,
+                        "port": int(AGENT_ADDRESS.rsplit(":", 1)[-1]) if ":" in AGENT_ADDRESS.rsplit("/", 1)[-1] else 8090,
+                        "capabilities": caps,
+                    },
+                    headers={"X-Agent-PSK": AGENT_PSK} if AGENT_PSK else {},
+                )
+                r.raise_for_status()
+                _RUNNER_ID = r.json()["runner_id"]
+                logger.info("Registered with backend as runner_id=%d", _RUNNER_ID)
+        except Exception as e:
+            logger.warning("Could not register with backend at startup: %s", e)
+
+    heartbeat_task = asyncio.create_task(_heartbeat_loop())
+    yield
+    heartbeat_task.cancel()
+    try:
+        await heartbeat_task
+    except asyncio.CancelledError:
+        pass
+
+
+async def _build_capabilities() -> dict:
+    gpu = _gpu_stats()
+    loaded = await _ollama_loaded_models()
+    comfyui_ok = await _comfyui_ok()
+    return {
+        "gpu_vram_total_bytes": gpu["vram_total_bytes"],
+        "gpu_vram_used_bytes": gpu["vram_used_bytes"],
+        "gpu_vram_free_bytes": max(0, gpu["vram_total_bytes"] - gpu["vram_used_bytes"]),
+        "comfyui_running": comfyui_ok,
+        "loaded_models": [m["name"] for m in loaded],
+    }
+
+
+async def _heartbeat_loop():
+    while True:
+        await asyncio.sleep(30)
+        if not _RUNNER_ID or not BACKEND_URL:
+            continue
+        try:
+            caps = await _build_capabilities()
+            async with httpx.AsyncClient(timeout=5) as c:
+                await c.post(
+                    f"{BACKEND_URL}/api/runners/heartbeat",
+                    json={"runner_id": _RUNNER_ID, "capabilities": caps},
+                    headers={"X-Agent-PSK": AGENT_PSK} if AGENT_PSK else {},
+                )
+        except Exception as e:
+            logger.debug("Heartbeat failed: %s", e)
+
+
+app = FastAPI(title="LLM Agent", version="1.0.0", lifespan=lifespan)
+
+
+@app.middleware("http")
+async def psk_auth(request: Request, call_next):
+    # Health and metrics are exempt from PSK (k8s probes, Prometheus)
+    if request.url.path in ("/health", "/metrics"):
+        return await call_next(request)
+    if AGENT_PSK:
+        psk = request.headers.get("X-Agent-PSK", "")
+        if psk != AGENT_PSK:
+            return JSONResponse(status_code=401, content={"detail": "Invalid or missing PSK"})
+    return await call_next(request)
 
 
 # ── GPU helpers ───────────────────────────────────────────────────────────────

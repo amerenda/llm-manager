@@ -1,5 +1,3 @@
-version: "3.8"
-
 services:
   llm-agent:
     build: .
@@ -7,6 +5,8 @@ services:
     ports:
       - "8090:8090"
     restart: unless-stopped
+    env_file:
+      - .env
     volumes:
       - /opt/models:/opt/models:ro
       - /home/alex/claude/projects/image/outputs:/outputs:ro

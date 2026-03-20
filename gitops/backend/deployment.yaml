@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: llm-manager-backend
+  namespace: llm-manager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: llm-manager-backend
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: llm-manager-backend
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8081"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+        - name: backend
+          image: amerenda/llm-manager:backend-54227f1ba20519b6e0bbb396096e5ac8c7f92711
+          imagePullPolicy: Always
+          ports:
+            - containerPort: 8081
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: postgres-credentials
+                  key: postgres-url
+            - name: AGENT_PSK
+              valueFrom:
+                secretKeyRef:
+                  name: agent-psk
+                  key: psk
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8081
+            initialDelaySeconds: 10
+            periodSeconds: 15
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8081
+            initialDelaySeconds: 20
+            periodSeconds: 30
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi

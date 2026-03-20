@@ -10,28 +10,29 @@ logger = logging.getLogger(__name__)
 
 
 class LLMAgentClient:
-    def __init__(self, host: str = "localhost", port: int = 8090):
+    def __init__(self, host: str = "localhost", port: int = 8090, psk: str = ""):
         self.base_url = f"http://{host}:{port}"
         self._timeout = httpx.Timeout(30.0, read=300.0)
+        self._headers = {"X-Agent-PSK": psk} if psk else {}
 
     # ── Read operations ────────────────────────────────────────────────────────
 
     async def status(self) -> dict:
         async with httpx.AsyncClient(timeout=self._timeout) as c:
-            r = await c.get(f"{self.base_url}/v1/status")
+            r = await c.get(f"{self.base_url}/v1/status", headers=self._headers)
             r.raise_for_status()
             return r.json()
 
     async def models(self) -> dict:
         async with httpx.AsyncClient(timeout=self._timeout) as c:
-            r = await c.get(f"{self.base_url}/v1/models")
+            r = await c.get(f"{self.base_url}/v1/models", headers=self._headers)
             r.raise_for_status()
             return r.json()
 
     async def metrics_raw(self) -> str:
         """Return raw Prometheus text from the agent's /metrics endpoint."""
         async with httpx.AsyncClient(timeout=self._timeout) as c:
-            r = await c.get(f"{self.base_url}/metrics")
+            r = await c.get(f"{self.base_url}/metrics", headers=self._headers)
             r.raise_for_status()
             return r.text
 
@@ -55,10 +56,19 @@ class LLMAgentClient:
         if stream:
             # Return a streaming context — the caller must use async with
             client = httpx.AsyncClient(timeout=self._timeout)
-            return client.stream("POST", f"{self.base_url}/v1/chat/completions", json=body)
+            return client.stream(
+                "POST",
+                f"{self.base_url}/v1/chat/completions",
+                json=body,
+                headers=self._headers,
+            )
 
         async with httpx.AsyncClient(timeout=self._timeout) as c:
-            r = await c.post(f"{self.base_url}/v1/chat/completions", json=body)
+            r = await c.post(
+                f"{self.base_url}/v1/chat/completions",
+                json=body,
+                headers=self._headers,
+            )
             r.raise_for_status()
             return r.json()
 
@@ -73,7 +83,11 @@ class LLMAgentClient:
     ) -> dict:
         body = {"prompt": prompt, "model": model, "n": n, "size": size}
         async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=360.0)) as c:
-            r = await c.post(f"{self.base_url}/v1/images/generations", json=body)
+            r = await c.post(
+                f"{self.base_url}/v1/images/generations",
+                json=body,
+                headers=self._headers,
+            )
             r.raise_for_status()
             return r.json()
 
@@ -86,6 +100,7 @@ class LLMAgentClient:
                 "POST",
                 f"{self.base_url}/v1/models/pull",
                 json={"model": model},
+                headers=self._headers,
             ) as resp:
                 resp.raise_for_status()
                 async for line in resp.aiter_lines():
@@ -94,7 +109,10 @@ class LLMAgentClient:
 
     async def delete_model(self, model: str) -> dict:
         async with httpx.AsyncClient(timeout=self._timeout) as c:
-            r = await c.delete(f"{self.base_url}/v1/models/{model}")
+            r = await c.delete(
+                f"{self.base_url}/v1/models/{model}",
+                headers=self._headers,
+            )
             r.raise_for_status()
             return r.json()
 
@@ -102,7 +120,11 @@ class LLMAgentClient:
 
     async def switch_checkpoint(self, name: str) -> dict:
         async with httpx.AsyncClient(timeout=self._timeout) as c:
-            r = await c.post(f"{self.base_url}/v1/comfyui/checkpoint", json={"name": name})
+            r = await c.post(
+                f"{self.base_url}/v1/comfyui/checkpoint",
+                json={"name": name},
+                headers=self._headers,
+            )
             r.raise_for_status()
             return r.json()
 
@@ -111,7 +133,7 @@ class LLMAgentClient:
     async def is_reachable(self) -> bool:
         try:
             async with httpx.AsyncClient(timeout=httpx.Timeout(3.0)) as c:
-                r = await c.get(f"{self.base_url}/health")
+                r = await c.get(f"{self.base_url}/health", headers=self._headers)
                 return r.status_code == 200
         except Exception:
             return False

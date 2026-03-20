@@ -1,6 +1,6 @@
-# LLM Agent
+# LLM Agent (llm-runner)
 
-Runs on the GPU host machine (murderbot). Wraps Ollama and ComfyUI, exposes an HTTP API on port **8090** plus Prometheus metrics.
+Runs on the GPU host machine (murderbot). Wraps Ollama and ComfyUI, exposes an authenticated HTTP API on port **8090** plus Prometheus metrics. Self-registers with the llm-manager backend on startup.
 
 ## Prerequisites
 
@@ -9,35 +9,74 @@ Runs on the GPU host machine (murderbot). Wraps Ollama and ComfyUI, exposes an H
 - ComfyUI running via docker compose at `/home/alex/claude/projects/image/`
 - Models at `/opt/models/checkpoints/`, `/opt/models/lora/`, `/opt/models/vae/`
 
-## Installation
+## Setup
+
+### 1. Create `.env` file
+
+```bash
+cp agent/.env.example agent/.env
+```
+
+Edit `.env`:
+```
+AGENT_PSK=<value from Bitwarden: llm-manager-agent-psk>
+BACKEND_URL=http://llm-manager-backend.llm-manager.svc.cluster.local:8081
+AGENT_ADDRESS=http://murderbot.amer.home:8090
+```
+
+The PSK must match the value stored in Bitwarden and synced to the backend pod via ExternalSecret.
+
+### 2. Start
 
 ```bash
 cd agent/
+docker compose up -d
+```
+
+Or run the install script (sets up systemd auto-start):
+```bash
 bash install.sh
 ```
 
-The install script will:
-1. Verify Docker and nvidia-container-toolkit are present
-2. Build the container image
-3. Start the container via docker compose
-4. Create and enable a systemd service (`llm-agent.service`) for auto-start on boot
-5. Wait for the health endpoint to respond
-
-## Manual start
+### 3. Verify
 
 ```bash
-docker compose up -d
+curl http://localhost:8090/health
+# {"ok": true, "node": "murderbot", "ollama": true, "comfyui": false}
+
+docker logs -f llm-agent
+# Should show: Registered with backend as runner_id=1
 ```
+
+## PSK Authentication
+
+All endpoints except `/health` and `/metrics` require the header:
+```
+X-Agent-PSK: <psk>
+```
+
+The backend pod sends this automatically when proxying requests.
+
+## PSK Rotation
+
+1. Update the value in Bitwarden (`llm-manager-agent-psk`)
+2. ExternalSecret refreshes the k8s secret within 1 hour (or force: `kubectl annotate externalsecret agent-psk -n llm-manager force-sync=$(date +%s)`)
+3. Update `.env` on each GPU host and restart: `docker compose restart`
 
 ## Environment variables
 
 | Variable | Default | Description |
 |---|---|---|
+| `AGENT_PSK` | _(empty)_ | Pre-shared key for backend auth. If empty, auth is disabled (dev only) |
+| `BACKEND_URL` | _(empty)_ | Backend URL for self-registration. If empty, registration is skipped |
+| `AGENT_ADDRESS` | `http://<hostname>:8090` | Externally-reachable address of this agent |
 | `OLLAMA_URL` | `http://host.docker.internal:11434` | Ollama base URL |
 | `COMFYUI_URL` | `http://host.docker.internal:8188` | ComfyUI base URL |
 | `COMFYUI_OUTPUT_DIR` | `/outputs` | Path inside container to ComfyUI outputs |
 
 ## API Reference
+
+All requests (except `/health` and `/metrics`) require header `X-Agent-PSK: <psk>`.
 
 ### `GET /health`
 ```json
@@ -48,70 +87,25 @@ docker compose up -d
 Full system status: GPU VRAM, CPU, memory, loaded Ollama models, ComfyUI checkpoint list.
 
 ### `GET /v1/models`
-OpenAI-compatible model list. Text models from Ollama, image models from ComfyUI checkpoints.
+OpenAI-compatible model list.
 
 ### `POST /v1/chat/completions`
-OpenAI-compatible chat endpoint. Proxies to Ollama. Supports streaming (`"stream": true`).
-
-```bash
-curl http://localhost:8090/v1/chat/completions \
-  -H "Content-Type: application/json" \
-  -d '{"model": "qwen2.5:7b", "messages": [{"role": "user", "content": "Hello"}]}'
-```
+OpenAI-compatible chat endpoint. Supports streaming.
 
 ### `POST /v1/images/generations`
-Generate an image via ComfyUI. Polls until done (up to 5 minutes).
-
-```bash
-curl http://localhost:8090/v1/images/generations \
-  -H "Content-Type: application/json" \
-  -d '{"prompt": "a sunset over mountains", "model": "v1-5-pruned-emaonly.safetensors", "size": "512x512"}'
-```
-
-Returns:
-```json
-{"created": 1700000000, "data": [{"url": "/v1/images/outputs/llm_agent_00001_.png"}]}
-```
-
-### `GET /v1/images/outputs/{filename}`
-Serve a generated image file.
+Generate an image via ComfyUI.
 
 ### `POST /v1/models/pull`
-Pull an Ollama model. Streams NDJSON progress lines.
-
-```bash
-curl http://localhost:8090/v1/models/pull \
-  -d '{"model": "qwen2.5:7b"}'
-```
+Pull an Ollama model. Streams NDJSON progress.
 
 ### `DELETE /v1/models/{model}`
-Unload a model from VRAM (sets `keep_alive=0`).
+Unload a model from VRAM.
 
 ### `POST /v1/comfyui/checkpoint`
 Switch the active ComfyUI checkpoint.
 
-```bash
-curl -X POST http://localhost:8090/v1/comfyui/checkpoint \
-  -d '{"name": "dreamshaper_8.safetensors"}'
-```
-
 ### `GET /metrics`
-Prometheus text format metrics.
-
-## Metrics exposed
-
-| Metric | Type | Description |
-|---|---|---|
-| `llm_agent_gpu_vram_used_bytes` | Gauge | GPU VRAM used |
-| `llm_agent_gpu_vram_total_bytes` | Gauge | GPU VRAM total |
-| `llm_agent_gpu_vram_utilization_pct` | Gauge | GPU VRAM % |
-| `llm_agent_cpu_usage_pct` | Gauge | CPU usage % |
-| `llm_agent_memory_used_bytes` | Gauge | RAM used |
-| `llm_agent_memory_total_bytes` | Gauge | RAM total |
-| `llm_agent_ollama_models_loaded` | Gauge | Models in VRAM |
-| `llm_agent_comfyui_running` | Gauge | ComfyUI 0/1 |
-| `llm_agent_requests_total` | Counter | Requests by endpoint+model |
-| `llm_agent_request_duration_seconds` | Histogram | Latency by endpoint+model |
+Prometheus text format metrics (no PSK required).
 
 ## Logs
 
