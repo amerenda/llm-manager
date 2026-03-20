@@ -8,6 +8,7 @@ on:
 env:
   BACKEND_IMAGE: amerenda/llm-manager
   UI_IMAGE: amerenda/llm-manager
+  PIPER_IMAGE: amerenda/llm-manager
 
 jobs:
   build:
@@ -64,6 +65,19 @@ jobs:
           cache-from: type=gha,scope=llm-ui
           cache-to: type=gha,mode=max,scope=llm-ui
 
+      - name: Build and push piper-agent
+        uses: docker/build-push-action@v6
+        with:
+          context: piper-agent
+          file: piper-agent/Dockerfile
+          platforms: linux/arm64
+          push: true
+          tags: |
+            ${{ env.PIPER_IMAGE }}:piper-${{ steps.sha.outputs.SHA }}
+            ${{ env.PIPER_IMAGE }}:piper-latest
+          cache-from: type=gha,scope=llm-piper
+          cache-to: type=gha,mode=max,scope=llm-piper
+
       - name: Update image tags in gitops manifests
         run: |
           SHA="${{ steps.sha.outputs.SHA }}"
@@ -71,11 +85,13 @@ jobs:
             gitops/backend/deployment.yaml
           sed -i "s|${{ env.UI_IMAGE }}:ui-[^[:space:]]*|${{ env.UI_IMAGE }}:ui-${SHA}|g" \
             gitops/ui/deployment.yaml
+          sed -i "s|${{ env.PIPER_IMAGE }}:piper-[^[:space:]]*|${{ env.PIPER_IMAGE }}:piper-${SHA}|g" \
+            gitops/piper/deployment.yaml
 
       - name: Commit updated image tags
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add gitops/backend/deployment.yaml gitops/ui/deployment.yaml
+          git add gitops/backend/deployment.yaml gitops/ui/deployment.yaml gitops/piper/deployment.yaml
           git diff --cached --quiet || git commit -m "ci: update llm-manager to ${{ steps.sha.outputs.SHA }}"
           git pull --rebase && git push

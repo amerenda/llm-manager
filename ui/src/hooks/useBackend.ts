@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import type { LlmStatus, LlmModel, RegisteredApp, Agent } from '../types'
+import type { LlmStatus, LlmModel, RegisteredApp, Agent, Runner } from '../types'
 
 // nginx proxies /api to the backend service
 async function get<T>(path: string): Promise<T> {
@@ -105,6 +105,16 @@ export function useRegisterApp() {
     mutationFn: ({ name, base_url }: { name: string; base_url: string }) =>
       post<{ ok: boolean; api_key: string }>('/api/apps', { name, base_url }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['apps'] }),
+  })
+}
+
+// ── Runners ───────────────────────────────────────────────────────────────────
+
+export function useRunners() {
+  return useQuery<Runner[]>({
+    queryKey: ['runners'],
+    queryFn: () => get('/api/runners'),
+    refetchInterval: 15_000,
   })
 }
 

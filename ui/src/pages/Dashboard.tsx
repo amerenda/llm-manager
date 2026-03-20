@@ -35,9 +35,9 @@ export function Dashboard() {
       <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
         <StatCard
           label="GPU VRAM"
-          value={s ? `${s.gpu.vram_used_gb.toFixed(1)} / ${s.gpu.vram_total_gb.toFixed(1)} GB` : '—'}
-          sub={s?.gpu.name}
-          progress={s?.gpu.vram_pct}
+          value={s ? `${s.gpu_vram_used_gb.toFixed(1)} / ${s.gpu_vram_total_gb.toFixed(1)} GB` : '—'}
+          sub={s ? `${s.gpu_vram_pct.toFixed(0)}% used` : undefined}
+          progress={s?.gpu_vram_pct}
           icon={<Cpu className="w-4 h-4" />}
         />
         <StatCard

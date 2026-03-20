@@ -1,11 +1,9 @@
 // GPU / system stats returned by GET /api/llm/status
 export interface LlmStatus {
-  gpu: {
-    vram_used_gb: number
-    vram_total_gb: number
-    vram_pct: number
-    name: string
-  }
+  node: string
+  gpu_vram_used_gb: number
+  gpu_vram_total_gb: number
+  gpu_vram_pct: number
   cpu_pct: number
   mem_used_gb: number
   mem_total_gb: number
@@ -13,7 +11,6 @@ export interface LlmStatus {
   comfyui_running: boolean
   comfyui_checkpoints: string[]
   comfyui_active_checkpoint: string | null
-  ollama_reachable: boolean
 }
 
 // A model entry from GET /api/llm/models
@@ -23,6 +20,30 @@ export interface LlmModel {
   type: 'text' | 'image'
   size_gb: number
   is_loaded: boolean
+}
+
+// A registered GPU/TTS runner from GET /api/runners
+export interface Runner {
+  id: number
+  hostname: string
+  address: string
+  port: number
+  capabilities: {
+    // GPU runner fields
+    gpu_vram_total_bytes?: number
+    gpu_vram_used_bytes?: number
+    gpu_vram_free_bytes?: number
+    loaded_models?: string[]
+    comfyui_running?: boolean
+    // TTS runner fields
+    tts?: boolean
+    stt?: boolean
+    voices?: string[]
+    default_voice?: string
+    gpu?: boolean
+  }
+  last_seen: string | null
+  created_at: string
 }
 
 // A registered application from GET /api/apps
