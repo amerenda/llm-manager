@@ -168,6 +168,19 @@ export function useUpdateAppPermissions() {
   })
 }
 
+export function useUpdateAppAllowedModels() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ appId, allowed_models }: { appId: number; allowed_models: string[] }) =>
+      fetch(`/api/apps/${appId}/allowed-models`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ allowed_models }),
+      }).then(r => { if (!r.ok) throw new Error('Failed'); return r.json() }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['apps'] }),
+  })
+}
+
 // ── Model load/unload ────────────────────────────────────────────────────────
 
 export function useLoadModel() {

@@ -1,6 +1,6 @@
 import { useState } from 'react'
-import { AppWindow, Plus, Loader2, CheckCircle2, AlertCircle, Copy, Check, Shield, RefreshCw } from 'lucide-react'
-import { useApps, useRegisterApp, useApproveApp, useUpdateAppPermissions } from '../hooks/useBackend'
+import { AppWindow, Plus, Loader2, CheckCircle2, AlertCircle, Copy, Check, Shield, RefreshCw, Cpu, X } from 'lucide-react'
+import { useApps, useRegisterApp, useApproveApp, useUpdateAppPermissions, useUpdateAppAllowedModels, useLlmStatus } from '../hooks/useBackend'
 import { StatusDot } from '../components/StatusDot'
 
 function relativeTime(iso: string | null): string {
@@ -38,6 +38,108 @@ function CopyButton({ text }: { text: string }) {
     >
       {copied ? <Check className="w-3.5 h-3.5 text-green-400" /> : <Copy className="w-3.5 h-3.5" />}
     </button>
+  )
+}
+
+function ModelRestrictionEditor({ appId, currentModels }: { appId: number; currentModels: string[] }) {
+  const [open, setOpen] = useState(false)
+  const [selected, setSelected] = useState<string[]>(currentModels)
+  const updateModels = useUpdateAppAllowedModels()
+  const llmStatus = useLlmStatus()
+
+  const availableModels = llmStatus.data?.loaded_ollama_models?.map(m => m.name) ?? []
+  // Also show models that are in the allowed list but not currently loaded
+  const allModels = [...new Set([...availableModels, ...selected])]
+
+  function toggle(model: string) {
+    setSelected(prev =>
+      prev.includes(model) ? prev.filter(m => m !== model) : [...prev, model]
+    )
+  }
+
+  function save() {
+    updateModels.mutate({ appId, allowed_models: selected }, {
+      onSuccess: () => setOpen(false),
+    })
+  }
+
+  function setUnrestricted() {
+    updateModels.mutate({ appId, allowed_models: [] }, {
+      onSuccess: () => {
+        setSelected([])
+        setOpen(false)
+      },
+    })
+  }
+
+  const isUnrestricted = currentModels.length === 0
+
+  if (!open) {
+    return (
+      <button
+        onClick={() => { setSelected(currentModels); setOpen(true) }}
+        title={isUnrestricted ? 'All models allowed' : `${currentModels.length} model(s) allowed`}
+        className={`flex items-center gap-1 text-xs px-2 py-1 rounded-lg transition-colors ${
+          isUnrestricted
+            ? 'bg-gray-800 text-gray-500 border border-gray-700 hover:border-gray-600'
+            : 'bg-blue-900/30 text-blue-400 border border-blue-800'
+        }`}
+      >
+        <Cpu className="w-3 h-3" />
+        {isUnrestricted ? 'All models' : `${currentModels.length} model${currentModels.length !== 1 ? 's' : ''}`}
+      </button>
+    )
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={() => setOpen(false)}>
+      <div className="bg-gray-900 border border-gray-700 rounded-xl p-5 w-96 max-h-[70vh] flex flex-col" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-sm font-semibold text-gray-200">Allowed Models</h3>
+          <button onClick={() => setOpen(false)} className="text-gray-500 hover:text-gray-300">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+
+        <p className="text-xs text-gray-500 mb-3">
+          Select which models this app can use. Empty selection means unrestricted access.
+        </p>
+
+        <div className="flex-1 overflow-y-auto space-y-1.5 mb-4">
+          {allModels.length === 0 ? (
+            <p className="text-xs text-gray-600 py-4 text-center">No models available on runner</p>
+          ) : (
+            allModels.sort().map(model => (
+              <label key={model} className="flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-gray-800 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={selected.includes(model)}
+                  onChange={() => toggle(model)}
+                  className="rounded border-gray-600 bg-gray-800 text-brand-500 focus:ring-brand-600"
+                />
+                <span className="text-sm text-gray-300 font-mono">{model}</span>
+              </label>
+            ))
+          )}
+        </div>
+
+        <div className="flex gap-2">
+          <button
+            onClick={setUnrestricted}
+            className="flex-1 text-xs px-3 py-2 rounded-lg bg-gray-800 text-gray-400 hover:bg-gray-700 transition-colors"
+          >
+            Unrestricted
+          </button>
+          <button
+            onClick={save}
+            disabled={updateModels.isPending}
+            className="flex-1 text-xs px-3 py-2 rounded-lg bg-brand-600 text-white hover:bg-brand-500 disabled:opacity-40 transition-colors"
+          >
+            {updateModels.isPending ? 'Saving...' : `Save (${selected.length})`}
+          </button>
+        </div>
+      </div>
+    </div>
   )
 }
 
@@ -147,19 +249,22 @@ export function Apps() {
                     {relativeTime(a.last_seen)}
                   </td>
                   <td className="px-4 py-3">
-                    <button
-                      onClick={() => updatePerms.mutate({ appId: a.id, allow_profile_switch: !a.allow_profile_switch })}
-                      disabled={updatePerms.isPending}
-                      title={a.allow_profile_switch ? 'Profile switching enabled' : 'Profile switching disabled'}
-                      className={`flex items-center gap-1 text-xs px-2 py-1 rounded-lg transition-colors ${
-                        a.allow_profile_switch
-                          ? 'bg-green-900/30 text-green-400 border border-green-800'
-                          : 'bg-gray-800 text-gray-500 border border-gray-700 hover:border-gray-600'
-                      }`}
-                    >
-                      <Shield className="w-3 h-3" />
-                      {a.allow_profile_switch ? 'Profiles' : 'No profiles'}
-                    </button>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <button
+                        onClick={() => updatePerms.mutate({ appId: a.id, allow_profile_switch: !a.allow_profile_switch })}
+                        disabled={updatePerms.isPending}
+                        title={a.allow_profile_switch ? 'Profile switching enabled' : 'Profile switching disabled'}
+                        className={`flex items-center gap-1 text-xs px-2 py-1 rounded-lg transition-colors ${
+                          a.allow_profile_switch
+                            ? 'bg-green-900/30 text-green-400 border border-green-800'
+                            : 'bg-gray-800 text-gray-500 border border-gray-700 hover:border-gray-600'
+                        }`}
+                      >
+                        <Shield className="w-3 h-3" />
+                        {a.allow_profile_switch ? 'Profiles' : 'No profiles'}
+                      </button>
+                      <ModelRestrictionEditor appId={a.id} currentModels={a.allowed_models ?? []} />
+                    </div>
                   </td>
                 </tr>
               ))}

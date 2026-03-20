@@ -36,6 +36,7 @@ from db import (
     register_app, heartbeat_app, get_apps, deregister_app,
 )
 from agent_runner import AgentRunner
+from gpu import vram_for_model
 from llm_agent import LLMAgentClient
 
 logging.basicConfig(
@@ -173,11 +174,84 @@ async def health():
     return {"ok": True, "service": "llm-manager-backend", "node": NODE, "db": db_ok}
 
 
-# ── GPU info (placeholder — backend is no longer on the GPU node) ─────────────
+# ── GPU info (proxied from active runner) ────────────────────────────────────
 
 @app.get("/api/gpu")
 async def gpu_info():
-    return {"message": "GPU info available via /api/llm/status"}
+    """GPU info from the primary active runner, shaped for moltbook-manager."""
+    try:
+        client = await _get_runner_client(app.state.db)
+        status = await client.status()
+        total = status.get("gpu_vram_total_gb", 0)
+        used = status.get("gpu_vram_used_gb", 0)
+        return {
+            "name": status.get("node", "GPU"),
+            "vram_total_gb": round(total, 2),
+            "vram_used_gb": round(used, 2),
+            "vram_free_gb": round(total - used, 2),
+        }
+    except HTTPException:
+        return {"name": "Unknown", "vram_total_gb": 0, "vram_used_gb": 0, "vram_free_gb": 0}
+
+
+@app.get("/api/models")
+async def models_for_agents():
+    """Ollama model list with VRAM estimates, for moltbook-manager consumption."""
+    try:
+        client = await _get_runner_client(app.state.db)
+        # Query Ollama /api/tags via the runner's Ollama port
+        ollama_base = await _get_runner_ollama_base(app.state.db)
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.get(f"{ollama_base}/api/tags")
+            r.raise_for_status()
+            data = r.json()
+        models = []
+        for m in data.get("models", []):
+            name = m.get("name", "")
+            size_gb = round(m.get("size", 0) / 1e9, 2)
+            models.append({
+                "name": name,
+                "size_gb": size_gb,
+                "vram_estimate_gb": round(vram_for_model(name), 2),
+            })
+        return models
+    except Exception:
+        return []
+
+
+class VramCheckRequest(BaseModel):
+    models: list[str]
+
+
+@app.post("/api/vram-check")
+async def vram_check(req: VramCheckRequest):
+    """Check if a set of models fit in GPU VRAM."""
+    try:
+        client = await _get_runner_client(app.state.db)
+        status = await client.status()
+        gpu_vram = status.get("gpu_vram_total_gb", 0)
+    except HTTPException:
+        gpu_vram = 0
+
+    per_model = []
+    total = 0.0
+    for model in req.models:
+        est = vram_for_model(model)
+        per_model.append({"model": model, "vram_gb": round(est, 2)})
+        total += est
+
+    fits = gpu_vram > 0 and total <= gpu_vram
+    return {
+        "total_vram_needed_gb": round(total, 2),
+        "gpu_vram_gb": round(gpu_vram, 2),
+        "fits_simultaneously": fits,
+        "per_model": per_model,
+        "warning": (
+            None if fits or not req.models
+            else f"Selected models need {total:.1f} GB but GPU has {gpu_vram:.1f} GB. "
+                 "Agents will be scheduled to run at different times."
+        ),
+    }
 
 
 # ── LLM Runner registration ───────────────────────────────────────────────────
@@ -643,6 +717,14 @@ async def proxy_chat_completions(request: Request, runner_id: Optional[int] = No
     model = body.get("model", "")
     stream = body.get("stream", False)
 
+    # Enforce per-app model restrictions
+    auth = request.headers.get("Authorization", "")
+    if auth.startswith("Bearer "):
+        api_key = auth.removeprefix("Bearer ").strip()
+        allowed = await db.check_model_allowed(app.state.db, api_key, model)
+        if not allowed:
+            raise HTTPException(403, f"Model '{model}' is not allowed for this application")
+
     _inc_request("/v1/chat/completions", "POST", 200)
 
     try:
@@ -718,6 +800,7 @@ async def list_apps():
         # Ensure new fields are present (for backwards compatibility)
         a_copy.setdefault("status", "active")
         a_copy.setdefault("allow_profile_switch", False)
+        a_copy["allowed_models"] = await db.get_app_allowed_models(app.state.db, a_copy["id"])
         result.append(a_copy)
     return result
 
@@ -831,6 +914,22 @@ async def update_app_permissions_endpoint(app_id: int, req: AppPermissionsReques
     found = await db.update_app_permissions(app.state.db, app_id, req.allow_profile_switch)
     if not found:
         raise HTTPException(404, "App not found")
+    return {"ok": True}
+
+
+@app.get("/api/apps/{app_id}/allowed-models")
+async def get_app_allowed_models_endpoint(app_id: int):
+    models = await db.get_app_allowed_models(app.state.db, app_id)
+    return {"app_id": app_id, "allowed_models": models, "unrestricted": len(models) == 0}
+
+
+class AppAllowedModelsRequest(BaseModel):
+    allowed_models: list[str]
+
+
+@app.put("/api/apps/{app_id}/allowed-models")
+async def set_app_allowed_models_endpoint(app_id: int, req: AppAllowedModelsRequest):
+    await db.set_app_allowed_models(app.state.db, app_id, req.allowed_models)
     return {"ok": True}
 
 

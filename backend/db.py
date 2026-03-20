@@ -156,6 +156,14 @@ CREATE TABLE IF NOT EXISTS profile_activations (
     activated_at TIMESTAMPTZ DEFAULT NOW(),
     UNIQUE(runner_id)
 );
+
+CREATE TABLE IF NOT EXISTS app_allowed_models (
+    id SERIAL PRIMARY KEY,
+    app_id INT NOT NULL REFERENCES registered_apps(id) ON DELETE CASCADE,
+    model_pattern TEXT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(app_id, model_pattern)
+);
 """
 
 CREATE_INDEXES_SQL = """
@@ -1147,3 +1155,44 @@ async def get_all_activations(pool: asyncpg.Pool) -> list[dict]:
             """
         )
     return [dict(r) for r in rows]
+
+
+# ── App allowed models ──────────────────────────────────────────────────────
+
+async def get_app_allowed_models(pool: asyncpg.Pool, app_id: int) -> list[str]:
+    """Return list of allowed model patterns for an app. Empty = unrestricted."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT model_pattern FROM app_allowed_models WHERE app_id = $1 ORDER BY model_pattern",
+            app_id,
+        )
+    return [r["model_pattern"] for r in rows]
+
+
+async def set_app_allowed_models(pool: asyncpg.Pool, app_id: int, patterns: list[str]) -> None:
+    """Replace the allowed model list for an app."""
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM app_allowed_models WHERE app_id = $1", app_id)
+        for p in patterns:
+            await conn.execute(
+                "INSERT INTO app_allowed_models (app_id, model_pattern) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                app_id, p,
+            )
+
+
+async def check_model_allowed(pool: asyncpg.Pool, api_key: str, model: str) -> bool:
+    """Check if a model is allowed for the app identified by api_key.
+    Returns True if no restrictions are set (unrestricted), or if model matches a pattern."""
+    import fnmatch
+    async with pool.acquire() as conn:
+        app_row = await conn.fetchrow(
+            "SELECT id FROM registered_apps WHERE api_key = $1", api_key
+        )
+        if not app_row:
+            return False
+        patterns = await conn.fetch(
+            "SELECT model_pattern FROM app_allowed_models WHERE app_id = $1", app_row["id"]
+        )
+    if not patterns:
+        return True  # No restrictions = unrestricted
+    return any(fnmatch.fnmatch(model, r["model_pattern"]) for r in patterns)

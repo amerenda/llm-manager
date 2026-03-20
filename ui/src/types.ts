@@ -52,6 +52,7 @@ export interface RegisteredApp {
   base_url: string
   status: string             // 'pending' | 'active'
   allow_profile_switch: boolean
+  allowed_models: string[]   // empty = unrestricted
   api_key_preview?: string
   last_seen: string | null   // ISO timestamp or null
   metadata: Record<string, unknown>
