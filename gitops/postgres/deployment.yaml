@@ -15,17 +15,9 @@ spec:
       labels:
         app: postgres
     spec:
-      # Prefer murderbot — close to the DaemonSet backend
-      affinity:
-        nodeAffinity:
-          preferredDuringSchedulingIgnoredDuringExecution:
-            - weight: 100
-              preference:
-                matchExpressions:
-                  - key: kubernetes.io/hostname
-                    operator: In
-                    values:
-                      - murderbot
+      # Pin to murderbot — Longhorn RWO volume is attached here
+      nodeSelector:
+        kubernetes.io/hostname: murderbot
       containers:
         - name: postgres
           image: postgres:16-alpine
