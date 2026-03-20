@@ -6,11 +6,11 @@ metadata:
   labels:
     app: llm-manager-backend
 spec:
-  # ClusterIP service — DaemonSet pods are on hostNetwork so endpoints
-  # are the node IPs. Other cluster pods reach the backend via this service.
+  type: NodePort
   selector:
     app: llm-manager-backend
   ports:
     - name: http
       port: 8081
       targetPort: 8081
+      nodePort: 30081
