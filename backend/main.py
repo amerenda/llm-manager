@@ -892,6 +892,37 @@ async def create_profile(req: ProfileCreateRequest):
     return {"ok": True, "id": profile_id}
 
 
+# Static profile routes must come before {profile_id} parameterized routes
+@app.get("/api/profiles/activations")
+async def list_activations():
+    _inc_request("/api/profiles/activations", "GET", 200)
+    return await db.get_all_activations(app.state.db)
+
+
+@app.get("/api/profiles/list")
+async def list_profiles_for_apps(request: Request):
+    """Endpoint for apps to discover available profiles (API key auth)."""
+    auth = request.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        raise HTTPException(401, "Missing or invalid Authorization header")
+    api_key = auth.removeprefix("Bearer ").strip()
+    app_row = await db.get_app_by_api_key(app.state.db, api_key)
+    if not app_row:
+        raise HTTPException(401, "Invalid API key")
+    profiles = await db.get_all_profiles(app.state.db)
+    return [
+        {
+            "id": p["id"],
+            "name": p["name"],
+            "is_default": p["is_default"],
+            "unsafe_enabled": p["unsafe_enabled"],
+            "model_entry_count": p.get("model_entry_count", 0),
+            "image_entry_count": p.get("image_entry_count", 0),
+        }
+        for p in profiles
+    ]
+
+
 @app.get("/api/profiles/{profile_id}")
 async def get_profile(profile_id: int):
     _inc_request("/api/profiles/detail", "GET", 200)
@@ -1099,39 +1130,6 @@ async def deactivate_profile_endpoint(profile_id: int, runner_id: int):
     _inc_request("/api/profiles/deactivate", "POST", 200)
     await db.deactivate_profile(app.state.db, runner_id)
     return {"ok": True}
-
-
-@app.get("/api/profiles/activations")
-async def list_activations():
-    _inc_request("/api/profiles/activations", "GET", 200)
-    return await db.get_all_activations(app.state.db)
-
-
-# ── Profile list for apps (authenticated by API key) ─────────────────────────
-
-@app.get("/api/profiles/list")
-async def list_profiles_for_apps(request: Request):
-    """Public-ish endpoint for apps to discover available profiles."""
-    auth = request.headers.get("Authorization", "")
-    if not auth.startswith("Bearer "):
-        raise HTTPException(401, "Missing or invalid Authorization header")
-    api_key = auth.removeprefix("Bearer ").strip()
-    app_row = await db.get_app_by_api_key(app.state.db, api_key)
-    if not app_row:
-        raise HTTPException(401, "Invalid API key")
-    profiles = await db.get_all_profiles(app.state.db)
-    # Return a slim view
-    return [
-        {
-            "id": p["id"],
-            "name": p["name"],
-            "is_default": p["is_default"],
-            "unsafe_enabled": p["unsafe_enabled"],
-            "model_entry_count": p.get("model_entry_count", 0),
-            "image_entry_count": p.get("image_entry_count", 0),
-        }
-        for p in profiles
-    ]
 
 
 # ── Prometheus metrics ────────────────────────────────────────────────────────

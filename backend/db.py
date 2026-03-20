@@ -178,6 +178,21 @@ async def init_db(pool: asyncpg.Pool) -> None:
     async with pool.acquire() as conn:
         await conn.execute(CREATE_TABLES_SQL)
         await conn.execute(CREATE_INDEXES_SQL)
+
+        # Migrations: add columns to existing tables if missing
+        for col, default in [
+            ("status", "'active'"),
+            ("allow_profile_switch", "FALSE"),
+        ]:
+            try:
+                await conn.execute(
+                    f"ALTER TABLE registered_apps ADD COLUMN {col} "
+                    f"{'TEXT' if col == 'status' else 'BOOLEAN'} NOT NULL DEFAULT {default}"
+                )
+                logger.info("Added column registered_apps.%s", col)
+            except asyncpg.DuplicateColumnError:
+                pass
+
         # Ensure the Default profile always exists
         await conn.execute(
             """
