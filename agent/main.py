@@ -1,9 +1,12 @@
 """
 LLM Agent — runs on the GPU host (murderbot).
-Wraps Ollama and ComfyUI, exposes HTTP API + Prometheus metrics.
-Port 8090.
+Wraps Ollama and ComfyUI, exposes HTTPS API + Prometheus metrics.
+Port 8090.  Self-signed TLS cert is generated on startup.
 """
 import asyncio
+import datetime
+import hashlib
+import ipaddress
 import json
 import logging
 import os
@@ -16,6 +19,10 @@ from typing import AsyncGenerator, Optional
 import httpx
 import psutil
 import uvicorn
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.x509.oid import NameOID
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from prometheus_client import (
@@ -76,7 +83,81 @@ def _detect_host_ip() -> str:
         s.close()
 
 
-AGENT_ADDRESS = os.environ.get("AGENT_ADDRESS") or f"http://{_detect_host_ip()}:8090"
+TLS_CERT_DIR = os.environ.get("TLS_CERT_DIR", "/data/tls")
+_TLS_CERT_PATH = os.path.join(TLS_CERT_DIR, "cert.pem")
+_TLS_KEY_PATH = os.path.join(TLS_CERT_DIR, "key.pem")
+_TLS_IP_PATH = os.path.join(TLS_CERT_DIR, "ip.txt")
+
+
+def _read_cert_pem() -> str:
+    """Return the PEM-encoded certificate as a string."""
+    with open(_TLS_CERT_PATH, "r") as f:
+        return f.read()
+
+
+def _cert_fingerprint() -> str:
+    """Return SHA-256 fingerprint of the current TLS certificate."""
+    with open(_TLS_CERT_PATH, "rb") as f:
+        cert = x509.load_pem_x509_certificate(f.read())
+    return hashlib.sha256(cert.public_bytes(serialization.Encoding.DER)).hexdigest()
+
+
+def _generate_self_signed_cert(ip_addr: str, cert_dir: str) -> None:
+    """Generate a self-signed TLS certificate with the given IP as SAN."""
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    subject = issuer = x509.Name([
+        x509.NameAttribute(NameOID.COMMON_NAME, f"llm-agent-{ip_addr}"),
+    ])
+    san = x509.SubjectAlternativeName([
+        x509.IPAddress(ipaddress.ip_address(ip_addr)),
+    ])
+    cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(issuer)
+        .public_key(key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(datetime.datetime.utcnow())
+        .not_valid_after(datetime.datetime.utcnow() + datetime.timedelta(days=365))
+        .add_extension(san, critical=False)
+        .sign(key, hashes.SHA256())
+    )
+    os.makedirs(cert_dir, exist_ok=True)
+    with open(os.path.join(cert_dir, "cert.pem"), "wb") as f:
+        f.write(cert.public_bytes(serialization.Encoding.PEM))
+    with open(os.path.join(cert_dir, "key.pem"), "wb") as f:
+        f.write(key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.TraditionalOpenSSL,
+            serialization.NoEncryption(),
+        ))
+    with open(os.path.join(cert_dir, "ip.txt"), "w") as f:
+        f.write(ip_addr)
+    logger.info("Generated self-signed TLS certificate for IP %s in %s", ip_addr, cert_dir)
+
+
+def _ensure_tls_cert(ip_addr: str) -> None:
+    """Ensure a valid TLS cert exists for the given IP, regenerating if needed."""
+    need_regen = False
+    if not os.path.exists(_TLS_CERT_PATH) or not os.path.exists(_TLS_KEY_PATH):
+        need_regen = True
+    elif os.path.exists(_TLS_IP_PATH):
+        with open(_TLS_IP_PATH, "r") as f:
+            stored_ip = f.read().strip()
+        if stored_ip != ip_addr:
+            logger.info("IP changed from %s to %s — regenerating TLS cert", stored_ip, ip_addr)
+            need_regen = True
+    else:
+        need_regen = True
+
+    if need_regen:
+        _generate_self_signed_cert(ip_addr, TLS_CERT_DIR)
+
+
+_DETECTED_IP = _detect_host_ip()
+_ensure_tls_cert(_DETECTED_IP)
+
+AGENT_ADDRESS = os.environ.get("AGENT_ADDRESS") or f"https://{_DETECTED_IP}:8090"
 
 _RUNNER_ID: int | None = None
 
@@ -108,6 +189,8 @@ async def lifespan(app: FastAPI):
     if BACKEND_URL and AGENT_ADDRESS:
         try:
             caps = await _build_capabilities()
+            caps["tls_cert"] = _read_cert_pem()
+            caps["tls_fingerprint"] = _cert_fingerprint()
             async with httpx.AsyncClient(timeout=10) as c:
                 r = await c.post(
                     f"{BACKEND_URL}/api/runners/register",
@@ -121,7 +204,7 @@ async def lifespan(app: FastAPI):
                 )
                 r.raise_for_status()
                 _RUNNER_ID = r.json()["runner_id"]
-                logger.info("Registered with backend as runner_id=%d", _RUNNER_ID)
+                logger.info("Registered with backend as runner_id=%d (address=%s)", _RUNNER_ID, AGENT_ADDRESS)
         except Exception as e:
             logger.warning("Could not register with backend at startup: %s", e)
 
@@ -794,4 +877,11 @@ async def metrics():
 
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8090, log_level="info")
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=8090,
+        log_level="info",
+        ssl_certfile=_TLS_CERT_PATH,
+        ssl_keyfile=_TLS_KEY_PATH,
+    )

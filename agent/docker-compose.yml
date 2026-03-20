@@ -12,6 +12,7 @@ services:
       - /opt/models:/opt/models:ro
       - /home/alex/claude/projects/image/outputs:/outputs:ro
       - /var/run/docker.sock:/var/run/docker.sock
+      - ./tls:/data/tls
     environment:
       - OLLAMA_URL=http://localhost:11434
       - COMFYUI_URL=http://localhost:8188

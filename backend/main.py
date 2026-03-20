@@ -93,11 +93,15 @@ async def _get_runner_client(pool: asyncpg.Pool, runner_id: Optional[int] = None
     else:
         host = url
         port = 8090
-    return LLMAgentClient(host=host, port=port, psk=AGENT_PSK)
+    # Extract TLS cert from capabilities for cert-pinned HTTPS
+    caps = r.get("capabilities", {})
+    tls_cert_pem = caps.get("tls_cert") if isinstance(caps, dict) else None
+    return LLMAgentClient(host=host, port=port, psk=AGENT_PSK, tls_cert_pem=tls_cert_pem)
 
 
 async def _get_runner_ollama_base(pool: asyncpg.Pool, runner_id: Optional[int] = None) -> str:
-    """Get Ollama URL for a runner. Replaces the runner port with 11434."""
+    """Get Ollama URL for a runner. Replaces the runner port with 11434.
+    Ollama always uses plain HTTP regardless of agent protocol."""
     runners_list = await db.get_active_runners(pool)
     if not runners_list:
         raise HTTPException(503, "No active llm-runners available")
@@ -107,10 +111,13 @@ async def _get_runner_ollama_base(pool: asyncpg.Pool, runner_id: Optional[int] =
             r = runners_list[0]
     else:
         r = runners_list[0]
-    # runner address is like http://murderbot.amer.home:8090
-    # ollama is on the same host at port 11434
+    # runner address is like https://10.x.x.x:8090
+    # ollama is on the same host at port 11434, always plain HTTP
     addr = r["address"]
-    return re.sub(r':\d+$', ':11434', addr)
+    # Strip scheme and port, rebuild as http with Ollama port
+    host = re.sub(r'^https?://', '', addr)
+    host = re.sub(r':\d+$', '', host)
+    return f"http://{host}:11434"
 
 
 def _make_runner(config: AgentConfig, pool: asyncpg.Pool, ollama_base: str) -> AgentRunner:
