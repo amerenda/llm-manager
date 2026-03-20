@@ -51,7 +51,7 @@ export function Runners() {
             const isGpu = !!caps.gpu_vram_total_bytes
             const isTts = !!caps.tts
             const vramPct = isGpu
-              ? Math.round((caps.gpu_vram_used_bytes / caps.gpu_vram_total_bytes) * 100)
+              ? Math.round(((caps.gpu_vram_used_bytes ?? 0) / (caps.gpu_vram_total_bytes ?? 1)) * 100)
               : null
 
             return (
@@ -84,7 +84,7 @@ export function Runners() {
                       <span className="flex items-center gap-1">
                         <Cpu className="w-3 h-3" />VRAM
                       </span>
-                      <span>{bytes(caps.gpu_vram_used_bytes)} / {bytes(caps.gpu_vram_total_bytes)}</span>
+                      <span>{bytes(caps.gpu_vram_used_bytes ?? 0)} / {bytes(caps.gpu_vram_total_bytes ?? 0)}</span>
                     </div>
                     <div className="h-1.5 bg-gray-800 rounded-full overflow-hidden">
                       <div
@@ -96,9 +96,9 @@ export function Runners() {
                 )}
 
                 {/* Loaded models */}
-                {isGpu && caps.loaded_models?.length > 0 && (
+                {isGpu && (caps.loaded_models?.length ?? 0) > 0 && (
                   <div className="flex flex-wrap gap-1">
-                    {caps.loaded_models.map((m: string) => (
+                    {(caps.loaded_models ?? []).map((m: string) => (
                       <span key={m} className="text-[10px] bg-gray-800 text-gray-400 px-2 py-0.5 rounded-full font-mono">
                         {m}
                       </span>
@@ -107,11 +107,11 @@ export function Runners() {
                 )}
 
                 {/* TTS voices */}
-                {isTts && caps.voices?.length > 0 && (
+                {isTts && (caps.voices?.length ?? 0) > 0 && (
                   <div className="space-y-1">
                     <div className="flex items-center gap-1 text-xs text-gray-500">
                       <Volume2 className="w-3 h-3" />
-                      <span>{caps.voices.length} voice{caps.voices.length !== 1 ? 's' : ''}</span>
+                      <span>{caps.voices?.length} voice{caps.voices?.length !== 1 ? 's' : ''}</span>
                       {caps.default_voice && (
                         <span className="text-gray-600">· default: {caps.default_voice}</span>
                       )}

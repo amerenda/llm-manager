@@ -18,6 +18,8 @@ spec:
       initContainers:
         - name: download-voice
           image: curlimages/curl:latest
+          securityContext:
+            runAsUser: 0
           command: ["/bin/sh", "-c"]
           args:
             - |
