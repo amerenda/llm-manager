@@ -221,13 +221,20 @@ async def _build_capabilities() -> dict:
     gpu = _gpu_stats()
     loaded = await _ollama_loaded_models()
     comfyui_ok = await _comfyui_ok()
-    return {
+    caps = {
         "gpu_vram_total_bytes": gpu["vram_total_bytes"],
         "gpu_vram_used_bytes": gpu["vram_used_bytes"],
         "gpu_vram_free_bytes": max(0, gpu["vram_total_bytes"] - gpu["vram_used_bytes"]),
         "comfyui_running": comfyui_ok,
         "loaded_models": [m["name"] for m in loaded],
     }
+    # Always include TLS cert so heartbeats don't wipe it
+    try:
+        caps["tls_cert"] = _read_cert_pem()
+        caps["tls_fingerprint"] = _cert_fingerprint()
+    except Exception:
+        pass
+    return caps
 
 
 async def _heartbeat_loop():
