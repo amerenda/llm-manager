@@ -164,6 +164,31 @@ CREATE TABLE IF NOT EXISTS app_allowed_models (
     created_at TIMESTAMPTZ DEFAULT NOW(),
     UNIQUE(app_id, model_pattern)
 );
+
+CREATE TABLE IF NOT EXISTS ollama_library_cache (
+    id SERIAL PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    description TEXT NOT NULL DEFAULT '',
+    pulls TEXT NOT NULL DEFAULT '',
+    tags_json JSONB NOT NULL DEFAULT '[]'::jsonb,
+    parameter_sizes JSONB NOT NULL DEFAULT '[]'::jsonb,
+    categories JSONB NOT NULL DEFAULT '[]'::jsonb,
+    last_scraped TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS model_safety_tags (
+    id SERIAL PRIMARY KEY,
+    pattern TEXT NOT NULL UNIQUE,
+    classification TEXT NOT NULL DEFAULT 'unsafe',
+    reason TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS library_cache_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
 """
 
 CREATE_INDEXES_SQL = """
@@ -191,6 +216,7 @@ async def init_db(pool: asyncpg.Pool) -> None:
         for col, default in [
             ("status", "'active'"),
             ("allow_profile_switch", "FALSE"),
+            ("allow_unsafe", "FALSE"),
         ]:
             try:
                 await conn.execute(
@@ -209,6 +235,22 @@ async def init_db(pool: asyncpg.Pool) -> None:
             ON CONFLICT (name) DO NOTHING
             """
         )
+
+        # Seed default safety tags
+        for pattern, reason in [
+            ("*uncensored*", "Model trained without safety restrictions"),
+            ("dolphin-*", "Dolphin models are uncensored by design"),
+            ("wizard-vicuna*", "WizardVicuna uncensored variant"),
+            ("*abliterated*", "Model with safety training removed"),
+        ]:
+            await conn.execute(
+                """
+                INSERT INTO model_safety_tags (pattern, classification, reason)
+                VALUES ($1, 'unsafe', $2)
+                ON CONFLICT (pattern) DO NOTHING
+                """,
+                pattern, reason,
+            )
     logger.info("Database tables initialized")
 
 
@@ -1202,3 +1244,105 @@ async def check_model_allowed(pool: asyncpg.Pool, api_key: str, model: str) -> b
     if not patterns:
         return True  # No restrictions = unrestricted
     return any(fnmatch.fnmatch(model, r["model_pattern"]) for r in patterns)
+
+
+# ── Library cache ────────────────────────────────────────────────────────────
+
+async def upsert_library_model(pool: asyncpg.Pool, name: str, description: str,
+                                pulls: str, tags_json: list, parameter_sizes: list,
+                                categories: list):
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO ollama_library_cache (name, description, pulls, tags_json, parameter_sizes, categories, last_scraped)
+            VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, NOW())
+            ON CONFLICT (name) DO UPDATE SET
+                description = EXCLUDED.description,
+                pulls = EXCLUDED.pulls,
+                tags_json = EXCLUDED.tags_json,
+                parameter_sizes = EXCLUDED.parameter_sizes,
+                categories = EXCLUDED.categories,
+                last_scraped = NOW()
+        """, name, description, pulls, json.dumps(tags_json),
+            json.dumps(parameter_sizes), json.dumps(categories))
+
+
+async def get_library_models(pool: asyncpg.Pool, search: str = None) -> list[dict]:
+    async with pool.acquire() as conn:
+        if search:
+            rows = await conn.fetch(
+                "SELECT * FROM ollama_library_cache WHERE name ILIKE $1 ORDER BY name",
+                f"%{search}%")
+        else:
+            rows = await conn.fetch("SELECT * FROM ollama_library_cache ORDER BY name")
+    return [dict(r) for r in rows]
+
+
+async def get_library_model(pool: asyncpg.Pool, name: str) -> Optional[dict]:
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM ollama_library_cache WHERE name = $1", name)
+    return dict(row) if row else None
+
+
+async def get_library_cache_age_hours(pool: asyncpg.Pool) -> Optional[float]:
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT updated_at FROM library_cache_meta WHERE key = 'last_full_refresh'")
+    if not row:
+        return None
+    import datetime
+    age = datetime.datetime.now(datetime.timezone.utc) - row["updated_at"]
+    return age.total_seconds() / 3600
+
+
+async def set_library_cache_meta(pool: asyncpg.Pool, key: str, value: str):
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO library_cache_meta (key, value, updated_at)
+            VALUES ($1, $2, NOW())
+            ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()
+        """, key, value)
+
+
+# ── Safety tags ──────────────────────────────────────────────────────────────
+
+async def get_safety_tags(pool: asyncpg.Pool) -> list[dict]:
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT * FROM model_safety_tags ORDER BY id")
+    return [dict(r) for r in rows]
+
+
+async def create_safety_tag(pool: asyncpg.Pool, pattern: str, classification: str,
+                             reason: str = "") -> int:
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO model_safety_tags (pattern, classification, reason)
+            VALUES ($1, $2, $3) RETURNING id
+        """, pattern, classification, reason)
+    return row["id"]
+
+
+async def update_safety_tag(pool: asyncpg.Pool, tag_id: int, pattern: str,
+                             classification: str, reason: str = "") -> bool:
+    async with pool.acquire() as conn:
+        result = await conn.execute("""
+            UPDATE model_safety_tags SET pattern = $2, classification = $3, reason = $4
+            WHERE id = $1
+        """, tag_id, pattern, classification, reason)
+    return "UPDATE 1" in result
+
+
+async def delete_safety_tag(pool: asyncpg.Pool, tag_id: int) -> bool:
+    async with pool.acquire() as conn:
+        result = await conn.execute("DELETE FROM model_safety_tags WHERE id = $1", tag_id)
+    return "DELETE 1" in result
+
+
+# ── App unsafe permission ────────────────────────────────────────────────────
+
+async def set_app_allow_unsafe(pool: asyncpg.Pool, app_id: int, allow_unsafe: bool) -> bool:
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "UPDATE registered_apps SET allow_unsafe = $2 WHERE id = $1",
+            app_id, allow_unsafe)
+    return "UPDATE 1" in result

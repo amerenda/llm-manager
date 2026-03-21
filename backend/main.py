@@ -40,6 +40,8 @@ from gpu import vram_for_model
 from llm_agent import LLMAgentClient
 from scheduler import Scheduler
 from queue_routes import router as queue_router, model_router
+from library_routes import router as library_router, safety_router
+from library import classify_models_batch, parse_param_count, parse_quantization, refresh_library_cache
 import queue_db
 
 logging.basicConfig(
@@ -151,6 +153,9 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     logger.info("Queue scheduler started")
 
+    # Warm library cache in background
+    asyncio.create_task(refresh_library_cache(pool))
+
     # Auto-start enabled moltbook agents from DB
     for row in await db.get_all_moltbook_configs(pool):
         if row["enabled"] and row["api_key"]:
@@ -186,6 +191,8 @@ app.add_middleware(
 )
 app.include_router(queue_router)
 app.include_router(model_router)
+app.include_router(library_router)
+app.include_router(safety_router)
 
 
 # ── Health ────────────────────────────────────────────────────────────────────
@@ -240,6 +247,21 @@ async def models_for_agents():
             r.raise_for_status()
             data = r.json()
 
+        # Get loaded models
+        loaded_names = set()
+        try:
+            async with httpx.AsyncClient(timeout=10) as c:
+                ps_resp = await c.get(f"{ollama_base}/api/ps")
+                if ps_resp.status_code == 200:
+                    for lm in ps_resp.json().get("models", []):
+                        loaded_names.add(lm["name"])
+        except Exception:
+            pass
+
+        # Classify safety
+        model_names = [m.get("name", "") for m in data.get("models", [])]
+        safety_map = await classify_models_batch(pool, model_names)
+
         models = []
         for m in data.get("models", []):
             name = m.get("name", "")
@@ -254,6 +276,11 @@ async def models_for_agents():
                 "name": name,
                 "size_gb": size_gb,
                 "vram_estimate_gb": vram_est,
+                "parameter_count": parse_param_count(name),
+                "quantization": parse_quantization(name),
+                "safety": safety_map.get(name, "safe"),
+                "downloaded": True,
+                "loaded": name in loaded_names,
                 "fits": len(fits_on) > 0,
                 "fits_on": fits_on,
             })
@@ -696,6 +723,24 @@ async def llm_pull_model(req: LLMPullRequest, runner_id: Optional[int] = None):
 
         async def _stream():
             async for chunk in client.pull_model(req.model):
+                yield chunk
+
+        return StreamingResponse(_stream(), media_type="application/x-ndjson")
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise _agent_unavailable(f"Runner error: {e}")
+
+
+@app.post("/api/models/{model:path}/update")
+async def update_model(model: str, runner_id: Optional[int] = None):
+    """Pull the latest version of an already-downloaded model."""
+    _inc_request("/api/models/update", "POST", 200)
+    try:
+        client = await _get_runner_client(app.state.db, runner_id)
+
+        async def _stream():
+            async for chunk in client.pull_model(model):
                 yield chunk
 
         return StreamingResponse(_stream(), media_type="application/x-ndjson")
