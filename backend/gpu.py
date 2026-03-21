@@ -39,6 +39,7 @@ def _estimate_vram(model_name: str) -> float:
         if params >= 100: return 60.0
         if params >= 70:  return 40.0
         if params >= 40:  return 24.0
+        if params >= 34:  return 20.0
         if params >= 32:  return 18.0
         if params >= 14:  return 8.5
         if params >= 13:  return 8.0
