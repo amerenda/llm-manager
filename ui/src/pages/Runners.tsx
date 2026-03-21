@@ -1,6 +1,7 @@
 import { Server, Cpu, MemoryStick, Volume2, RefreshCw } from 'lucide-react'
 import { useRunners } from '../hooks/useBackend'
 import { StatusDot } from '../components/StatusDot'
+import type { Runner } from '../types'
 
 function relativeTime(iso: string | null): string {
   if (!iso) return 'Never'
@@ -25,8 +26,8 @@ export function Runners() {
   const runners = useRunners()
   const list = runners.data ?? []
 
-  const gpuRunners = list.filter(r => r.capabilities.gpu_vram_total_bytes)
-  const ttsRunners = list.filter(r => r.capabilities.tts)
+  const gpuRunners = list.filter((r: Runner) => r.capabilities.gpu_vram_total_bytes)
+  const ttsRunners = list.filter((r: Runner) => r.capabilities.tts)
 
   return (
     <div className="space-y-6">
@@ -45,7 +46,7 @@ export function Runners() {
         <div className="py-12 text-center text-gray-600 text-sm">No active runners</div>
       ) : (
         <div className="space-y-3">
-          {list.map(runner => {
+          {list.map((runner: Runner) => {
             const online = isOnline(runner.last_seen)
             const caps = runner.capabilities
             const isGpu = !!caps.gpu_vram_total_bytes
