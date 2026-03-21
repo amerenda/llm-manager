@@ -26,18 +26,29 @@ MODEL_VRAM: dict[str, float] = {
 
 # Fallback: estimate from parameter count in name
 def _estimate_vram(model_name: str) -> float:
+    import re
     name = model_name.lower()
-    if "70b" in name: return 40.0
-    if "34b" in name: return 20.0
-    if "32b" in name: return 18.0
-    if "14b" in name: return 8.5
-    if "13b" in name: return 8.0
-    if "8b" in name:  return 5.0
-    if "7b" in name:  return 4.5
-    if "3b" in name:  return 2.5
-    if "2b" in name:  return 2.0
-    if "1b" in name:  return 1.5
-    return 4.5  # safe default
+    # Extract the parameter count number (e.g. "40b" -> 40, "7b" -> 7, "0.5b" -> 0.5)
+    m = re.search(r'(\d+\.?\d*)[bB]', name)
+    if m:
+        params = float(m.group(1))
+        # Rough formula: ~0.6GB per billion parameters (Q4 quantized)
+        # Adjust for known sizes
+        if params >= 400: return 200.0
+        if params >= 200: return 120.0
+        if params >= 100: return 60.0
+        if params >= 70:  return 40.0
+        if params >= 40:  return 24.0
+        if params >= 32:  return 18.0
+        if params >= 14:  return 8.5
+        if params >= 13:  return 8.0
+        if params >= 8:   return 5.0
+        if params >= 7:   return 4.5
+        if params >= 3:   return 2.5
+        if params >= 2:   return 2.0
+        if params >= 1:   return 1.5
+        return 1.0  # sub-1B models
+    return 4.5  # no size in name — safe default
 
 
 def vram_for_model(model_name: str) -> float:
