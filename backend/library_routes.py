@@ -18,7 +18,7 @@ from gpu import vram_for_model
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/library", tags=["library"])
-safety_router = APIRouter(prefix="/api/library/safety-tags", tags=["safety"])
+safety_router = APIRouter(prefix="/api/safety-tags", tags=["safety"])
 
 
 def _get_pool(request: Request):
