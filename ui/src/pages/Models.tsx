@@ -276,6 +276,7 @@ function LibraryBrowserSection() {
   const [search, setSearch] = useState('')
   const [safety, setSafety] = useState<string>('safe')
   const [fitsOnly, setFitsOnly] = useState(true)
+  const [sort, setSort] = useState<string>('pulls')
   const pull = usePullModel()
   const refresh = useRefreshLibrary()
   const [pullMsg, setPullMsg] = useState<{ model: string; type: 'ok' | 'err' | 'pulling'; text: string } | null>(null)
@@ -286,7 +287,20 @@ function LibraryBrowserSection() {
     fits: fitsOnly || undefined,
   })
 
-  const models = library.data?.models ?? []
+  // Client-side sort (API also sorts, but this is instant for filter changes)
+  const rawModels = library.data?.models ?? []
+  const models = [...rawModels].sort((a, b) => {
+    if (sort === 'pulls') {
+      const pa = parseFloat(a.pulls?.replace(/[KMB]/i, '') || '0')
+      const pb = parseFloat(b.pulls?.replace(/[KMB]/i, '') || '0')
+      const ma = a.pulls?.match(/[KMB]/i)?.[0]?.toUpperCase() || ''
+      const mb = b.pulls?.match(/[KMB]/i)?.[0]?.toUpperCase() || ''
+      const mult: Record<string, number> = { '': 1, 'K': 1e3, 'M': 1e6, 'B': 1e9 }
+      return (pb * (mult[mb] || 1)) - (pa * (mult[ma] || 1))
+    }
+    if (sort === 'vram') return a.vram_estimate_gb - b.vram_estimate_gb
+    return a.name.localeCompare(b.name)
+  })
   const runners = library.data?.runners ?? []
   const cacheAge = library.data?.cache_age_hours ?? 0
 
@@ -356,93 +370,86 @@ function LibraryBrowserSection() {
           {safety === 'safe' ? <Shield className="w-3 h-3" /> : <ShieldOff className="w-3 h-3" />}
           {safety === 'safe' ? 'Safe only' : safety === 'all' ? 'All models' : 'Unsafe only'}
         </button>
+        <select
+          value={sort}
+          onChange={e => setSort(e.target.value)}
+          className="text-xs bg-gray-900 border border-gray-800 rounded-lg px-2.5 py-2 text-gray-400 focus:outline-none focus:border-brand-600"
+        >
+          <option value="pulls">Most popular</option>
+          <option value="name">Name</option>
+          <option value="vram">VRAM (smallest)</option>
+        </select>
       </div>
 
-      {/* Model list */}
-      <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+      {/* Model list — card layout to avoid horizontal scroll */}
+      <div className="space-y-2">
         {library.isLoading ? (
           <div className="py-8 text-center text-gray-600 text-sm">Loading library...</div>
         ) : models.length === 0 ? (
           <div className="py-8 text-center text-gray-600 text-sm">No models match your filters</div>
         ) : (
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-gray-800 text-xs text-gray-500 uppercase tracking-wide">
-                <th className="text-left px-4 py-3 font-medium">Model</th>
-                <th className="text-left px-4 py-3 font-medium">Sizes</th>
-                <th className="text-left px-4 py-3 font-medium">VRAM</th>
-                <th className="text-left px-4 py-3 font-medium">Pulls</th>
-                <th className="text-left px-4 py-3 font-medium">Status</th>
-                <th className="px-4 py-3" />
-              </tr>
-            </thead>
-            <tbody>
-              {models.map((m: LibraryModel) => (
-                <tr key={m.name} className="border-b border-gray-800 last:border-0 hover:bg-gray-800/40 transition-colors">
-                  <td className="px-4 py-3">
-                    <div>
-                      <span className="text-gray-200 font-medium">{m.name}</span>
-                      {m.safety === 'unsafe' && (
-                        <span className="ml-1.5 text-[10px] bg-red-900/40 text-red-400 px-1.5 py-0.5 rounded">unsafe</span>
-                      )}
-                    </div>
-                    {m.description && (
-                      <p className="text-xs text-gray-600 mt-0.5 line-clamp-1 max-w-xs">{m.description}</p>
+          models.map((m: LibraryModel) => (
+            <div key={m.name} className="bg-gray-900 border border-gray-800 rounded-xl p-4 hover:bg-gray-800/40 transition-colors">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-sm text-gray-200 font-medium">{m.name}</span>
+                    {m.safety === 'unsafe' && (
+                      <span className="text-[10px] bg-red-900/40 text-red-400 px-1.5 py-0.5 rounded">unsafe</span>
+                    )}
+                    {m.downloaded && (
+                      <span className="flex items-center gap-0.5 text-[10px] text-green-400">
+                        <CheckCircle2 className="w-2.5 h-2.5" /> Downloaded
+                      </span>
+                    )}
+                  </div>
+                  {m.description && (
+                    <p className="text-xs text-gray-500 mt-1 line-clamp-1">{m.description}</p>
+                  )}
+                  <div className="flex items-center gap-3 mt-2 flex-wrap">
+                    {m.parameter_sizes.length > 0 && (
+                      <div className="flex gap-1 flex-wrap">
+                        {m.parameter_sizes.map(s => (
+                          <span key={s} className="text-[10px] bg-blue-900/30 text-blue-400 px-1.5 py-0.5 rounded">{s}</span>
+                        ))}
+                      </div>
                     )}
                     {m.categories.length > 0 && (
-                      <div className="flex gap-1 mt-1">
+                      <div className="flex gap-1">
                         {m.categories.map(c => (
                           <span key={c} className="text-[10px] bg-indigo-900/30 text-indigo-400 px-1.5 py-0.5 rounded">{c}</span>
                         ))}
                       </div>
                     )}
-                  </td>
-                  <td className="px-4 py-3">
-                    <div className="flex flex-wrap gap-1">
-                      {m.parameter_sizes.slice(0, 4).map(s => (
-                        <span key={s} className="text-[10px] bg-blue-900/30 text-blue-400 px-1.5 py-0.5 rounded">{s}</span>
-                      ))}
-                      {m.parameter_sizes.length > 4 && (
-                        <span className="text-[10px] text-gray-600">+{m.parameter_sizes.length - 4}</span>
-                      )}
-                    </div>
-                  </td>
-                  <td className="px-4 py-3 text-xs text-gray-400">{m.vram_estimate_gb}GB</td>
-                  <td className="px-4 py-3 text-xs text-gray-500">{m.pulls}</td>
-                  <td className="px-4 py-3">
-                    {m.downloaded ? (
-                      <span className="flex items-center gap-1 text-xs text-green-400">
-                        <CheckCircle2 className="w-3 h-3" /> Downloaded
-                      </span>
-                    ) : m.fits ? (
-                      <span className="text-xs text-gray-500">Available</span>
-                    ) : (
-                      <span className="text-xs text-gray-600">Too large</span>
-                    )}
-                  </td>
-                  <td className="px-4 py-3 text-right">
-                    {!m.downloaded && m.fits && (
-                      <button
-                        onClick={() => handlePull(m.name)}
-                        disabled={pullMsg?.model === m.name && pullMsg.type === 'pulling'}
-                        className="flex items-center gap-1 text-xs bg-brand-900/50 hover:bg-brand-800/50 text-brand-300 px-2.5 py-1 rounded-lg transition-colors disabled:opacity-40"
-                      >
-                        {pullMsg?.model === m.name && pullMsg.type === 'pulling'
-                          ? <Loader2 className="w-3 h-3 animate-spin" />
-                          : <Download className="w-3 h-3" />}
-                        Pull
-                      </button>
-                    )}
-                    {pullMsg?.model === m.name && pullMsg.type !== 'pulling' && (
-                      <span className={`text-[10px] ${pullMsg.type === 'ok' ? 'text-green-400' : 'text-red-400'}`}>
-                        {pullMsg.text}
-                      </span>
-                    )}
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+                    <span className="text-[10px] text-gray-600">~{m.vram_estimate_gb}GB VRAM</span>
+                    {m.pulls && <span className="text-[10px] text-gray-600">{m.pulls} pulls</span>}
+                  </div>
+                </div>
+                <div className="flex-shrink-0">
+                  {!m.downloaded && m.fits && (
+                    <button
+                      onClick={() => handlePull(m.name)}
+                      disabled={pullMsg?.model === m.name && pullMsg.type === 'pulling'}
+                      className="flex items-center gap-1 text-xs bg-brand-900/50 hover:bg-brand-800/50 text-brand-300 px-3 py-1.5 rounded-lg transition-colors disabled:opacity-40"
+                    >
+                      {pullMsg?.model === m.name && pullMsg.type === 'pulling'
+                        ? <Loader2 className="w-3 h-3 animate-spin" />
+                        : <Download className="w-3 h-3" />}
+                      Pull
+                    </button>
+                  )}
+                  {!m.fits && !m.downloaded && (
+                    <span className="text-[10px] text-gray-600">Too large</span>
+                  )}
+                  {pullMsg?.model === m.name && pullMsg.type !== 'pulling' && (
+                    <span className={`text-[10px] ${pullMsg.type === 'ok' ? 'text-green-400' : 'text-red-400'}`}>
+                      {pullMsg.text}
+                    </span>
+                  )}
+                </div>
+              </div>
+            </div>
+          ))
         )}
       </div>
     </section>

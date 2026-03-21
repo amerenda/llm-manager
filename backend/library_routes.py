@@ -45,6 +45,7 @@ async def browse_library(
     safety: Optional[str] = None,  # all | safe | unsafe
     fits: Optional[bool] = None,  # true = only models that fit
     downloaded: Optional[bool] = None,  # true = only downloaded
+    sort: Optional[str] = "name",  # name | pulls | vram
 ):
     pool = _get_pool(request)
 
@@ -140,6 +141,30 @@ async def browse_library(
             "fits_on": fits_on,
             "vram_estimate_gb": round(vram_est, 1),
         })
+
+    # Sort results
+    def _parse_pulls(p: str) -> float:
+        """Parse '111.7M' -> 111700000."""
+        if not p:
+            return 0
+        p = p.strip().upper()
+        if p.endswith('B'):
+            return float(p[:-1]) * 1e9
+        if p.endswith('M'):
+            return float(p[:-1]) * 1e6
+        if p.endswith('K'):
+            return float(p[:-1]) * 1e3
+        try:
+            return float(p)
+        except ValueError:
+            return 0
+
+    if sort == "pulls":
+        results.sort(key=lambda m: _parse_pulls(m["pulls"]), reverse=True)
+    elif sort == "vram":
+        results.sort(key=lambda m: m["vram_estimate_gb"])
+    else:
+        results.sort(key=lambda m: m["name"])
 
     return {
         "models": results,
