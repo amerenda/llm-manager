@@ -38,6 +38,9 @@ from db import (
 from agent_runner import AgentRunner
 from gpu import vram_for_model
 from llm_agent import LLMAgentClient
+from scheduler import Scheduler
+from queue_routes import router as queue_router, model_router
+import queue_db
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -137,7 +140,16 @@ async def lifespan(app: FastAPI):
     pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10)
     app.state.db = pool
     await init_db(pool)
+    await queue_db.init_queue_tables(pool)
     logger.info("Database connected: %s", DATABASE_URL)
+
+    # Start the queue scheduler
+    async def get_ollama():
+        return await _get_runner_ollama_base(pool)
+    scheduler = Scheduler(pool, get_ollama)
+    app.state.scheduler = scheduler
+    scheduler.start()
+    logger.info("Queue scheduler started")
 
     # Auto-start enabled moltbook agents from DB
     for row in await db.get_all_moltbook_configs(pool):
@@ -159,18 +171,21 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    scheduler.stop()
     for r in runners.values():
         r.stop()
     await pool.close()
 
 
-app = FastAPI(title="LLM Manager Backend", version="2.0.0", lifespan=lifespan)
+app = FastAPI(title="LLM Manager Backend", version="3.0.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.include_router(queue_router)
+app.include_router(model_router)
 
 
 # ── Health ────────────────────────────────────────────────────────────────────

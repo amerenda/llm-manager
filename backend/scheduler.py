@@ -1,0 +1,371 @@
+"""
+Queue scheduler with VRAM-aware model management.
+
+Single async worker that processes jobs grouped by model,
+handles model loading/unloading with eviction policies.
+"""
+import asyncio
+import json
+import logging
+import time
+from typing import Optional
+
+import asyncpg
+import httpx
+
+import queue_db
+from gpu import vram_for_model
+
+logger = logging.getLogger(__name__)
+
+
+class Scheduler:
+    def __init__(self, pool: asyncpg.Pool, get_ollama_base: callable):
+        self.pool = pool
+        self.get_ollama_base = get_ollama_base  # async callable returning ollama URL
+        self._task: Optional[asyncio.Task] = None
+        self._current_job_id: Optional[str] = None
+        self._running = False
+        # Track loaded models: {model_name: {"loaded_at": float, "vram_gb": float}}
+        self._loaded_models: dict[str, dict] = {}
+
+    def start(self):
+        if self._task is None or self._task.done():
+            self._running = True
+            self._task = asyncio.create_task(self._loop())
+            logger.info("Scheduler started")
+
+    def stop(self):
+        self._running = False
+        if self._task and not self._task.done():
+            self._task.cancel()
+            logger.info("Scheduler stopped")
+
+    @property
+    def current_job_id(self) -> Optional[str]:
+        return self._current_job_id
+
+    @property
+    def loaded_models(self) -> dict[str, dict]:
+        return dict(self._loaded_models)
+
+    async def _loop(self):
+        """Main scheduler loop. Processes jobs grouped by model."""
+        cleanup_counter = 0
+        while self._running:
+            try:
+                jobs = await queue_db.get_pending_jobs(self.pool)
+                if not jobs:
+                    await asyncio.sleep(1)
+                    cleanup_counter += 1
+                    if cleanup_counter > 3600:  # hourly cleanup
+                        await queue_db.cleanup_old_jobs(self.pool)
+                        cleanup_counter = 0
+                    continue
+
+                # Refresh loaded model list from Ollama
+                await self._sync_loaded_models()
+
+                # Group jobs by model
+                model_groups: dict[str, list[dict]] = {}
+                for job in jobs:
+                    model_groups.setdefault(job["model"], []).append(job)
+
+                # Process already-loaded models first (no swap needed)
+                for model in list(model_groups.keys()):
+                    if model in self._loaded_models:
+                        batch = model_groups.pop(model)
+                        await self._process_batch(model, batch)
+
+                # Process remaining models (need loading)
+                for model, batch in model_groups.items():
+                    success = await self._ensure_model_loaded(model)
+                    if success:
+                        await self._process_batch(model, batch)
+                    # If loading failed, jobs stay queued for retry
+
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception("Scheduler loop error")
+                await asyncio.sleep(5)
+
+    async def _sync_loaded_models(self):
+        """Sync loaded model list from Ollama's /api/ps endpoint."""
+        try:
+            ollama_base = await self.get_ollama_base()
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.get(f"{ollama_base}/api/ps")
+                if resp.status_code == 200:
+                    data = resp.json()
+                    current = {}
+                    for m in data.get("models", []):
+                        name = m.get("name", "")
+                        size_bytes = m.get("size_vram", m.get("size", 0))
+                        vram_gb = round(size_bytes / (1024**3), 1) if size_bytes else vram_for_model(name)
+                        current[name] = {
+                            "loaded_at": self._loaded_models.get(name, {}).get("loaded_at", time.time()),
+                            "vram_gb": vram_gb,
+                            "active_jobs": len(await queue_db.get_active_jobs_for_model(self.pool, name)),
+                        }
+                    self._loaded_models = current
+        except Exception:
+            logger.warning("Failed to sync loaded models from Ollama")
+
+    async def _get_gpu_info(self) -> dict:
+        """Get GPU VRAM info from Ollama."""
+        try:
+            ollama_base = await self.get_ollama_base()
+            async with httpx.AsyncClient(timeout=10) as client:
+                # Use /api/ps to get model VRAM usage, nvidia-smi for total
+                resp = await client.get(f"{ollama_base}/api/ps")
+                if resp.status_code != 200:
+                    return {"total": 0, "used": 0, "free": 0}
+
+                # Sum up VRAM from loaded models
+                data = resp.json()
+                used = 0
+                for m in data.get("models", []):
+                    size_bytes = m.get("size_vram", m.get("size", 0))
+                    used += size_bytes / (1024**3)
+
+                # Get total from the runner's /v1/status endpoint or estimate
+                # For now, use the models' VRAM as a rough measure
+                # TODO: get actual GPU total from runner status endpoint
+                return {"total": 24.0, "used": round(used, 1), "free": round(24.0 - used, 1)}
+        except Exception:
+            return {"total": 0, "used": 0, "free": 0}
+
+    async def _ensure_model_loaded(self, model: str) -> bool:
+        """Load a model, evicting others if needed. Returns True if successful."""
+        if model in self._loaded_models:
+            return True
+
+        vram_needed = vram_for_model(model)
+        gpu = await self._get_gpu_info()
+
+        # Check if model fits at all
+        if vram_needed > gpu["total"] and gpu["total"] > 0:
+            logger.error("Model %s needs %.1fGB but GPU has %.1fGB total",
+                         model, vram_needed, gpu["total"])
+            return False
+
+        # Check if we have free VRAM
+        if gpu["free"] >= vram_needed:
+            return await self._load_model(model)
+
+        # Need to evict
+        vram_to_free = vram_needed - gpu["free"]
+        evicted = await self._evict_for_vram(vram_to_free)
+        if not evicted:
+            logger.error("Cannot free %.1fGB for model %s", vram_to_free, model)
+            return False
+
+        return await self._load_model(model)
+
+    async def _evict_for_vram(self, vram_needed: float) -> bool:
+        """Evict models to free up VRAM. Returns True if enough was freed."""
+        candidates = []
+        for name, info in self._loaded_models.items():
+            settings = await queue_db.get_model_settings(self.pool, name)
+            if settings.get("do_not_evict", False):
+                continue
+            if not settings.get("evictable", True):
+                continue
+            candidates.append({
+                "name": name,
+                "vram_gb": info.get("vram_gb", vram_for_model(name)),
+                "active_jobs": info.get("active_jobs", 0),
+                "loaded_at": info.get("loaded_at", 0),
+                "wait_for_completion": settings.get("wait_for_completion", True),
+            })
+
+        # Sort: idle models first, then oldest loaded
+        candidates.sort(key=lambda m: (m["active_jobs"] > 0, m["loaded_at"]))
+
+        freed = 0.0
+        for candidate in candidates:
+            if freed >= vram_needed:
+                break
+
+            # Wait for active jobs if configured
+            if candidate["active_jobs"] > 0 and candidate["wait_for_completion"]:
+                logger.info("Waiting for %d jobs on %s to complete before evicting",
+                            candidate["active_jobs"], candidate["name"])
+                # Wait up to 5 minutes for jobs to finish
+                for _ in range(60):
+                    active = await queue_db.get_active_jobs_for_model(self.pool, candidate["name"])
+                    if not active:
+                        break
+                    await asyncio.sleep(5)
+
+            success = await self._unload_model(candidate["name"])
+            if success:
+                freed += candidate["vram_gb"]
+                logger.info("Evicted %s, freed %.1fGB (total freed: %.1fGB / %.1fGB needed)",
+                            candidate["name"], candidate["vram_gb"], freed, vram_needed)
+
+        return freed >= vram_needed
+
+    async def _load_model(self, model: str) -> bool:
+        """Load a model via Ollama."""
+        try:
+            ollama_base = await self.get_ollama_base()
+            logger.info("Loading model %s", model)
+            async with httpx.AsyncClient(timeout=300) as client:
+                resp = await client.post(
+                    f"{ollama_base}/api/generate",
+                    json={"model": model, "prompt": "", "keep_alive": "10m"},
+                )
+                if resp.status_code == 200:
+                    self._loaded_models[model] = {
+                        "loaded_at": time.time(),
+                        "vram_gb": vram_for_model(model),
+                        "active_jobs": 0,
+                    }
+                    logger.info("Model %s loaded", model)
+                    return True
+                else:
+                    logger.error("Failed to load model %s: %s", model, resp.text[:200])
+                    return False
+        except Exception:
+            logger.exception("Error loading model %s", model)
+            return False
+
+    async def _unload_model(self, model: str) -> bool:
+        """Unload a model via Ollama."""
+        try:
+            ollama_base = await self.get_ollama_base()
+            logger.info("Unloading model %s", model)
+            async with httpx.AsyncClient(timeout=30) as client:
+                resp = await client.post(
+                    f"{ollama_base}/api/generate",
+                    json={"model": model, "prompt": "", "keep_alive": "0"},
+                )
+                if resp.status_code == 200:
+                    self._loaded_models.pop(model, None)
+                    logger.info("Model %s unloaded", model)
+                    return True
+                return False
+        except Exception:
+            logger.exception("Error unloading model %s", model)
+            return False
+
+    async def _process_batch(self, model: str, jobs: list[dict]):
+        """Process a batch of jobs for a single model."""
+        logger.info("Processing %d jobs for model %s", len(jobs), model)
+        for job in jobs:
+            if not self._running:
+                break
+            await self._run_job(job)
+
+    async def _run_job(self, job: dict):
+        """Execute a single inference job."""
+        job_id = job["id"]
+        model = job["model"]
+        request = job["request"] if isinstance(job["request"], dict) else json.loads(job["request"])
+
+        self._current_job_id = job_id
+        await queue_db.update_job_status(self.pool, job_id, "running")
+
+        try:
+            ollama_base = await self.get_ollama_base()
+            # Build OpenAI-compatible request to Ollama
+            payload = {
+                "model": model,
+                "messages": request.get("messages", []),
+                "stream": False,
+                "options": {},
+            }
+            if "temperature" in request:
+                payload["options"]["temperature"] = request["temperature"]
+            if "max_tokens" in request:
+                payload["options"]["num_predict"] = request["max_tokens"]
+
+            async with httpx.AsyncClient(timeout=120) as client:
+                resp = await client.post(f"{ollama_base}/api/chat", json=payload)
+
+            if resp.status_code == 200:
+                data = resp.json()
+                result = {
+                    "choices": [{
+                        "message": data.get("message", {}),
+                        "finish_reason": "stop",
+                    }],
+                    "model": model,
+                    "usage": {
+                        "prompt_tokens": data.get("prompt_eval_count", 0),
+                        "completion_tokens": data.get("eval_count", 0),
+                    },
+                }
+                await queue_db.update_job_status(self.pool, job_id, "completed", result=result)
+                logger.info("Job %s completed (model=%s, tokens=%d)",
+                            job_id, model, data.get("eval_count", 0))
+            else:
+                error = f"Ollama returned {resp.status_code}: {resp.text[:200]}"
+                await queue_db.update_job_status(self.pool, job_id, "failed", error=error)
+                logger.error("Job %s failed: %s", job_id, error)
+
+        except Exception as e:
+            await queue_db.update_job_status(self.pool, job_id, "failed", error=str(e))
+            logger.exception("Job %s error", job_id)
+        finally:
+            self._current_job_id = None
+
+    # ── Public methods for VRAM analysis ──────────────────────────────────────
+
+    async def check_submission(self, model: str) -> dict:
+        """Pre-check a job submission. Returns warnings/errors about VRAM."""
+        vram_needed = vram_for_model(model)
+        gpu = await self._get_gpu_info()
+
+        if gpu["total"] > 0 and vram_needed > gpu["total"]:
+            return {
+                "ok": False,
+                "error": "model_too_large",
+                "message": f"{model} requires {vram_needed:.1f}GB VRAM, GPU has {gpu['total']:.1f}GB total",
+                "vram_required_gb": vram_needed,
+                "vram_available_gb": gpu["total"],
+            }
+
+        if model in self._loaded_models:
+            return {"ok": True}
+
+        if gpu["free"] >= vram_needed:
+            return {"ok": True}
+
+        # Check eviction feasibility
+        evictable_vram = 0
+        non_evictable_vram = 0
+        loaded_info = []
+        for name, info in self._loaded_models.items():
+            settings = await queue_db.get_model_settings(self.pool, name)
+            model_vram = info.get("vram_gb", vram_for_model(name))
+            if settings.get("do_not_evict", False) or not settings.get("evictable", True):
+                non_evictable_vram += model_vram
+                loaded_info.append({"model": name, "vram_gb": model_vram, "do_not_evict": True})
+            else:
+                evictable_vram += model_vram
+                loaded_info.append({"model": name, "vram_gb": model_vram, "do_not_evict": False})
+
+        available_after_eviction = gpu["free"] + evictable_vram
+        if available_after_eviction < vram_needed:
+            return {
+                "ok": False,
+                "error": "insufficient_vram",
+                "message": (f"{model} requires {vram_needed:.1f}GB, only {available_after_eviction:.1f}GB "
+                            f"available after eviction. {non_evictable_vram:.1f}GB held by non-evictable models."),
+                "vram_required_gb": vram_needed,
+                "vram_available_gb": available_after_eviction,
+                "non_evictable_gb": non_evictable_vram,
+                "loaded_models": loaded_info,
+            }
+
+        # Can evict, return warning
+        to_evict = [m["model"] for m in loaded_info if not m["do_not_evict"]]
+        return {
+            "ok": True,
+            "warning": "eviction_required",
+            "message": f"Will evict {', '.join(to_evict)} to free VRAM for {model}",
+            "evicting": to_evict,
+        }
