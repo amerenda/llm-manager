@@ -6,7 +6,8 @@ COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY main.py .
+COPY entrypoint.sh .
 
 EXPOSE 8090
 
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8090", "--ssl-keyfile", "/data/tls/key.pem", "--ssl-certfile", "/data/tls/cert.pem"]
+CMD ["/bin/sh", "entrypoint.sh"]
