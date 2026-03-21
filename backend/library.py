@@ -24,16 +24,24 @@ OLLAMA_LIBRARY_URL = "https://ollama.com/library"
 # ── HTML parsing ──────────────────────────────────────────────────────────────
 
 class LibraryPageParser(HTMLParser):
-    """Parse the Ollama library index page to extract model cards."""
+    """Parse the Ollama library index page to extract model cards.
+
+    Key HTML attributes:
+    - x-test-model-title: model card container
+    - x-test-size: parameter size tags (8b, 70b, etc)
+    - x-test-capability: capability tags (tools, vision, etc)
+    - x-test-pull-count: download count
+    """
 
     def __init__(self):
         super().__init__()
         self.models = []
         self._current = None
-        self._in_link = False
+        self._in_card = False
         self._in_desc = False
+        self._in_size = False
+        self._in_capability = False
         self._in_pulls = False
-        self._in_tags = False
         self._capture = ""
 
     def handle_starttag(self, tag, attrs):
@@ -51,34 +59,71 @@ class LibraryPageParser(HTMLParser):
                     "parameter_sizes": [],
                     "categories": [],
                 }
-                self._in_link = True
+                self._in_card = True
 
-        # Capture text content in spans/paragraphs within a card
-        if self._current and tag in ("p", "span"):
+        if not self._current:
+            return
+
+        # Description paragraph
+        if tag == "p" and "break-words" in attrs_dict.get("class", ""):
+            self._in_desc = True
+            self._capture = ""
+
+        # Parameter size span (x-test-size attribute)
+        if "x-test-size" in attrs_dict:
+            self._in_size = True
+            self._capture = ""
+
+        # Capability span (x-test-capability attribute)
+        if "x-test-capability" in attrs_dict:
+            self._in_capability = True
+            self._capture = ""
+
+        # Pull count span (x-test-pull-count attribute)
+        if "x-test-pull-count" in attrs_dict:
+            self._in_pulls = True
             self._capture = ""
 
     def handle_data(self, data):
-        if self._current:
-            self._capture += data.strip()
+        text = data.strip()
+        if not text:
+            return
+        if self._in_desc:
+            self._capture += text
+        elif self._in_size:
+            self._capture += text
+        elif self._in_capability:
+            self._capture += text
+        elif self._in_pulls:
+            self._capture += text
 
     def handle_endtag(self, tag):
-        if self._current and tag in ("p", "span") and self._capture:
-            text = self._capture.strip()
-            # Detect description (longer text that's not a number/tag)
-            if len(text) > 20 and not self._current["description"]:
-                self._current["description"] = text
-            # Detect pull count (contains K, M, B)
-            elif re.match(r'^[\d.]+[KMB]?\s*(Pull|pull)?', text):
-                if not self._current["pulls"]:
-                    self._current["pulls"] = text.split()[0] if text else ""
-            # Detect parameter sizes (7B, 14B, etc)
-            elif re.match(r'^\d+(\.\d+)?[bB]$', text):
-                self._current["parameter_sizes"].append(text.lower())
-            self._capture = ""
+        if not self._current:
+            return
 
-        # End of card: when we leave the link
-        if tag == "a" and self._in_link and self._current:
-            self._in_link = False
+        if self._in_desc and tag == "p":
+            self._current["description"] = self._capture.strip()
+            self._in_desc = False
+
+        if self._in_size and tag == "span":
+            val = self._capture.strip().lower()
+            if val and val not in self._current["parameter_sizes"]:
+                self._current["parameter_sizes"].append(val)
+            self._in_size = False
+
+        if self._in_capability and tag == "span":
+            val = self._capture.strip().lower()
+            if val and val not in self._current["categories"]:
+                self._current["categories"].append(val)
+            self._in_capability = False
+
+        if self._in_pulls and tag == "span":
+            self._current["pulls"] = self._capture.strip()
+            self._in_pulls = False
+
+        # End of card
+        if tag == "a" and self._in_card and self._current:
+            self._in_card = False
             if self._current["name"]:
                 self.models.append(self._current)
             self._current = None
