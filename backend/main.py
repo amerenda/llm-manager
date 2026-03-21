@@ -580,6 +580,25 @@ async def mark_claimed(slot: int):
     return {"ok": True}
 
 
+class SetupEmailRequest(BaseModel):
+    email: str
+
+
+@app.post("/api/agents/{slot}/setup-owner-email")
+async def setup_owner_email(slot: int, req: SetupEmailRequest):
+    pool = app.state.db
+    row = await db.get_moltbook_config(pool, slot)
+    if not row["registered"] or not row["api_key"]:
+        raise HTTPException(400, "Agent not registered")
+    from moltbook_client import MoltbookClient
+    client = MoltbookClient(row["api_key"])
+    try:
+        result = await client.setup_owner_email(req.email)
+        return {"ok": True, "message": "Verification email sent. Check your inbox."}
+    except httpx.HTTPStatusError as e:
+        raise HTTPException(e.response.status_code, e.response.text)
+
+
 @app.post("/api/agents/{slot}/dm/approve/{conv_id}")
 async def approve_dm(slot: int, conv_id: str):
     pool = app.state.db
