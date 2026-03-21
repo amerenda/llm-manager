@@ -3,38 +3,58 @@ name: Build and Push
 on:
   push:
     branches: [main]
+    tags: ['release/v*']
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 env:
-  BACKEND_IMAGE: amerenda/llm-manager
-  UI_IMAGE: amerenda/llm-manager
-  PIPER_IMAGE: amerenda/llm-manager
+  IMAGE: amerenda/llm-manager
+  GITOPS_REPO: amerenda/k3s-dean-gitops
 
 jobs:
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: |
+          cd backend
+          pip install -r requirements.txt
+          pip install -r requirements-test.txt
+      - name: Run tests
+        run: |
+          cd backend
+          python -m pytest test_backend.py test_queue.py -v
+
   build:
     name: Build and Push
+    needs: test
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/checkout@v4
 
-      - name: Set SHA
-        id: sha
-        run: echo "SHA=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
+      - name: Set image tag
+        id: tag
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/release/* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/release/}"
+            echo "tag=${VERSION}" >> "$GITHUB_OUTPUT"
+            echo "pr_prefix=release" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+            echo "pr_prefix=deploy" >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Log in to Docker Hub
-        uses: docker/login-action@v3
+      - uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -47,10 +67,10 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            ${{ env.BACKEND_IMAGE }}:backend-${{ steps.sha.outputs.SHA }}
-            ${{ env.BACKEND_IMAGE }}:backend-latest
-          cache-from: type=gha,scope=llm-backend
-          cache-to: type=gha,mode=max,scope=llm-backend
+            ${{ env.IMAGE }}:backend-${{ steps.tag.outputs.tag }}
+            ${{ env.IMAGE }}:backend-latest
+          cache-from: type=gha,scope=backend
+          cache-to: type=gha,mode=max,scope=backend
 
       - name: Build and push UI
         uses: docker/build-push-action@v6
@@ -60,38 +80,42 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           tags: |
-            ${{ env.UI_IMAGE }}:ui-${{ steps.sha.outputs.SHA }}
-            ${{ env.UI_IMAGE }}:ui-latest
-          cache-from: type=gha,scope=llm-ui
-          cache-to: type=gha,mode=max,scope=llm-ui
+            ${{ env.IMAGE }}:ui-${{ steps.tag.outputs.tag }}
+            ${{ env.IMAGE }}:ui-latest
+          cache-from: type=gha,scope=ui
+          cache-to: type=gha,mode=max,scope=ui
 
-      - name: Build and push piper-agent
-        uses: docker/build-push-action@v6
-        with:
-          context: piper-agent
-          file: piper-agent/Dockerfile
-          platforms: linux/arm64
-          push: true
-          tags: |
-            ${{ env.PIPER_IMAGE }}:piper-${{ steps.sha.outputs.SHA }}
-            ${{ env.PIPER_IMAGE }}:piper-latest
-          cache-from: type=gha,scope=llm-piper
-          cache-to: type=gha,mode=max,scope=llm-piper
-
-      - name: Update image tags in gitops manifests
+      - name: Raise PR to gitops
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          PREFIX: ${{ steps.tag.outputs.pr_prefix }}
+          GITOPS_PAT: ${{ secrets.GITOPS_PAT }}
         run: |
-          SHA="${{ steps.sha.outputs.SHA }}"
-          sed -i "s|${{ env.BACKEND_IMAGE }}:backend-[^[:space:]]*|${{ env.BACKEND_IMAGE }}:backend-${SHA}|g" \
-            gitops/backend/deployment.yaml
-          sed -i "s|${{ env.UI_IMAGE }}:ui-[^[:space:]]*|${{ env.UI_IMAGE }}:ui-${SHA}|g" \
-            gitops/ui/deployment.yaml
-          sed -i "s|${{ env.PIPER_IMAGE }}:piper-[^[:space:]]*|${{ env.PIPER_IMAGE }}:piper-${SHA}|g" \
-            gitops/piper/deployment.yaml
+          git clone https://x-access-token:${GITOPS_PAT}@github.com/${GITOPS_REPO}.git /tmp/gitops
+          cd /tmp/gitops
 
-      - name: Commit updated image tags
-        run: |
+          BRANCH="${PREFIX}/llm-manager-${TAG}"
+          git checkout -b "${BRANCH}"
+
+          sed -i "s|amerenda/llm-manager:backend-[^ ]*|amerenda/llm-manager:backend-${TAG}|g" \
+            apps/llm-manager/backend/deployment.yaml
+          sed -i "s|amerenda/llm-manager:ui-[^ ]*|amerenda/llm-manager:ui-${TAG}|g" \
+            apps/llm-manager/ui/deployment.yaml
+
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add gitops/backend/deployment.yaml gitops/ui/deployment.yaml gitops/piper/deployment.yaml
-          git diff --cached --quiet || git commit -m "ci: update llm-manager to ${{ steps.sha.outputs.SHA }}"
-          git pull --rebase && git push
+          git add -A
+          git diff --cached --quiet && exit 0
+          git commit -m "${PREFIX}: llm-manager ${TAG}"
+          git push origin "${BRANCH}"
+
+          curl -s -X POST \
+            -H "Authorization: token ${GITOPS_PAT}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            "https://api.github.com/repos/${GITOPS_REPO}/pulls" \
+            -d "{
+              \"title\": \"${PREFIX}: llm-manager ${TAG}\",
+              \"body\": \"Auto-generated by llm-manager CI.\\n\\nImages:\\n- \`amerenda/llm-manager:backend-${TAG}\`\\n- \`amerenda/llm-manager:ui-${TAG}\`\\n\\nSource: https://github.com/amerenda/llm-manager/commit/${GITHUB_SHA}\",
+              \"head\": \"${BRANCH}\",
+              \"base\": \"main\"
+            }"
