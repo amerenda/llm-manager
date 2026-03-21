@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { AppWindow, Plus, Loader2, CheckCircle2, AlertCircle, Copy, Check, Shield, RefreshCw, Cpu, X } from 'lucide-react'
-import { useApps, useRegisterApp, useApproveApp, useUpdateAppPermissions, useUpdateAppAllowedModels, useLlmStatus } from '../hooks/useBackend'
+import { useApps, useRegisterApp, useApproveApp, useUpdateAppPermissions, useUpdateAppAllowedModels, useLlmModels } from '../hooks/useBackend'
 import { StatusDot } from '../components/StatusDot'
 import type { RegisteredApp } from '../types'
 
@@ -46,10 +46,10 @@ function ModelRestrictionEditor({ appId, currentModels }: { appId: number; curre
   const [open, setOpen] = useState(false)
   const [selected, setSelected] = useState<string[]>(currentModels)
   const updateModels = useUpdateAppAllowedModels()
-  const llmStatus = useLlmStatus()
+  const llmModels = useLlmModels()
 
-  const availableModels = llmStatus.data?.loaded_ollama_models?.map((m: { name: string; size_gb: number }) => m.name) ?? []
-  // Also show models that are in the allowed list but not currently loaded
+  const availableModels = llmModels.data?.map((m: { id: string }) => m.id) ?? []
+  // Also show models that are in the allowed list but not currently downloaded
   const allModels = [...new Set([...availableModels, ...selected])]
 
   function toggle(model: string) {
@@ -108,7 +108,7 @@ function ModelRestrictionEditor({ appId, currentModels }: { appId: number; curre
 
         <div className="flex-1 overflow-y-auto space-y-1.5 mb-4">
           {allModels.length === 0 ? (
-            <p className="text-xs text-gray-600 py-4 text-center">No models available on runner</p>
+            <p className="text-xs text-gray-600 py-4 text-center">No models downloaded on any runner</p>
           ) : (
             allModels.sort().map(model => (
               <label key={model} className="flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-gray-800 cursor-pointer">
