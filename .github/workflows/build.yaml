@@ -15,12 +15,11 @@ env:
 jobs:
   test:
     name: Run Tests
-    runs-on: ubuntu-latest
+    runs-on: arc-runner-set
+    container:
+      image: python:3.12-slim
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
       - name: Install dependencies
         run: |
           cd backend
@@ -35,7 +34,7 @@ jobs:
     name: Build and Push
     needs: test
     if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
+    runs-on: arc-runner-set
     steps:
       - uses: actions/checkout@v4
 
@@ -69,8 +68,6 @@ jobs:
           tags: |
             ${{ env.IMAGE }}:backend-${{ steps.tag.outputs.tag }}
             ${{ env.IMAGE }}:backend-latest
-          cache-from: type=gha,scope=backend
-          cache-to: type=gha,mode=max,scope=backend
 
       - name: Build and push UI
         uses: docker/build-push-action@v6
@@ -82,8 +79,6 @@ jobs:
           tags: |
             ${{ env.IMAGE }}:ui-${{ steps.tag.outputs.tag }}
             ${{ env.IMAGE }}:ui-latest
-          cache-from: type=gha,scope=ui
-          cache-to: type=gha,mode=max,scope=ui
 
       - name: Raise PR to gitops
         env:
