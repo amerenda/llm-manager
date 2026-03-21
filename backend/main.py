@@ -218,26 +218,50 @@ async def gpu_info():
 
 @app.get("/api/models")
 async def models_for_agents():
-    """Ollama model list with VRAM estimates, for moltbook-manager consumption."""
+    """Ollama model list with VRAM estimates and fit info per runner."""
     try:
-        client = await _get_runner_client(app.state.db)
-        # Query Ollama /api/tags via the runner's Ollama port
-        ollama_base = await _get_runner_ollama_base(app.state.db)
+        pool = app.state.db
+        runners_list = await db.get_active_runners(pool)
+        if not runners_list:
+            return []
+
+        # Get GPU info per runner
+        runner_vram = {}
+        for r in runners_list:
+            caps = r.get("capabilities", {})
+            if isinstance(caps, dict):
+                total = caps.get("gpu_vram_total_bytes", 0) / (1024**3)
+                runner_vram[r["hostname"]] = round(total, 1)
+
+        # Get models from the first runner's Ollama
+        ollama_base = await _get_runner_ollama_base(pool)
         async with httpx.AsyncClient(timeout=10) as c:
             r = await c.get(f"{ollama_base}/api/tags")
             r.raise_for_status()
             data = r.json()
+
         models = []
         for m in data.get("models", []):
             name = m.get("name", "")
             size_gb = round(m.get("size", 0) / 1e9, 2)
+            vram_est = round(vram_for_model(name), 2)
+            fits_on = [
+                {"runner": hostname, "vram_total_gb": vram}
+                for hostname, vram in runner_vram.items()
+                if vram >= vram_est
+            ]
             models.append({
                 "name": name,
                 "size_gb": size_gb,
-                "vram_estimate_gb": round(vram_for_model(name), 2),
+                "vram_estimate_gb": vram_est,
+                "fits": len(fits_on) > 0,
+                "fits_on": fits_on,
             })
+        # Sort: models that fit first, then by VRAM estimate
+        models.sort(key=lambda m: (not m["fits"], m["vram_estimate_gb"]))
         return models
-    except Exception:
+    except Exception as e:
+        logger.exception("Error fetching models")
         return []
 
 
