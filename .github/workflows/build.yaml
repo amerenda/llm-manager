@@ -112,6 +112,7 @@ jobs:
               \"base\": \"main\"
             }"
 
+
   notify-failure:
     if: failure()
     needs: [test, build]
@@ -122,13 +123,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh issue create \
-            --repo ${{ github.repository }} \
-            --title "Build failed: ${{ github.event.head_commit.message }}" \
-            --body "**Workflow:** ${{ github.workflow }}
-          **Run:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          **Commit:** ${{ github.sha }}
-          **Author:** ${{ github.actor }}
-          **Branch:** ${{ github.ref_name }}
-
-          Check the [workflow run](${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}) for details." \
-            --label "ci-failure"
+            --repo "${{ github.repository }}" \
+            --title "CI failed: ${{ github.workflow }}" \
+            --body "Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}" \
+            --label "ci-failure" || echo "Could not create issue"
