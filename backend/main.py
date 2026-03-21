@@ -59,6 +59,9 @@ API_BASE = "https://www.moltbook.com/api/v1"
 # Global agent runners (slot 1-6)
 runners: dict[int, AgentRunner] = {}
 
+# Background operations tracker (pull, load, unload)
+_ops: dict[str, dict] = {}
+
 # ── Prometheus metrics ────────────────────────────────────────────────────────
 
 api_requests_total = Counter(
@@ -716,37 +719,64 @@ class LLMPullRequest(BaseModel):
 
 @app.post("/api/llm/models/pull")
 async def llm_pull_model(req: LLMPullRequest, runner_id: Optional[int] = None):
+    """Pull a model. Runs in background — returns immediately with operation ID."""
     _inc_request("/api/llm/models/pull", "POST", 200)
-    try:
-        client = await _get_runner_client(app.state.db, runner_id)
+    op_id = f"pull-{req.model}-{id(req)}"
+    _ops[op_id] = {"status": "running", "model": req.model, "type": "pull", "progress": ""}
 
-        async def _stream():
+    async def _do_pull():
+        try:
+            client = await _get_runner_client(app.state.db, runner_id)
+            last_status = ""
             async for chunk in client.pull_model(req.model):
-                yield chunk
+                last_status = chunk.decode().strip()
+                _ops[op_id]["progress"] = last_status
+            _ops[op_id]["status"] = "completed"
+        except Exception as e:
+            _ops[op_id]["status"] = "failed"
+            _ops[op_id]["error"] = str(e)
 
-        return StreamingResponse(_stream(), media_type="application/x-ndjson")
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise _agent_unavailable(f"Runner error: {e}")
+    asyncio.create_task(_do_pull())
+    return {"ok": True, "op_id": op_id, "message": f"Pulling {req.model} in background"}
 
 
 @app.post("/api/models/{model:path}/update")
 async def update_model(model: str, runner_id: Optional[int] = None):
-    """Pull the latest version of an already-downloaded model."""
+    """Pull the latest version of an already-downloaded model. Runs in background."""
     _inc_request("/api/models/update", "POST", 200)
-    try:
-        client = await _get_runner_client(app.state.db, runner_id)
+    op_id = f"update-{model}-{id(model)}"
+    _ops[op_id] = {"status": "running", "model": model, "type": "update", "progress": ""}
 
-        async def _stream():
+    async def _do_update():
+        try:
+            client = await _get_runner_client(app.state.db, runner_id)
             async for chunk in client.pull_model(model):
-                yield chunk
+                _ops[op_id]["progress"] = chunk.decode().strip()
+            _ops[op_id]["status"] = "completed"
+        except Exception as e:
+            _ops[op_id]["status"] = "failed"
+            _ops[op_id]["error"] = str(e)
 
-        return StreamingResponse(_stream(), media_type="application/x-ndjson")
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise _agent_unavailable(f"Runner error: {e}")
+    asyncio.create_task(_do_update())
+    return {"ok": True, "op_id": op_id, "message": f"Updating {model} in background"}
+
+
+@app.get("/api/ops")
+async def list_operations():
+    """List all background operations and their status."""
+    # Clean up old completed ops (keep last 20)
+    completed = [k for k, v in _ops.items() if v["status"] in ("completed", "failed")]
+    for k in completed[:-20]:
+        del _ops[k]
+    return list(_ops.values())
+
+
+@app.get("/api/ops/{op_id}")
+async def get_operation(op_id: str):
+    """Get status of a background operation."""
+    if op_id not in _ops:
+        raise HTTPException(404, "Operation not found")
+    return _ops[op_id]
 
 
 @app.delete("/api/llm/models/{model:path}")
@@ -1051,15 +1081,22 @@ class ModelLoadRequest(BaseModel):
 
 @app.post("/api/llm/models/load")
 async def llm_load_model(req: ModelLoadRequest, runner_id: Optional[int] = None):
-    """Load a model into VRAM on a runner."""
+    """Load a model into VRAM. Runs in background."""
     _inc_request("/api/llm/models/load", "POST", 200)
-    try:
-        client = await _get_runner_client(app.state.db, runner_id)
-        return await client.load_model(req.model, req.keep_alive)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise _agent_unavailable(f"Runner error: {e}")
+    op_id = f"load-{req.model}-{id(req)}"
+    _ops[op_id] = {"status": "running", "model": req.model, "type": "load"}
+
+    async def _do_load():
+        try:
+            client = await _get_runner_client(app.state.db, runner_id)
+            await client.load_model(req.model, req.keep_alive)
+            _ops[op_id]["status"] = "completed"
+        except Exception as e:
+            _ops[op_id]["status"] = "failed"
+            _ops[op_id]["error"] = str(e)
+
+    asyncio.create_task(_do_load())
+    return {"ok": True, "op_id": op_id, "message": f"Loading {req.model} in background"}
 
 
 class ModelUnloadRequest(BaseModel):
@@ -1068,15 +1105,22 @@ class ModelUnloadRequest(BaseModel):
 
 @app.post("/api/llm/models/unload")
 async def llm_unload_model(req: ModelUnloadRequest, runner_id: Optional[int] = None):
-    """Unload a model from VRAM on a runner."""
+    """Unload a model from VRAM. Runs in background."""
     _inc_request("/api/llm/models/unload", "POST", 200)
-    try:
-        client = await _get_runner_client(app.state.db, runner_id)
-        return await client.unload_model(req.model)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise _agent_unavailable(f"Runner error: {e}")
+    op_id = f"unload-{req.model}-{id(req)}"
+    _ops[op_id] = {"status": "running", "model": req.model, "type": "unload"}
+
+    async def _do_unload():
+        try:
+            client = await _get_runner_client(app.state.db, runner_id)
+            await client.unload_model(req.model)
+            _ops[op_id]["status"] = "completed"
+        except Exception as e:
+            _ops[op_id]["status"] = "failed"
+            _ops[op_id]["error"] = str(e)
+
+    asyncio.create_task(_do_unload())
+    return {"ok": True, "op_id": op_id, "message": f"Unloading {req.model} in background"}
 
 
 # ── Profiles ──────────────────────────────────────────────────────────────────

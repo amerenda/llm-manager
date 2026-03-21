@@ -58,32 +58,14 @@ export function useLlmModels() {
 export function usePullModel() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: async (model: string) => {
-      // Pull is a streaming NDJSON response — read line by line
-      const r = await fetch('/api/llm/models/pull', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ model }),
-      })
-      if (!r.ok) throw new Error(`${r.status} ${await r.text()}`)
-      // Read the stream to completion (progress lines)
-      const reader = r.body?.getReader()
-      if (reader) {
-        const decoder = new TextDecoder()
-        while (true) {
-          const { done, value } = await reader.read()
-          if (done) break
-          // Each line is JSON with status/progress
-          const text = decoder.decode(value, { stream: true })
-          // Could emit progress events here in the future
-          void text
-        }
-      }
-      return { ok: true }
-    },
+    mutationFn: (model: string) =>
+      post<{ ok: boolean; op_id: string; message: string }>('/api/llm/models/pull', { model }),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['llm-models'] })
-      qc.invalidateQueries({ queryKey: ['llm-status'] })
+      // Poll for model list updates after a delay
+      setTimeout(() => {
+        qc.invalidateQueries({ queryKey: ['llm-models'] })
+        qc.invalidateQueries({ queryKey: ['llm-status'] })
+      }, 5000)
     },
   })
 }
@@ -209,10 +191,12 @@ export function useLoadModel() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: ({ model, runner_id }: { model: string; runner_id?: number }) =>
-      post<{ ok: boolean }>(`/api/llm/models/load${runner_id ? `?runner_id=${runner_id}` : ''}`, { model }),
+      post<{ ok: boolean; op_id: string }>(`/api/llm/models/load${runner_id ? `?runner_id=${runner_id}` : ''}`, { model }),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['llm-status'] })
-      qc.invalidateQueries({ queryKey: ['llm-models'] })
+      setTimeout(() => {
+        qc.invalidateQueries({ queryKey: ['llm-status'] })
+        qc.invalidateQueries({ queryKey: ['llm-models'] })
+      }, 3000)
     },
   })
 }
@@ -221,10 +205,12 @@ export function useUnloadModel() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: ({ model, runner_id }: { model: string; runner_id?: number }) =>
-      post<{ ok: boolean }>(`/api/llm/models/unload${runner_id ? `?runner_id=${runner_id}` : ''}`, { model }),
+      post<{ ok: boolean; op_id: string }>(`/api/llm/models/unload${runner_id ? `?runner_id=${runner_id}` : ''}`, { model }),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: ['llm-status'] })
-      qc.invalidateQueries({ queryKey: ['llm-models'] })
+      setTimeout(() => {
+        qc.invalidateQueries({ queryKey: ['llm-status'] })
+        qc.invalidateQueries({ queryKey: ['llm-models'] })
+      }, 2000)
     },
   })
 }
