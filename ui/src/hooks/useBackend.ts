@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import type { LlmStatus, LlmModel, RegisteredApp, Agent, Runner, Profile, ProfileActivation } from '../types'
+import type { LlmStatus, LlmModel, RegisteredApp, Agent, Runner, Profile, ProfileActivation, LibraryModel, SafetyTag } from '../types'
 
 // nginx proxies /api to the backend service
 async function get<T>(path: string): Promise<T> {
