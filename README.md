@@ -367,6 +367,152 @@ to `main`, then updates the image tags in `gitops/backend/deployment.yaml` and
 
 ---
 
+## Queue System
+
+The queue system provides async job submission with VRAM-aware scheduling. Instead
+of sending inference requests directly through `/v1/chat/completions`, apps can
+submit jobs to a queue. The scheduler batches jobs by model to minimize model
+swaps, automatically loads/unloads models, and manages VRAM eviction.
+
+### Queue API
+
+All queue endpoints are under `/api/queue`. Authenticate with `Authorization: Bearer <api_key>`.
+
+#### Job Submission
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/api/queue/submit` | Submit a single inference job |
+| POST | `/api/queue/submit-batch` | Submit multiple jobs as a batch |
+
+**Single job request:**
+
+```json
+{
+  "model": "llama3.2:latest",
+  "messages": [{"role": "user", "content": "Hello"}],
+  "temperature": 0.7,
+  "max_tokens": 512,
+  "metadata": {"app_context": "any passthrough data"}
+}
+```
+
+**Response:**
+
+```json
+{
+  "job_id": "abc123def456",
+  "status": "queued",
+  "model": "llama3.2:latest",
+  "position": 3,
+  "warning": "Will evict qwen2:7b to free VRAM for llama3.2:latest",
+  "evicting": ["qwen2:7b"]
+}
+```
+
+If the model is too large for the GPU or cannot fit even after eviction, the
+submission is rejected with HTTP 422.
+
+#### Job Status & Results
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/queue/jobs/{job_id}` | Get job status and result |
+| GET | `/api/queue/jobs/{job_id}/wait` | SSE stream -- blocks until job completes |
+| GET | `/api/queue/batches/{batch_id}` | Get batch status with all job results |
+| GET | `/api/queue/batches/{batch_id}/wait` | SSE stream -- blocks until all batch jobs complete |
+| DELETE | `/api/queue/jobs/{job_id}` | Cancel a queued or running job |
+| GET | `/api/queue/status` | Queue overview (depth, loaded models, VRAM) |
+
+**Job statuses:** `queued` -> `waiting_for_eviction` -> `running` -> `completed` | `failed` | `cancelled`
+
+#### Queue Overview
+
+`GET /api/queue/status` returns:
+
+```json
+{
+  "queue_depth": 5,
+  "models_queued": ["llama3.2:latest", "qwen2:7b"],
+  "models_loaded": ["llama3.2:latest"],
+  "current_job": "abc123def456",
+  "gpu_vram_total_gb": 24.0,
+  "gpu_vram_used_gb": 14.2,
+  "gpu_vram_free_gb": 9.8
+}
+```
+
+### VRAM Management
+
+The scheduler handles model loading and VRAM automatically:
+
+1. **Batching** -- Jobs are grouped by model. All jobs for an already-loaded model
+   run first, avoiding unnecessary swaps.
+2. **Auto-loading** -- If a job's model is not loaded, the scheduler loads it via Ollama.
+3. **Eviction** -- When VRAM is insufficient, the scheduler evicts models using these rules:
+   - Models marked `do_not_evict` or `evictable: false` are never evicted
+   - Idle models (no active jobs) are evicted before busy ones
+   - Among idle models, the oldest-loaded is evicted first
+   - If `wait_for_completion` is set (default), the scheduler waits up to 5 minutes
+     for active jobs to finish before evicting
+4. **Pre-check** -- On submission, the scheduler validates that the model can fit
+   (either immediately or after eviction) and returns a warning if eviction is needed.
+
+### Model Settings
+
+Per-model eviction and scheduling behavior is configurable via the model settings API.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/models/settings` | List all model settings |
+| GET | `/api/models/{model_name}/settings` | Get settings for a model |
+| PATCH | `/api/models/{model_name}/settings` | Update model settings |
+
+**Settings fields:**
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `do_not_evict` | `false` | Prevent this model from ever being evicted |
+| `evictable` | `true` | Whether the scheduler can evict this model |
+| `wait_for_completion` | `true` | Wait for active jobs to finish before evicting |
+| `vram_estimate_gb` | *(auto)* | Manual VRAM override for scheduling |
+
+**Example -- pin a model in VRAM:**
+
+```bash
+curl -X PATCH https://llm-manager-backend.amer.dev/api/models/llama3.2:latest/settings \
+  -H "Content-Type: application/json" \
+  -d '{"do_not_evict": true}'
+```
+
+### App Integration
+
+Apps integrate with the queue using their existing Bearer token from app registration:
+
+```python
+import httpx
+
+API = "https://llm-manager-backend.amer.dev"
+KEY = "your-api-key"
+headers = {"Authorization": f"Bearer {KEY}"}
+
+# Submit a job
+resp = httpx.post(f"{API}/api/queue/submit", json={
+    "model": "llama3.2:latest",
+    "messages": [{"role": "user", "content": "Summarize this text..."}],
+}, headers=headers)
+job_id = resp.json()["job_id"]
+
+# Poll for result
+result = httpx.get(f"{API}/api/queue/jobs/{job_id}", headers=headers)
+# Or use SSE to wait: GET /api/queue/jobs/{job_id}/wait
+```
+
+Rate limits are enforced per-app: max queue depth and max jobs per minute. Exceeding
+limits returns HTTP 429.
+
+---
+
 ## Future: LLMRouter Integration
 
 [LLMRouter](https://github.com/ulab-uiuc/LLMRouter) (UIUC) and
