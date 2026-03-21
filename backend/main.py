@@ -153,8 +153,7 @@ async def lifespan(app: FastAPI):
     scheduler.start()
     logger.info("Queue scheduler started")
 
-    # Warm library cache in background
-    asyncio.create_task(refresh_library_cache(pool))
+    # Library cache is refreshed by a k8s CronJob, not at startup
 
     # Auto-start enabled moltbook agents from DB
     for row in await db.get_all_moltbook_configs(pool):

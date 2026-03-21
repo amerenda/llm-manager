@@ -154,3 +154,24 @@ export interface Agent {
   behavior: AgentBehavior
   state: AgentState
 }
+
+export interface LibraryModel {
+  name: string
+  description: string
+  pulls: string
+  parameter_sizes: string[]
+  categories: string[]
+  safety: string
+  downloaded: boolean
+  loaded: boolean
+  fits: boolean
+  fits_on: { runner: string; vram_total_gb: number }[]
+  vram_estimate_gb: number
+}
+
+export interface SafetyTag {
+  id: number
+  pattern: string
+  classification: string
+  reason: string
+}

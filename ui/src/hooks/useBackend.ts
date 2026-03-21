@@ -335,6 +335,36 @@ export function useProfileActivations() {
   })
 }
 
+// ── Library ──────────────────────────────────────────────────────────────────
+
+export function useLibrary(params: { search?: string; safety?: string; fits?: boolean; downloaded?: boolean } = {}) {
+  const qs = new URLSearchParams()
+  if (params.search) qs.set('search', params.search)
+  if (params.safety) qs.set('safety', params.safety)
+  if (params.fits !== undefined) qs.set('fits', String(params.fits))
+  if (params.downloaded !== undefined) qs.set('downloaded', String(params.downloaded))
+  const query = qs.toString()
+  return useQuery<{ models: LibraryModel[]; total: number; cache_age_hours: number; runners: string[] }>({
+    queryKey: ['library', query],
+    queryFn: () => get(`/api/library${query ? `?${query}` : ''}`),
+  })
+}
+
+export function useRefreshLibrary() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () => post<{ status: string; model_count?: number }>('/api/library/refresh'),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['library'] }),
+  })
+}
+
+export function useSafetyTags() {
+  return useQuery<SafetyTag[]>({
+    queryKey: ['safety-tags'],
+    queryFn: () => get('/api/safety-tags'),
+  })
+}
+
 // ── Agents (moltbook) ─────────────────────────────────────────────────────────
 
 export function useAgents() {
