@@ -58,7 +58,29 @@ export function useLlmModels() {
 export function usePullModel() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (model: string) => post<{ ok: boolean }>('/api/llm/models/pull', { model }),
+    mutationFn: async (model: string) => {
+      // Pull is a streaming NDJSON response — read line by line
+      const r = await fetch('/api/llm/models/pull', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model }),
+      })
+      if (!r.ok) throw new Error(`${r.status} ${await r.text()}`)
+      // Read the stream to completion (progress lines)
+      const reader = r.body?.getReader()
+      if (reader) {
+        const decoder = new TextDecoder()
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          // Each line is JSON with status/progress
+          const text = decoder.decode(value, { stream: true })
+          // Could emit progress events here in the future
+          void text
+        }
+      }
+      return { ok: true }
+    },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['llm-models'] })
       qc.invalidateQueries({ queryKey: ['llm-status'] })
