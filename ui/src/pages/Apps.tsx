@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { AppWindow, Plus, Loader2, CheckCircle2, AlertCircle, Copy, Check, Shield, RefreshCw, Cpu, X } from 'lucide-react'
 import { useApps, useRegisterApp, useApproveApp, useUpdateAppPermissions, useUpdateAppAllowedModels, useLlmStatus } from '../hooks/useBackend'
 import { StatusDot } from '../components/StatusDot'
+import type { RegisteredApp } from '../types'
 
 function relativeTime(iso: string | null): string {
   if (!iso) return 'Never'
@@ -47,7 +48,7 @@ function ModelRestrictionEditor({ appId, currentModels }: { appId: number; curre
   const updateModels = useUpdateAppAllowedModels()
   const llmStatus = useLlmStatus()
 
-  const availableModels = llmStatus.data?.loaded_ollama_models?.map(m => m.name) ?? []
+  const availableModels = llmStatus.data?.loaded_ollama_models?.map((m: { name: string; size_gb: number }) => m.name) ?? []
   // Also show models that are in the allowed list but not currently loaded
   const allModels = [...new Set([...availableModels, ...selected])]
 
@@ -154,8 +155,8 @@ export function Apps() {
   const [regMsg, setRegMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
 
   const appList = apps.data ?? []
-  const pendingApps = appList.filter(a => a.status === 'pending')
-  const activeApps = appList.filter(a => a.status !== 'pending')
+  const pendingApps = appList.filter((a: RegisteredApp) => a.status === 'pending')
+  const activeApps = appList.filter((a: RegisteredApp) => a.status !== 'pending')
 
   async function handleRegister() {
     const trimName = name.trim()
@@ -192,7 +193,7 @@ export function Apps() {
             <RefreshCw className="w-4 h-4 text-yellow-400" />
             <h2 className="text-sm font-semibold text-yellow-300">Pending Approval</h2>
           </div>
-          {pendingApps.map(a => (
+          {pendingApps.map((a: RegisteredApp) => (
             <div key={a.id} className="flex items-center justify-between bg-gray-900/60 rounded-lg px-4 py-3">
               <div>
                 <p className="text-sm text-gray-200 font-medium">{a.name}</p>
@@ -231,7 +232,7 @@ export function Apps() {
               </tr>
             </thead>
             <tbody>
-              {activeApps.map(a => (
+              {activeApps.map((a: RegisteredApp) => (
                 <tr key={a.id} className="border-b border-gray-800 last:border-0 hover:bg-gray-800/40 transition-colors">
                   <td className="px-4 py-3">
                     <div className="flex items-center gap-2">

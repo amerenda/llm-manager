@@ -2,6 +2,7 @@ import { Cpu, MemoryStick, Layers, Image, AppWindow, Trash2, RefreshCw } from 'l
 import { useLlmStatus, useApps, useDeleteModel } from '../hooks/useBackend'
 import { StatCard } from '../components/StatCard'
 import { StatusDot } from '../components/StatusDot'
+import type { RegisteredApp } from '../types'
 
 function relativeTime(iso: string | null): string {
   if (!iso) return 'Never'
@@ -77,7 +78,7 @@ export function Dashboard() {
         <StatCard
           label="Connected Apps"
           value={appList.length.toString()}
-          sub={`${appList.filter(a => isOnline(a.last_seen)).length} online`}
+          sub={`${appList.filter((a: RegisteredApp) => isOnline(a.last_seen)).length} online`}
           icon={<AppWindow className="w-4 h-4" />}
         />
       </div>
@@ -101,7 +102,7 @@ export function Dashboard() {
             <p className="text-xs text-gray-600 py-4 text-center">No models loaded</p>
           ) : (
             <div className="space-y-2">
-              {loadedModels.map(m => (
+              {loadedModels.map((m: { name: string; size_gb: number }) => (
                 <div
                   key={m.name}
                   className="flex items-center justify-between bg-gray-950 rounded-lg px-3 py-2"
@@ -141,7 +142,7 @@ export function Dashboard() {
             <p className="text-xs text-gray-600 py-4 text-center">No apps registered</p>
           ) : (
             <div className="space-y-2">
-              {appList.map(app => (
+              {appList.map((app: RegisteredApp) => (
                 <div
                   key={app.id}
                   className="flex items-center gap-3 bg-gray-950 rounded-lg px-3 py-2"
