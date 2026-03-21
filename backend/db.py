@@ -311,6 +311,12 @@ async def discover_app(
                 json.dumps({"capabilities": capabilities}),
             )
         return {"status": "pending"}
+    # Always update base_url and capabilities on re-discovery
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE registered_apps SET base_url = $2, metadata = $3::jsonb WHERE name = $1",
+            name, base_url, json.dumps({"capabilities": capabilities}),
+        )
     if row["status"] == "pending":
         return {"status": "pending"}
     # Already approved/active — return the api_key
