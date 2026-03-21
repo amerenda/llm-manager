@@ -21,6 +21,17 @@ router = APIRouter(prefix="/api/library", tags=["library"])
 safety_router = APIRouter(prefix="/api/safety-tags", tags=["safety"])
 
 
+def _parse_jsonb(val):
+    """asyncpg may return JSONB as strings — parse them."""
+    if isinstance(val, str):
+        import json
+        try:
+            return json.loads(val)
+        except (json.JSONDecodeError, TypeError):
+            return []
+    return val if val is not None else []
+
+
 def _get_pool(request: Request):
     return request.app.state.db
 
@@ -84,7 +95,8 @@ async def browse_library(
     results = []
     for m in library_models:
         name = m["name"]
-        param_sizes = m.get("parameter_sizes", [])
+        param_sizes = _parse_jsonb(m.get("parameter_sizes", []))
+        categories = _parse_jsonb(m.get("categories", []))
         # Estimate VRAM for the default (smallest) variant
         default_params = param_sizes[0] if param_sizes else None
         vram_est = vram_for_model(f"{name}:{default_params}") if default_params else vram_for_model(name)
@@ -120,7 +132,7 @@ async def browse_library(
             "description": m.get("description", ""),
             "pulls": m.get("pulls", ""),
             "parameter_sizes": param_sizes,
-            "categories": m.get("categories", []),
+            "categories": categories,
             "safety": model_safety,
             "downloaded": is_downloaded,
             "loaded": any(l.startswith(name) for l in loaded_names),
@@ -161,10 +173,10 @@ async def library_model_detail(name: str, request: Request):
         "name": model["name"],
         "description": model.get("description", ""),
         "pulls": model.get("pulls", ""),
-        "parameter_sizes": model.get("parameter_sizes", []),
-        "categories": model.get("categories", []),
+        "parameter_sizes": _parse_jsonb(model.get("parameter_sizes", [])),
+        "categories": _parse_jsonb(model.get("categories", [])),
         "safety": safety,
-        "tags": tags,
+        "tags": _parse_jsonb(tags) if isinstance(tags, str) else (tags or []),
     }
 
 
