@@ -432,6 +432,7 @@ class AgentUpdateRequest(BaseModel):
     enabled: Optional[bool] = None
     model: Optional[str] = None
     llm_runner_id: Optional[int] = None
+    api_key: Optional[str] = None
     persona: Optional[dict] = None
     schedule: Optional[dict] = None
     behavior: Optional[dict] = None
@@ -454,6 +455,9 @@ async def update_moltbook_agent(slot: int, req: AgentUpdateRequest):
         updates["model"] = req.model
     if req.llm_runner_id is not None:
         updates["llm_runner_id"] = req.llm_runner_id
+    if req.api_key is not None:
+        updates["api_key"] = req.api_key
+        updates["registered"] = True
 
     if req.persona:
         if "name" in req.persona:
