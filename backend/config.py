@@ -1,5 +1,6 @@
 """Agent configuration models (Pydantic only — no file I/O)."""
-from typing import Optional
+from datetime import datetime
+from typing import Optional, Union
 from pydantic import BaseModel
 
 
@@ -48,7 +49,7 @@ class AgentConfig(BaseModel):
 class AgentState(BaseModel):
     slot: int
     karma: int = 0
-    last_heartbeat: Optional[str] = None
+    last_heartbeat: Optional[Union[datetime, str]] = None
     last_post_time: float = 0
     next_post_time: float = 0
     pending_dm_requests: list[str] = []

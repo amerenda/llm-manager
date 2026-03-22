@@ -117,11 +117,15 @@ class AgentRunner:
 
     async def _save_state(self) -> None:
         """Persist self.state to DB."""
+        # Ensure last_heartbeat is a datetime for asyncpg TIMESTAMPTZ column
+        hb = self.state.last_heartbeat
+        if isinstance(hb, str):
+            hb = datetime.fromisoformat(hb)
         await db.upsert_moltbook_state(
             self.pool,
             self.slot,
             karma=self.state.karma,
-            last_heartbeat=self.state.last_heartbeat,
+            last_heartbeat=hb,
             last_post_time=self.state.last_post_time,
             next_post_time=self.state.next_post_time,
             pending_dm_requests=self.state.pending_dm_requests,
@@ -181,7 +185,7 @@ class AgentRunner:
         try:
             home = await self.client.home()
             self.state.karma = home.get("your_account", {}).get("karma", self.state.karma)
-            self.state.last_heartbeat = datetime.now(timezone.utc).isoformat()
+            self.state.last_heartbeat = datetime.now(timezone.utc)
             await self._save_state()
 
             if self.config.behavior.auto_reply:
