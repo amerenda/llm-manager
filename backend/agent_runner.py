@@ -183,6 +183,17 @@ class AgentRunner:
         await self._load_state()
         await self.log("heartbeat", "Starting")
         try:
+            # Auto-detect claim status from Moltbook if not claimed locally
+            if not self.config.claimed:
+                try:
+                    status = await self.client.status()
+                    if status.get("status") == "claimed":
+                        await db.upsert_moltbook_config(self.pool, self.slot, claimed=True)
+                        self.config.claimed = True
+                        await self.log("heartbeat", "Agent claimed on Moltbook — updated local status")
+                except Exception:
+                    pass  # Non-critical, will retry next heartbeat
+
             home = await self.client.home()
             self.state.karma = home.get("your_account", {}).get("karma", self.state.karma)
             self.state.last_heartbeat = datetime.now(timezone.utc)

@@ -114,6 +114,10 @@ class MoltbookClient:
             data["to_owner"] = to_owner
         return await self._post("/agents/dm/request", data)
 
+    async def status(self) -> dict:
+        """GET /agents/status — check claim status."""
+        return await self._get("/agents/status")
+
     # ── Owner management ────────────────────────────────────────────────────
 
     async def setup_owner_email(self, email: str) -> dict:
