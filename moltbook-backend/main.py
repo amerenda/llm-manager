@@ -428,6 +428,35 @@ async def mark_claimed(slot: int):
     return {"ok": True}
 
 
+@app.get("/api/agents/{slot}/claim-status")
+async def get_claim_status(slot: int):
+    """Check claim status from Moltbook API. Returns claim_url and next steps."""
+    pool = app.state.db
+    row = await db.get_moltbook_config(pool, slot)
+    if not row["registered"] or not row["api_key"]:
+        return {"status": "not_registered", "message": "Agent not registered on Moltbook yet."}
+    from moltbook_client import MoltbookClient
+    client = MoltbookClient(row["api_key"])
+    try:
+        data = await client.status()
+        status = data.get("status", "unknown")
+        # Auto-update local DB if Moltbook says claimed
+        if status == "claimed" and not row["claimed"]:
+            await db.upsert_moltbook_config(pool, slot, claimed=True)
+        return {
+            "status": status,
+            "message": data.get("message", ""),
+            "claim_url": data.get("claim_url", ""),
+            "agent_name": data.get("agent", {}).get("name", row["name"]),
+            "next_step": data.get("next_step", ""),
+            "hint": data.get("hint", ""),
+        }
+    except httpx.HTTPStatusError as e:
+        return {"status": "error", "message": f"Moltbook API error: {e.response.status_code}"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
 class SetupEmailRequest(BaseModel):
     email: str
 
