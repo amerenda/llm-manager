@@ -75,6 +75,7 @@ CREATE TABLE IF NOT EXISTS moltbook_configs (
     receive_peer_comments BOOLEAN NOT NULL DEFAULT FALSE,
     send_peer_likes BOOLEAN NOT NULL DEFAULT TRUE,
     send_peer_comments BOOLEAN NOT NULL DEFAULT TRUE,
+    heartbeat_md TEXT NOT NULL DEFAULT '',
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -226,6 +227,15 @@ async def init_db(pool: asyncpg.Pool) -> None:
                 logger.info("Added column registered_apps.%s", col)
             except asyncpg.DuplicateColumnError:
                 pass
+
+        # Migration: add heartbeat_md to moltbook_configs
+        try:
+            await conn.execute(
+                "ALTER TABLE moltbook_configs ADD COLUMN heartbeat_md TEXT NOT NULL DEFAULT ''"
+            )
+            logger.info("Added column moltbook_configs.heartbeat_md")
+        except asyncpg.DuplicateColumnError:
+            pass
 
         # Ensure the Default profile always exists
         await conn.execute(
@@ -572,6 +582,7 @@ def _default_config_dict(slot: int) -> dict:
         "receive_peer_comments": False,
         "send_peer_likes": True,
         "send_peer_comments": True,
+        "heartbeat_md": "",
     }
 
 

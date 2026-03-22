@@ -393,6 +393,7 @@ async def get_moltbook_agents():
             "claimed": row["claimed"],
             "llm_runner_id": row.get("llm_runner_id"),
             "running": row["slot"] in runners and runners[row["slot"]].running,
+            "heartbeat_md": row.get("heartbeat_md", ""),
             "persona": {
                 "name": row["name"],
                 "description": row["description"],
@@ -433,6 +434,7 @@ class AgentUpdateRequest(BaseModel):
     model: Optional[str] = None
     llm_runner_id: Optional[int] = None
     api_key: Optional[str] = None
+    heartbeat_md: Optional[str] = None
     persona: Optional[dict] = None
     schedule: Optional[dict] = None
     behavior: Optional[dict] = None
@@ -458,6 +460,8 @@ async def update_moltbook_agent(slot: int, req: AgentUpdateRequest):
     if req.api_key is not None:
         updates["api_key"] = req.api_key
         updates["registered"] = True
+    if req.heartbeat_md is not None:
+        updates["heartbeat_md"] = req.heartbeat_md
 
     if req.persona:
         if "name" in req.persona:
