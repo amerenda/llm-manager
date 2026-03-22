@@ -15,7 +15,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY backend/requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy backend code (includes moltbook_client.py)
+# Copy backend code
 COPY backend/ .
 
 RUN mkdir -p /data/agents && chown -R llmmanager:llmmanager /data /app
