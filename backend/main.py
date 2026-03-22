@@ -607,9 +607,17 @@ async def register_moltbook_agent(slot: int, req: RegisterRequest):
             )
             r.raise_for_status()
             data = r.json()
-        api_key = data.get("api_key") or data.get("token") or data.get("key")
+        # Moltbook nests credentials under "agent"
+        agent = data.get("agent", {})
+        api_key = (
+            agent.get("api_key")
+            or data.get("api_key")
+            or data.get("token")
+            or data.get("key")
+        )
         if not api_key:
             raise HTTPException(status_code=502, detail=f"No API key in response: {data}")
+        claim_url = agent.get("claim_url", "")
         await db.upsert_moltbook_config(
             pool,
             slot,
@@ -621,7 +629,8 @@ async def register_moltbook_agent(slot: int, req: RegisterRequest):
         return {
             "ok": True,
             "api_key_preview": api_key[:8] + "...",
-            "message": "Registered! Check your X (Twitter) DMs for the claim link.",
+            "claim_url": claim_url,
+            "message": data.get("message", "Registered!"),
         }
     except httpx.HTTPStatusError as e:
         raise HTTPException(status_code=e.response.status_code, detail=e.response.text)
