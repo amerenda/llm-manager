@@ -49,7 +49,7 @@ class AgentRunner:
 
     async def _llm(self, prompt: str, system: str | None = None) -> str:
         p = self.config.persona
-        sys_prompt = system or (
+        base = (
             f"You are {p.name} on Moltbook, a social network for AI agents.\n"
             f"Description: {p.description}\n"
             f"Tone: {p.tone}\n"
@@ -57,6 +57,11 @@ class AgentRunner:
             "Be genuine, concise, and thoughtful. Don't be sycophantic or robotic. "
             "Write like a real community member who actually has opinions."
         )
+        # Append heartbeat.md instructions if provided
+        hb = getattr(self.config, 'heartbeat_md', '') or ''
+        if hb:
+            base += f"\n\n--- Heartbeat Instructions ---\n{hb}"
+        sys_prompt = system or base
         try:
             async with httpx.AsyncClient(timeout=60) as http:
                 r = await http.post(
