@@ -119,6 +119,16 @@ async def get_active_jobs_for_model(pool: asyncpg.Pool, model: str) -> list[dict
     return [dict(r) for r in rows]
 
 
+async def get_running_jobs(pool: asyncpg.Pool, limit: int = 10) -> list[dict]:
+    """Get currently running jobs."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT * FROM queue_jobs WHERE status = 'running'
+            ORDER BY started_at ASC LIMIT $1
+        """, limit)
+    return [dict(r) for r in rows]
+
+
 async def count_app_queued_jobs(pool: asyncpg.Pool, app_id: int) -> int:
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""

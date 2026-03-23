@@ -19,10 +19,15 @@ from gpu import vram_for_model
 logger = logging.getLogger(__name__)
 
 
+SCHEDULER_LOCK_ID = 900001  # Must match main.py
+
+
 class Scheduler:
-    def __init__(self, pool: asyncpg.Pool, get_ollama_base: callable):
+    def __init__(self, pool: asyncpg.Pool, get_ollama_base: callable,
+                 lock_conn=None):
         self.pool = pool
         self.get_ollama_base = get_ollama_base  # async callable returning ollama URL
+        self.lock_conn = lock_conn  # dedicated connection for advisory lock
         self._task: Optional[asyncio.Task] = None
         self._current_job_id: Optional[str] = None
         self._running = False
@@ -49,11 +54,31 @@ class Scheduler:
     def loaded_models(self) -> dict[str, dict]:
         return dict(self._loaded_models)
 
+    async def _verify_lock(self) -> bool:
+        """Verify we still hold the advisory lock. Returns False if lost."""
+        if not self.lock_conn:
+            return True  # No lock connection = single-replica mode
+        try:
+            held = await self.lock_conn.fetchval(
+                "SELECT pg_try_advisory_lock($1)", SCHEDULER_LOCK_ID
+            )
+            # pg_try_advisory_lock returns True if we acquired it (or already hold it)
+            return held
+        except Exception:
+            logger.warning("Failed to verify scheduler lock")
+            return False
+
     async def _loop(self):
         """Main scheduler loop. Processes jobs grouped by model."""
         cleanup_counter = 0
         while self._running:
             try:
+                # Verify we still hold the lock before processing
+                if not await self._verify_lock():
+                    logger.warning("Lost scheduler advisory lock — stopping scheduler")
+                    self._running = False
+                    break
+
                 jobs = await queue_db.get_pending_jobs(self.pool)
                 if not jobs:
                     await asyncio.sleep(1)

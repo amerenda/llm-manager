@@ -118,6 +118,8 @@ async def _get_runner_ollama_base(pool: asyncpg.Pool, runner_id: Optional[int] =
 
 # ── Lifespan ──────────────────────────────────────────────────────────────────
 
+SCHEDULER_LOCK_ID = 900001  # Postgres advisory lock ID for scheduler
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10)
@@ -126,19 +128,38 @@ async def lifespan(app: FastAPI):
     await queue_db.init_queue_tables(pool)
     logger.info("Database connected: %s", DATABASE_URL)
 
-    # Start the queue scheduler
+    # Acquire advisory lock for scheduler — only one pod runs it
+    lock_conn = await asyncpg.connect(DATABASE_URL)
+    got_lock = await lock_conn.fetchval(
+        "SELECT pg_try_advisory_lock($1)", SCHEDULER_LOCK_ID
+    )
+    app.state.lock_conn = lock_conn
+
     async def get_ollama():
         return await _get_runner_ollama_base(pool)
-    scheduler = Scheduler(pool, get_ollama)
+    scheduler = Scheduler(pool, get_ollama, lock_conn=lock_conn if got_lock else None)
     app.state.scheduler = scheduler
-    scheduler.start()
-    logger.info("Queue scheduler started")
 
-    # Library cache is refreshed by a k8s CronJob, not at startup
+    if got_lock:
+        scheduler.start()
+        logger.info("Queue scheduler started (advisory lock acquired)")
+    else:
+        logger.info("Scheduler skipped — another pod holds the lock")
 
     yield
 
     scheduler.stop()
+    if got_lock:
+        try:
+            await lock_conn.execute(
+                "SELECT pg_advisory_unlock($1)", SCHEDULER_LOCK_ID
+            )
+        except Exception:
+            pass
+    try:
+        await lock_conn.close()
+    except Exception:
+        pass
     await pool.close()
 
 

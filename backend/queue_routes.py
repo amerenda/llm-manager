@@ -8,6 +8,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Header, Request
 from fastapi.responses import StreamingResponse
 
+import httpx
 import queue_db
 from queue_models import (
     QueueJobRequest, QueueBatchRequest, QueueJobResponse,
@@ -274,16 +275,39 @@ async def queue_status(request: Request):
 
     pending = await queue_db.get_pending_jobs(pool)
     models_queued = list(set(j["model"] for j in pending))
-    gpu = await scheduler._get_gpu_info()
+
+    # Get loaded models from Ollama directly (works on any pod)
+    models_loaded = list(scheduler.loaded_models.keys())
+    if not models_loaded:
+        # Scheduler not running on this pod — query Ollama directly
+        try:
+            ollama_base = await scheduler.get_ollama_base()
+            async with httpx.AsyncClient(timeout=10) as client:
+                ps_resp = await client.get(f"{ollama_base}/api/ps")
+                if ps_resp.status_code == 200:
+                    for m in ps_resp.json().get("models", []):
+                        models_loaded.append(m.get("name", ""))
+        except Exception:
+            pass
+
+    # Get current running job from DB instead of scheduler state
+    current_job = scheduler.current_job_id
+    if not current_job:
+        running_jobs = await queue_db.get_running_jobs(pool, limit=1)
+        if running_jobs:
+            current_job = running_jobs[0]["id"]
+
+    # GPU info from scheduler if available, otherwise estimate from Ollama
+    gpu_info = await scheduler._get_gpu_info()
 
     return QueueOverview(
         queue_depth=len(pending),
         models_queued=models_queued,
-        models_loaded=list(scheduler.loaded_models.keys()),
-        current_job=scheduler.current_job_id,
-        gpu_vram_total_gb=gpu["total"],
-        gpu_vram_used_gb=gpu["used"],
-        gpu_vram_free_gb=gpu["free"],
+        models_loaded=models_loaded,
+        current_job=current_job,
+        gpu_vram_total_gb=gpu_info["total"],
+        gpu_vram_used_gb=gpu_info["used"],
+        gpu_vram_free_gb=gpu_info["free"],
     )
 
 
