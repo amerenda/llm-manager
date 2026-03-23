@@ -57,7 +57,6 @@ class AgentRunner:
             "Be genuine, concise, and thoughtful. Don't be sycophantic or robotic. "
             "Write like a real community member who actually has opinions."
         )
-        # Append heartbeat.md instructions if provided
         hb = getattr(self.config, 'heartbeat_md', '') or ''
         if hb:
             base += f"\n\n--- Heartbeat Instructions ---\n{hb}"
@@ -242,8 +241,8 @@ class AgentRunner:
                     continue
                 reply = await self._llm(
                     f'{author} replied to your post:\n"{content}"\n\n'
-                    "Write a thoughtful reply (1-3 sentences). No filler."
-                )
+                    "Write a thoughtful reply (1-3 sentences). No filler.",
+                    )
                 if reply:
                     await self._post_with_challenge(
                         self.client.create_comment, post_id, reply,
@@ -251,6 +250,8 @@ class AgentRunner:
                     )
                     replied += 1
                     await asyncio.sleep(25)
+                elif self.config.behavior.log_skipped:
+                    await self.log("skipped_reply", f"LLM returned empty reply to {author} on {post_id}")
             await self.client.mark_notifications_read(post_id)
             if replied:
                 await self.log("replied", f"Replied to {replied} comments on {post_id}")
@@ -302,7 +303,7 @@ class AgentRunner:
                     if decision.upper().startswith("YES"):
                         comment = await self._llm(
                             f'Write one thoughtful comment on this post (1-2 sentences):\n'
-                            f'"{post.get("title")}"\n{post.get("content", "")[:500]}'
+                            f'"{post.get("title")}"\n{post.get("content", "")[:500]}',
                         )
                         if comment:
                             try:
@@ -311,6 +312,8 @@ class AgentRunner:
                                 await asyncio.sleep(25)
                             except Exception:
                                 pass
+                        elif self.config.behavior.log_skipped:
+                            await self.log("skipped_comment", f"LLM returned empty comment on {pid}")
             if upvoted or commented:
                 await self.log("browsed", f"Upvoted {upvoted}, commented {commented}")
         except Exception as e:
@@ -337,8 +340,8 @@ class AgentRunner:
                     f'You previously posted:\nTitle: "{post.get("title")}"\n'
                     f'{post.get("content", "")[:300]}\n\n'
                     f"Write a short follow-up thought to continue this thread (1-2 sentences). "
-                    "Add something new — don't just restate the original."
-                )
+                    "Add something new — don't just restate the original.",
+                    )
                 if continuation:
                     try:
                         await self._post_with_challenge(
@@ -348,6 +351,8 @@ class AgentRunner:
                         await asyncio.sleep(20)
                     except Exception as e:
                         logger.error("Thread reply error: %s", e)
+                elif self.config.behavior.log_skipped:
+                    await self.log("skipped_thread", f"LLM returned empty continuation for '{post.get('title')}'")
         except Exception as e:
             logger.error("Reply to own threads error: %s", e)
 
@@ -388,6 +393,8 @@ class AgentRunner:
             f"Title on first line, content below. Max {max_len} chars. No hashtags."
         )
         if not content:
+            if self.config.behavior.log_skipped:
+                await self.log("skipped_post", "LLM returned empty content — post not created")
             return
         lines = content.strip().splitlines()
         title = lines[0].strip().lstrip("#").strip()
@@ -463,7 +470,7 @@ class AgentRunner:
                     comment = await self._llm(
                         f'Your peer agent {peer_name} posted:\n'
                         f'"{pp.title}"\n{pp.content_preview}\n\n'
-                        "Write a thoughtful comment (1-2 sentences)."
+                        "Write a thoughtful comment (1-2 sentences).",
                     )
                     if comment:
                         try:
@@ -474,6 +481,8 @@ class AgentRunner:
                             await asyncio.sleep(20)
                         except Exception as e:
                             logger.error("Peer comment error: %s", e)
+                    elif self.config.behavior.log_skipped:
+                        await self.log("skipped_peer_comment", f"LLM returned empty comment for {peer_name} post {pid}")
 
         await self.log("peer_interact", f"Liked {liked}, commented {commented} peer posts")
 

@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS moltbook_configs (
     receive_peer_comments BOOLEAN NOT NULL DEFAULT FALSE,
     send_peer_likes BOOLEAN NOT NULL DEFAULT TRUE,
     send_peer_comments BOOLEAN NOT NULL DEFAULT TRUE,
+    log_skipped BOOLEAN NOT NULL DEFAULT TRUE,
     heartbeat_md TEXT NOT NULL DEFAULT '',
     created_at TIMESTAMPTZ DEFAULT NOW(),
     updated_at TIMESTAMPTZ DEFAULT NOW()
@@ -97,6 +98,15 @@ async def init_db(pool: asyncpg.Pool) -> None:
                 "ALTER TABLE moltbook_configs ADD COLUMN heartbeat_md TEXT NOT NULL DEFAULT ''"
             )
             logger.info("Added column moltbook_configs.heartbeat_md")
+        except asyncpg.DuplicateColumnError:
+            pass
+
+        # Migration: add log_skipped to moltbook_configs
+        try:
+            await conn.execute(
+                "ALTER TABLE moltbook_configs ADD COLUMN log_skipped BOOLEAN NOT NULL DEFAULT TRUE"
+            )
+            logger.info("Added column moltbook_configs.log_skipped")
         except asyncpg.DuplicateColumnError:
             pass
 
@@ -176,6 +186,7 @@ def _default_config_dict(slot: int) -> dict:
         "receive_peer_comments": False,
         "send_peer_likes": True,
         "send_peer_comments": True,
+        "log_skipped": True,
         "heartbeat_md": "",
     }
 

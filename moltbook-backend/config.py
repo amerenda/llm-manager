@@ -32,6 +32,7 @@ class AgentBehavior(BaseModel):
     receive_peer_comments: bool = False
     send_peer_likes: bool = True
     send_peer_comments: bool = True
+    log_skipped: bool = True
 
 
 class AgentConfig(BaseModel):
@@ -101,6 +102,7 @@ def config_from_db(row: dict) -> AgentConfig:
         receive_peer_comments=row.get("receive_peer_comments", False),
         send_peer_likes=row.get("send_peer_likes", True),
         send_peer_comments=row.get("send_peer_comments", True),
+        log_skipped=row.get("log_skipped", True),
     )
     return AgentConfig(
         slot=row["slot"],

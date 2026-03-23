@@ -197,6 +197,7 @@ async def get_moltbook_agents():
                 "receive_peer_comments": row["receive_peer_comments"],
                 "send_peer_likes": row["send_peer_likes"],
                 "send_peer_comments": row["send_peer_comments"],
+                "log_skipped": row.get("log_skipped", True),
             },
             "state": state.model_dump(),
         })
@@ -261,7 +262,7 @@ async def update_moltbook_agent(slot: int, req: AgentUpdateRequest):
             "post_jitter_pct", "karma_throttle", "karma_throttle_threshold",
             "karma_throttle_multiplier", "target_submolts", "auto_dm_approve",
             "receive_peer_likes", "receive_peer_comments", "send_peer_likes",
-            "send_peer_comments",
+            "send_peer_comments", "log_skipped",
         ):
             if field in req.behavior:
                 updates[field] = req.behavior[field]
