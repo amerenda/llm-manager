@@ -150,6 +150,18 @@ def _ensure_tls_cert(ip_addr: str) -> None:
     else:
         need_regen = True
 
+    # Check if cert is expiring within 30 days
+    if not need_regen:
+        try:
+            with open(_TLS_CERT_PATH, "rb") as f:
+                cert = x509.load_pem_x509_certificate(f.read())
+            days_left = (cert.not_valid_after_utc - datetime.datetime.now(datetime.timezone.utc)).days
+            if days_left < 30:
+                logger.info("TLS cert expires in %d days — regenerating", days_left)
+                need_regen = True
+        except Exception:
+            need_regen = True
+
     if need_regen:
         _generate_self_signed_cert(ip_addr, TLS_CERT_DIR)
 
