@@ -39,6 +39,11 @@ from library_routes import router as library_router, safety_router
 from library import classify_models_batch, parse_param_count, parse_quantization, refresh_library_cache
 import queue_db
 import auth
+from cloud_providers import (
+    detect_provider, ModelProvider, get_anthropic_models, anthropic_chat,
+    get_anthropic_api_key,
+)
+import api_keys
 from auth import (
     GITHUB_CLIENT_ID, COOKIE_NAME, SESSION_TTL,
     create_session_token, get_current_user, require_admin,
@@ -465,6 +470,112 @@ async def vram_check(req: VramCheckRequest):
     }
 
 
+# ── Cloud models ─────────────────────────────────────────────────────────────
+
+@app.get("/api/cloud/models")
+async def cloud_models():
+    """List available cloud models with their config."""
+    pool = app.state.db
+    # Fetch from Anthropic API (auto-discovery), using DB key if available
+    key = await get_anthropic_api_key(pool)
+    api_models = await get_anthropic_models(api_key=key)
+    # Merge with DB config (admin overrides)
+    configs = {c["model_id"]: c for c in await db.get_cloud_model_configs(pool)}
+
+    result = []
+    for m in api_models:
+        model_id = m["id"]
+        cfg = configs.get(model_id, {})
+        result.append({
+            "id": model_id,
+            "display_name": cfg.get("display_name") or m.get("display_name", model_id),
+            "provider": "anthropic",
+            "enabled": cfg.get("enabled", True),
+            "max_tokens": cfg.get("max_tokens", 4096),
+            "temperature": cfg.get("temperature"),
+            "config": cfg.get("config", {}),
+        })
+
+    # Include any manually-configured models not in the API list
+    api_ids = {m["id"] for m in api_models}
+    for model_id, cfg in configs.items():
+        if model_id not in api_ids:
+            result.append({
+                "id": model_id,
+                "display_name": cfg.get("display_name", model_id),
+                "provider": cfg.get("provider", "anthropic"),
+                "enabled": cfg.get("enabled", True),
+                "max_tokens": cfg.get("max_tokens", 4096),
+                "temperature": cfg.get("temperature"),
+                "config": cfg.get("config", {}),
+            })
+
+    return result
+
+
+class CloudModelConfigRequest(BaseModel):
+    enabled: Optional[bool] = None
+    max_tokens: Optional[int] = None
+    temperature: Optional[float] = None
+    display_name: Optional[str] = None
+    config: Optional[dict] = None
+
+
+@app.patch("/api/cloud/models/{model_id:path}")
+async def update_cloud_model_config(model_id: str, req: CloudModelConfigRequest):
+    """Update config for a cloud model (max_tokens, temperature, etc.)."""
+    kwargs = {k: v for k, v in req.model_dump().items() if v is not None}
+    await db.upsert_cloud_model_config(app.state.db, model_id, **kwargs)
+    return {"ok": True}
+
+
+@app.get("/api/cloud/status")
+async def cloud_status():
+    """Check cloud provider connectivity."""
+    pool = app.state.db
+    key = await get_anthropic_api_key(pool)
+    providers = {}
+    models = await get_anthropic_models(api_key=key)
+    providers["anthropic"] = {
+        "configured": bool(key),
+        "reachable": len(models) > 0,
+        "model_count": len(models),
+    }
+    return providers
+
+
+# ── API key management ────────────────────────────────────────────────────────
+
+@app.get("/api/cloud/keys")
+async def list_cloud_keys():
+    """List stored API keys (masked, never returns plaintext)."""
+    return await api_keys.list_api_keys(app.state.db)
+
+
+class StoreKeyRequest(BaseModel):
+    provider: str
+    key: str
+    label: str = ""
+
+
+@app.post("/api/cloud/keys")
+async def store_cloud_key(req: StoreKeyRequest):
+    """Encrypt and store an API key."""
+    key_id = await api_keys.store_api_key(
+        app.state.db, req.provider, req.key, req.label
+    )
+    return {"ok": True, "id": key_id}
+
+
+@app.delete("/api/cloud/keys/{key_id}")
+async def delete_cloud_key(key_id: int):
+    """Delete a stored API key."""
+    found = await api_keys.delete_api_key(app.state.db, key_id)
+    if not found:
+        raise HTTPException(404, "Key not found")
+    return {"ok": True}
+
+
 # ── LLM Runner registration ───────────────────────────────────────────────────
 
 class RunnerRegisterRequest(BaseModel):
@@ -686,15 +797,47 @@ async def proxy_chat_completions(request: Request, runner_id: Optional[int] = No
     stream = body.get("stream", False)
 
     # Enforce per-app model restrictions
-    auth = request.headers.get("Authorization", "")
-    if auth.startswith("Bearer "):
-        api_key = auth.removeprefix("Bearer ").strip()
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        api_key = auth_header.removeprefix("Bearer ").strip()
         allowed = await db.check_model_allowed(app.state.db, api_key, model)
         if not allowed:
             raise HTTPException(403, f"Model '{model}' is not allowed for this application")
 
+    provider = detect_provider(model)
     _inc_request("/v1/chat/completions", "POST", 200)
 
+    # ── Cloud model routing ──────────────────────────────────────────────
+    if provider == ModelProvider.ANTHROPIC:
+        # Check if model is enabled
+        cfg = await db.get_cloud_model_config(app.state.db, model)
+        if cfg and not cfg.get("enabled", True):
+            raise HTTPException(403, f"Cloud model '{model}' is disabled")
+
+        config_overrides = {}
+        if cfg:
+            if cfg.get("max_tokens"):
+                config_overrides["max_tokens"] = cfg["max_tokens"]
+            if cfg.get("temperature") is not None:
+                config_overrides["temperature"] = cfg["temperature"]
+
+        try:
+            key = await get_anthropic_api_key(app.state.db)
+            result = await anthropic_chat(body, api_key=key, stream=stream, config_overrides=config_overrides)
+            if stream:
+                return StreamingResponse(result, media_type="text/event-stream")
+            return result
+        except httpx.HTTPStatusError as e:
+            status = e.response.status_code
+            _inc_request("/v1/chat/completions", "POST", status)
+            raise HTTPException(status, f"Cloud model error: {e.response.text[:200]}")
+        except ValueError as e:
+            raise HTTPException(503, str(e))
+        except Exception as e:
+            _inc_request("/v1/chat/completions", "POST", 503)
+            raise HTTPException(503, f"Cloud model error: {e}")
+
+    # ── Local model routing (Ollama) ─────────────────────────────────────
     try:
         client = await _get_runner_client(app.state.db, runner_id)
 

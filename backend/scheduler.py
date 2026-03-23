@@ -15,6 +15,7 @@ import httpx
 
 import queue_db
 from gpu import vram_for_model
+from cloud_providers import detect_provider, ModelProvider, anthropic_chat
 
 logger = logging.getLogger(__name__)
 
@@ -88,12 +89,25 @@ class Scheduler:
                         cleanup_counter = 0
                     continue
 
+                # Split cloud vs local jobs
+                cloud_jobs = [j for j in jobs if detect_provider(j["model"]) != ModelProvider.LOCAL]
+                local_jobs = [j for j in jobs if detect_provider(j["model"]) == ModelProvider.LOCAL]
+
+                # Process cloud jobs immediately (no VRAM management needed)
+                for job in cloud_jobs:
+                    if not self._running:
+                        break
+                    await self._run_job(job)
+
+                if not local_jobs:
+                    continue
+
                 # Refresh loaded model list from Ollama
                 await self._sync_loaded_models()
 
-                # Group jobs by model
+                # Group local jobs by model
                 model_groups: dict[str, list[dict]] = {}
-                for job in jobs:
+                for job in local_jobs:
                     model_groups.setdefault(job["model"], []).append(job)
 
                 # Process already-loaded models first (no swap needed)
@@ -285,7 +299,7 @@ class Scheduler:
             await self._run_job(job)
 
     async def _run_job(self, job: dict):
-        """Execute a single inference job."""
+        """Execute a single inference job (local or cloud)."""
         job_id = job["id"]
         model = job["model"]
         request = job["request"] if isinstance(job["request"], dict) else json.loads(job["request"])
@@ -294,53 +308,77 @@ class Scheduler:
         await queue_db.update_job_status(self.pool, job_id, "running")
 
         try:
-            ollama_base = await self.get_ollama_base()
-            # Build OpenAI-compatible request to Ollama
-            payload = {
-                "model": model,
-                "messages": request.get("messages", []),
-                "stream": False,
-                "options": {},
-            }
-            if "temperature" in request:
-                payload["options"]["temperature"] = request["temperature"]
-            if "max_tokens" in request:
-                payload["options"]["num_predict"] = request["max_tokens"]
-
-            async with httpx.AsyncClient(timeout=120) as client:
-                resp = await client.post(f"{ollama_base}/api/chat", json=payload)
-
-            if resp.status_code == 200:
-                data = resp.json()
-                result = {
-                    "choices": [{
-                        "message": data.get("message", {}),
-                        "finish_reason": "stop",
-                    }],
-                    "model": model,
-                    "usage": {
-                        "prompt_tokens": data.get("prompt_eval_count", 0),
-                        "completion_tokens": data.get("eval_count", 0),
-                    },
-                }
-                await queue_db.update_job_status(self.pool, job_id, "completed", result=result)
-                logger.info("Job %s completed (model=%s, tokens=%d)",
-                            job_id, model, data.get("eval_count", 0))
+            provider = detect_provider(model)
+            if provider == ModelProvider.ANTHROPIC:
+                await self._run_cloud_job(job_id, model, request)
             else:
-                error = f"Ollama returned {resp.status_code}: {resp.text[:200]}"
-                await queue_db.update_job_status(self.pool, job_id, "failed", error=error)
-                logger.error("Job %s failed: %s", job_id, error)
-
+                await self._run_local_job(job_id, model, request)
         except Exception as e:
             await queue_db.update_job_status(self.pool, job_id, "failed", error=str(e))
             logger.exception("Job %s error", job_id)
         finally:
             self._current_job_id = None
 
+    async def _run_cloud_job(self, job_id: str, model: str, request: dict):
+        """Execute a cloud model inference job."""
+        body = {"model": model, "messages": request.get("messages", []), "stream": False}
+        if "temperature" in request:
+            body["temperature"] = request["temperature"]
+        if "max_tokens" in request:
+            body["max_tokens"] = request["max_tokens"]
+
+        result = await anthropic_chat(body, stream=False)
+        await queue_db.update_job_status(self.pool, job_id, "completed", result=result)
+        usage = result.get("usage", {})
+        logger.info("Job %s completed (model=%s, cloud, tokens=%d)",
+                    job_id, model, usage.get("completion_tokens", 0))
+
+    async def _run_local_job(self, job_id: str, model: str, request: dict):
+        """Execute a local Ollama inference job."""
+        ollama_base = await self.get_ollama_base()
+        payload = {
+            "model": model,
+            "messages": request.get("messages", []),
+            "stream": False,
+            "options": {},
+        }
+        if "temperature" in request:
+            payload["options"]["temperature"] = request["temperature"]
+        if "max_tokens" in request:
+            payload["options"]["num_predict"] = request["max_tokens"]
+
+        async with httpx.AsyncClient(timeout=120) as client:
+            resp = await client.post(f"{ollama_base}/api/chat", json=payload)
+
+        if resp.status_code == 200:
+            data = resp.json()
+            result = {
+                "choices": [{
+                    "message": data.get("message", {}),
+                    "finish_reason": "stop",
+                }],
+                "model": model,
+                "usage": {
+                    "prompt_tokens": data.get("prompt_eval_count", 0),
+                    "completion_tokens": data.get("eval_count", 0),
+                },
+            }
+            await queue_db.update_job_status(self.pool, job_id, "completed", result=result)
+            logger.info("Job %s completed (model=%s, tokens=%d)",
+                        job_id, model, data.get("eval_count", 0))
+        else:
+            error = f"Ollama returned {resp.status_code}: {resp.text[:200]}"
+            await queue_db.update_job_status(self.pool, job_id, "failed", error=error)
+            logger.error("Job %s failed: %s", job_id, error)
+
     # ── Public methods for VRAM analysis ──────────────────────────────────────
 
     async def check_submission(self, model: str) -> dict:
         """Pre-check a job submission. Returns warnings/errors about VRAM."""
+        # Cloud models don't need VRAM checks
+        if detect_provider(model) != ModelProvider.LOCAL:
+            return {"ok": True, "provider": detect_provider(model).value}
+
         vram_needed = vram_for_model(model)
         gpu = await self._get_gpu_info()
 

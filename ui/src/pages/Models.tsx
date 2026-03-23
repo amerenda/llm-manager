@@ -1,7 +1,8 @@
 import { useState } from 'react'
-import { Download, Trash2, Loader2, CheckCircle2, AlertCircle, Image, Layers, Cpu, Upload, Shield, ShieldOff, Play, Square, Search, RefreshCw, BookOpen } from 'lucide-react'
-import { useLlmModels, usePullModel, useDeleteModel, useCheckpoints, useSwitchCheckpoint, useLlmStatus, useLoadModel, useUnloadModel, useStartComfyui, useStopComfyui, useLibrary, useRefreshLibrary } from '../hooks/useBackend'
+import { Download, Trash2, Loader2, CheckCircle2, AlertCircle, Image, Layers, Cpu, Upload, Shield, ShieldOff, Play, Square, Search, RefreshCw, BookOpen, Cloud, Settings2, Power } from 'lucide-react'
+import { useLlmModels, usePullModel, useDeleteModel, useCheckpoints, useSwitchCheckpoint, useLlmStatus, useLoadModel, useUnloadModel, useStartComfyui, useStopComfyui, useLibrary, useRefreshLibrary, useCloudModels, useCloudStatus, useUpdateCloudModel, useCloudKeys, useStoreCloudKey, useDeleteCloudKey } from '../hooks/useBackend'
 import type { LlmModel, LibraryModel } from '../types'
+import type { CloudModel, StoredApiKey } from '../hooks/useBackend'
 
 function stripExt(filename: string): string {
   return filename.replace(/\.[^.]+$/, '')
@@ -456,14 +457,263 @@ function LibraryBrowserSection() {
   )
 }
 
-export function Models() {
+function ApiKeyManager() {
+  const keys = useCloudKeys()
+  const store = useStoreCloudKey()
+  const remove = useDeleteCloudKey()
+  const [adding, setAdding] = useState<string | null>(null)
+  const [keyInput, setKeyInput] = useState('')
+  const [labelInput, setLabelInput] = useState('')
+
+  const providers = [
+    { id: 'anthropic', name: 'Anthropic (Claude)' },
+    { id: 'openai', name: 'OpenAI' },
+  ]
+
+  const keysByProvider: Record<string, StoredApiKey[]> = {}
+  for (const k of keys.data ?? []) {
+    ;(keysByProvider[k.provider] ??= []).push(k)
+  }
+
   return (
-    <div className="space-y-8">
-      <TextModelsSection />
-      <div className="border-t border-gray-800" />
-      <LibraryBrowserSection />
-      <div className="border-t border-gray-800" />
-      <ImageModelsSection />
+    <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 space-y-3">
+      <h3 className="text-sm font-medium text-gray-300 flex items-center gap-2">
+        <Shield className="w-4 h-4 text-brand-400" />
+        API Keys
+      </h3>
+      {providers.map(p => {
+        const existing = keysByProvider[p.id] ?? []
+        return (
+          <div key={p.id} className="flex items-center justify-between gap-3 bg-gray-950 rounded-lg px-3 py-2">
+            <div className="min-w-0">
+              <p className="text-sm text-gray-200">{p.name}</p>
+              {existing.length > 0 ? (
+                <div className="flex items-center gap-2 mt-0.5">
+                  <span className="text-xs text-gray-500 font-mono">{existing[0].key_preview}</span>
+                  {existing[0].label && <span className="text-xs text-gray-600">{existing[0].label}</span>}
+                </div>
+              ) : (
+                <p className="text-xs text-gray-600">No key configured</p>
+              )}
+            </div>
+            <div className="flex items-center gap-1.5 flex-shrink-0">
+              {existing.length > 0 && (
+                <button
+                  onClick={() => remove.mutate(existing[0].id)}
+                  disabled={remove.isPending}
+                  className="p-1.5 rounded-lg bg-gray-800 hover:bg-red-900/50 hover:text-red-400 text-gray-500 transition-colors"
+                  title="Remove key"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              )}
+              <button
+                onClick={() => setAdding(adding === p.id ? null : p.id)}
+                className="text-xs px-2.5 py-1.5 rounded-lg bg-brand-900/50 hover:bg-brand-800/50 text-brand-300 transition-colors"
+              >
+                {existing.length > 0 ? 'Replace' : 'Add key'}
+              </button>
+            </div>
+          </div>
+        )
+      })}
+      {adding && (
+        <div className="flex gap-2 mt-2">
+          <input
+            type="password"
+            value={keyInput}
+            onChange={e => setKeyInput(e.target.value)}
+            placeholder={`${adding} API key`}
+            className="flex-1 bg-gray-950 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:border-brand-600"
+          />
+          <input
+            type="text"
+            value={labelInput}
+            onChange={e => setLabelInput(e.target.value)}
+            placeholder="Label (optional)"
+            className="w-32 bg-gray-950 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:border-brand-600"
+          />
+          <button
+            onClick={() => {
+              if (keyInput.trim()) {
+                store.mutate({ provider: adding, key: keyInput.trim(), label: labelInput.trim() })
+                setKeyInput('')
+                setLabelInput('')
+                setAdding(null)
+              }
+            }}
+            disabled={store.isPending || !keyInput.trim()}
+            className="px-3 py-1.5 rounded-lg bg-brand-600 hover:bg-brand-500 text-white text-sm transition-colors disabled:opacity-40"
+          >
+            Save
+          </button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function CloudModelsSection() {
+  const models = useCloudModels()
+  const status = useCloudStatus()
+  const update = useUpdateCloudModel()
+  const [editing, setEditing] = useState<string | null>(null)
+  const [editValues, setEditValues] = useState<{ max_tokens?: number; temperature?: number }>({})
+
+  const anthropicStatus = status.data?.anthropic
+
+  return (
+    <section className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <Cloud className="w-4 h-4 text-brand-400" />
+          <h2 className="text-base font-semibold text-gray-200">Anthropic (Claude)</h2>
+          {anthropicStatus && (
+            <span className={`inline-flex items-center gap-1 text-[10px] px-1.5 py-0.5 rounded ${
+              anthropicStatus.reachable
+                ? 'bg-green-900/40 text-green-400'
+                : anthropicStatus.configured
+                ? 'bg-yellow-900/40 text-yellow-400'
+                : 'bg-gray-800 text-gray-500'
+            }`}>
+              <span className={`w-1.5 h-1.5 rounded-full ${
+                anthropicStatus.reachable ? 'bg-green-400' : anthropicStatus.configured ? 'bg-yellow-400' : 'bg-gray-600'
+              }`} />
+              {anthropicStatus.reachable ? 'Connected' : anthropicStatus.configured ? 'Unreachable' : 'Not configured'}
+            </span>
+          )}
+        </div>
+      </div>
+
+      <ApiKeyManager />
+
+      {!anthropicStatus?.configured ? (
+        <div className="bg-gray-900 border border-gray-800 rounded-xl p-6 text-center">
+          <p className="text-sm text-gray-500">Add an Anthropic API key above to enable Claude models.</p>
+        </div>
+      ) : models.isLoading ? (
+        <p className="text-xs text-gray-600 py-4 text-center">Loading cloud models...</p>
+      ) : (
+        <div className="space-y-2">
+          {(models.data ?? []).map((m: CloudModel) => (
+            <div key={m.id} className="bg-gray-900 border border-gray-800 rounded-xl p-4">
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm text-gray-200 font-medium">{m.display_name}</span>
+                    <span className="text-[10px] bg-indigo-900/30 text-indigo-400 px-1.5 py-0.5 rounded">{m.provider}</span>
+                    {!m.enabled && (
+                      <span className="text-[10px] bg-gray-800 text-gray-500 px-1.5 py-0.5 rounded">disabled</span>
+                    )}
+                  </div>
+                  <p className="text-xs text-gray-500 mt-0.5 font-mono">{m.id}</p>
+                  <div className="flex items-center gap-3 mt-1.5 text-[10px] text-gray-500">
+                    <span>Max tokens: {m.max_tokens}</span>
+                    {m.temperature !== null && <span>Temperature: {m.temperature}</span>}
+                  </div>
+                </div>
+                <div className="flex items-center gap-1.5 flex-shrink-0">
+                  <button
+                    onClick={() => {
+                      if (editing === m.id) {
+                        // Save
+                        update.mutate({ modelId: m.id, ...editValues })
+                        setEditing(null)
+                        setEditValues({})
+                      } else {
+                        setEditing(m.id)
+                        setEditValues({ max_tokens: m.max_tokens, temperature: m.temperature ?? undefined })
+                      }
+                    }}
+                    className="p-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-400 transition-colors"
+                    title={editing === m.id ? 'Save' : 'Configure'}
+                  >
+                    {editing === m.id ? <CheckCircle2 className="w-3.5 h-3.5 text-green-400" /> : <Settings2 className="w-3.5 h-3.5" />}
+                  </button>
+                  <button
+                    onClick={() => update.mutate({ modelId: m.id, enabled: !m.enabled })}
+                    className={`p-1.5 rounded-lg transition-colors ${
+                      m.enabled
+                        ? 'bg-green-900/30 hover:bg-green-900/50 text-green-400'
+                        : 'bg-gray-800 hover:bg-gray-700 text-gray-500'
+                    }`}
+                    title={m.enabled ? 'Disable' : 'Enable'}
+                  >
+                    <Power className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+              {editing === m.id && (
+                <div className="mt-3 pt-3 border-t border-gray-800 flex gap-3">
+                  <label className="flex items-center gap-2 text-xs text-gray-400">
+                    Max tokens
+                    <input
+                      type="number"
+                      value={editValues.max_tokens ?? ''}
+                      onChange={e => setEditValues(v => ({ ...v, max_tokens: parseInt(e.target.value) || undefined }))}
+                      className="w-24 bg-gray-950 border border-gray-700 rounded px-2 py-1 text-xs text-gray-200 focus:outline-none focus:border-brand-600"
+                    />
+                  </label>
+                  <label className="flex items-center gap-2 text-xs text-gray-400">
+                    Temperature
+                    <input
+                      type="number"
+                      step="0.1"
+                      min="0"
+                      max="2"
+                      value={editValues.temperature ?? ''}
+                      onChange={e => setEditValues(v => ({ ...v, temperature: parseFloat(e.target.value) || undefined }))}
+                      className="w-20 bg-gray-950 border border-gray-700 rounded px-2 py-1 text-xs text-gray-200 focus:outline-none focus:border-brand-600"
+                    />
+                  </label>
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  )
+}
+
+export function Models() {
+  const [tab, setTab] = useState<'local' | 'cloud'>('local')
+
+  return (
+    <div className="space-y-6">
+      {/* Tab bar */}
+      <div className="flex gap-1 bg-gray-900 rounded-lg p-1 w-fit">
+        <button
+          onClick={() => setTab('local')}
+          className={`flex items-center gap-1.5 px-4 py-2 rounded-md text-sm transition-colors ${
+            tab === 'local' ? 'bg-brand-900 text-brand-300' : 'text-gray-400 hover:text-gray-200'
+          }`}
+        >
+          <Layers className="w-4 h-4" />
+          Local Models
+        </button>
+        <button
+          onClick={() => setTab('cloud')}
+          className={`flex items-center gap-1.5 px-4 py-2 rounded-md text-sm transition-colors ${
+            tab === 'cloud' ? 'bg-brand-900 text-brand-300' : 'text-gray-400 hover:text-gray-200'
+          }`}
+        >
+          <Cloud className="w-4 h-4" />
+          Cloud Models
+        </button>
+      </div>
+
+      {tab === 'local' ? (
+        <div className="space-y-8">
+          <TextModelsSection />
+          <div className="border-t border-gray-800" />
+          <LibraryBrowserSection />
+          <div className="border-t border-gray-800" />
+          <ImageModelsSection />
+        </div>
+      ) : (
+        <CloudModelsSection />
+      )}
     </div>
   )
 }

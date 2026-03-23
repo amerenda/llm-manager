@@ -120,6 +120,30 @@ CREATE TABLE IF NOT EXISTS library_cache_meta (
     value TEXT NOT NULL,
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+CREATE TABLE IF NOT EXISTS api_keys (
+    id SERIAL PRIMARY KEY,
+    provider TEXT NOT NULL,
+    user_id INTEGER,
+    encrypted_key TEXT NOT NULL,
+    key_preview TEXT DEFAULT '',
+    label TEXT DEFAULT '',
+    created_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_provider_user
+    ON api_keys (provider, COALESCE(user_id, 0));
+
+CREATE TABLE IF NOT EXISTS cloud_model_config (
+    model_id TEXT PRIMARY KEY,
+    provider TEXT NOT NULL DEFAULT 'anthropic',
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
+    max_tokens INTEGER DEFAULT 4096,
+    temperature REAL,
+    display_name TEXT,
+    config JSONB DEFAULT '{}'::jsonb,
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
 """
 
 CREATE_INDEXES_SQL = """
@@ -787,8 +811,13 @@ async def set_app_allowed_models(pool: asyncpg.Pool, app_id: int, patterns: list
 
 async def check_model_allowed(pool: asyncpg.Pool, api_key: str, model: str) -> bool:
     """Check if a model is allowed for the app identified by api_key.
-    Returns True if no restrictions are set (unrestricted), or if model matches a pattern."""
+
+    Local models: no restrictions = unrestricted (allow all safe local models).
+    Cloud models: no restrictions = denied. Must have an explicit grant (e.g., 'claude-*').
+    """
     import fnmatch
+    from cloud_providers import detect_provider, ModelProvider
+
     async with pool.acquire() as conn:
         app_row = await conn.fetchrow(
             "SELECT id FROM registered_apps WHERE api_key = $1", api_key
@@ -798,9 +827,20 @@ async def check_model_allowed(pool: asyncpg.Pool, api_key: str, model: str) -> b
         patterns = await conn.fetch(
             "SELECT model_pattern FROM app_allowed_models WHERE app_id = $1", app_row["id"]
         )
-    if not patterns:
-        return True  # No restrictions = unrestricted
-    return any(fnmatch.fnmatch(model, r["model_pattern"]) for r in patterns)
+
+    provider = detect_provider(model)
+    pattern_list = [r["model_pattern"] for r in patterns]
+
+    if provider == ModelProvider.LOCAL:
+        # Local: no patterns = unrestricted (backward compatible)
+        if not pattern_list:
+            return True
+        return any(fnmatch.fnmatch(model, p) for p in pattern_list)
+
+    # Cloud: must have an explicit grant
+    if not pattern_list:
+        return False
+    return any(fnmatch.fnmatch(model, p) for p in pattern_list)
 
 
 # ── Library cache ────────────────────────────────────────────────────────────
@@ -903,3 +943,54 @@ async def set_app_allow_unsafe(pool: asyncpg.Pool, app_id: int, allow_unsafe: bo
             "UPDATE registered_apps SET allow_unsafe = $2 WHERE id = $1",
             app_id, allow_unsafe)
     return "UPDATE 1" in result
+
+
+# ── Cloud model config ────────────────────────────────────────────────────────
+
+async def get_cloud_model_configs(pool: asyncpg.Pool) -> list[dict]:
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM cloud_model_config ORDER BY provider, model_id")
+    return [dict(r) for r in rows]
+
+
+async def get_cloud_model_config(pool: asyncpg.Pool, model_id: str) -> Optional[dict]:
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM cloud_model_config WHERE model_id = $1", model_id)
+    return dict(row) if row else None
+
+
+async def upsert_cloud_model_config(
+    pool: asyncpg.Pool,
+    model_id: str,
+    provider: str = "anthropic",
+    enabled: bool = True,
+    max_tokens: Optional[int] = None,
+    temperature: Optional[float] = None,
+    display_name: Optional[str] = None,
+    config: Optional[dict] = None,
+) -> None:
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO cloud_model_config (model_id, provider, enabled, max_tokens,
+                                            temperature, display_name, config, updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb, NOW())
+            ON CONFLICT (model_id) DO UPDATE SET
+                provider = EXCLUDED.provider,
+                enabled = EXCLUDED.enabled,
+                max_tokens = COALESCE(EXCLUDED.max_tokens, cloud_model_config.max_tokens),
+                temperature = COALESCE(EXCLUDED.temperature, cloud_model_config.temperature),
+                display_name = COALESCE(EXCLUDED.display_name, cloud_model_config.display_name),
+                config = COALESCE(EXCLUDED.config, cloud_model_config.config),
+                updated_at = NOW()
+        """, model_id, provider, enabled,
+            max_tokens, temperature, display_name,
+            json.dumps(config) if config else None)
+
+
+async def delete_cloud_model_config(pool: asyncpg.Pool, model_id: str) -> bool:
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM cloud_model_config WHERE model_id = $1", model_id)
+    return "DELETE 1" in result

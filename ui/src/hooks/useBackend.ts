@@ -411,6 +411,92 @@ export function useSafetyTags() {
   })
 }
 
+// ── Cloud models ─────────────────────────────────────────────────────────────
+
+export interface CloudModel {
+  id: string
+  display_name: string
+  provider: string
+  enabled: boolean
+  max_tokens: number
+  temperature: number | null
+  config: Record<string, unknown>
+}
+
+export interface CloudProviderStatus {
+  configured: boolean
+  reachable: boolean
+  model_count: number
+}
+
+export function useCloudModels() {
+  return useQuery<CloudModel[]>({
+    queryKey: ['cloud-models'],
+    queryFn: () => get('/api/cloud/models'),
+    refetchInterval: 30_000,
+  })
+}
+
+export function useCloudStatus() {
+  return useQuery<Record<string, CloudProviderStatus>>({
+    queryKey: ['cloud-status'],
+    queryFn: () => get('/api/cloud/status'),
+    refetchInterval: 30_000,
+  })
+}
+
+export function useUpdateCloudModel() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ modelId, ...data }: { modelId: string; enabled?: boolean; max_tokens?: number; temperature?: number; display_name?: string }) =>
+      patch(`/api/cloud/models/${encodeURIComponent(modelId)}`, data),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['cloud-models'] }),
+  })
+}
+
+// ── API keys ─────────────────────────────────────────────────────────────────
+
+export interface StoredApiKey {
+  id: number
+  provider: string
+  user_id: number | null
+  key_preview: string
+  label: string
+  created_at: string
+}
+
+export function useCloudKeys() {
+  return useQuery<StoredApiKey[]>({
+    queryKey: ['cloud-keys'],
+    queryFn: () => get('/api/cloud/keys'),
+  })
+}
+
+export function useStoreCloudKey() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (data: { provider: string; key: string; label?: string }) =>
+      post('/api/cloud/keys', data),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['cloud-keys'] })
+      qc.invalidateQueries({ queryKey: ['cloud-status'] })
+      qc.invalidateQueries({ queryKey: ['cloud-models'] })
+    },
+  })
+}
+
+export function useDeleteCloudKey() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (keyId: number) => del(`/api/cloud/keys/${keyId}`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['cloud-keys'] })
+      qc.invalidateQueries({ queryKey: ['cloud-status'] })
+      qc.invalidateQueries({ queryKey: ['cloud-models'] })
+    },
+  })
+}
+
 // ── Agents (moltbook) ─────────────────────────────────────────────────────────
 
 export function useAgents() {
