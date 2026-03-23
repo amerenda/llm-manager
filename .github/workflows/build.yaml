@@ -19,7 +19,7 @@ jobs:
     container:
       image: python:3.12-slim
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Install dependencies
         run: |
           cd backend
@@ -36,7 +36,7 @@ jobs:
     if: github.event_name != 'pull_request'
     runs-on: arc-runner-set
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Set image tag
         id: tag
