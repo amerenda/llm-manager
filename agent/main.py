@@ -254,6 +254,11 @@ async def _heartbeat_loop():
         await asyncio.sleep(30)
         if not _RUNNER_ID or not BACKEND_URL:
             continue
+        # Auto-rotate TLS cert if expiring within 30 days
+        try:
+            _ensure_tls_cert(_DETECTED_IP)
+        except Exception:
+            pass
         try:
             caps = await _build_capabilities()
             async with httpx.AsyncClient(timeout=5) as c:
