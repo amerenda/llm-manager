@@ -38,10 +38,11 @@ from queue_routes import router as queue_router, model_router
 from library_routes import router as library_router, safety_router
 from library import classify_models_batch, parse_param_count, parse_quantization, refresh_library_cache
 import queue_db
+import auth
 from auth import (
     GITHUB_CLIENT_ID, COOKIE_NAME, SESSION_TTL,
     create_session_token, get_current_user, require_admin,
-    exchange_code_for_user, GITHUB_ALLOWED_USERS,
+    exchange_code_for_user,
 )
 
 logging.basicConfig(
@@ -224,7 +225,7 @@ async def admin_auth_middleware(request: Request, call_next):
 
     # Admin routes: require session cookie
     user = get_current_user(request)
-    if not user or user not in GITHUB_ALLOWED_USERS:
+    if not user or user not in auth.GITHUB_ALLOWED_USERS:
         from fastapi.responses import JSONResponse
         return JSONResponse(status_code=401, content={"detail": "Not authenticated"})
 
@@ -260,7 +261,7 @@ async def auth_callback(code: str = ""):
     if not username:
         raise HTTPException(401, "GitHub authentication failed")
 
-    if username not in GITHUB_ALLOWED_USERS:
+    if username not in auth.GITHUB_ALLOWED_USERS:
         logger.warning("Login rejected for GitHub user: %s", username)
         raise HTTPException(403, f"User '{username}' is not authorized")
 
@@ -284,7 +285,7 @@ async def auth_me(request: Request):
     user = get_current_user(request)
     if not user:
         raise HTTPException(401, "Not authenticated")
-    return {"user": user, "admin": user in GITHUB_ALLOWED_USERS}
+    return {"user": user, "admin": user in auth.GITHUB_ALLOWED_USERS}
 
 
 @app.get("/auth/logout")
