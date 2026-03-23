@@ -40,7 +40,7 @@ export function useLlmStatus() {
   return useQuery<LlmStatus>({
     queryKey: ['llm-status'],
     queryFn: () => get('/api/llm/status'),
-    refetchInterval: 10_000,
+    refetchInterval: 5_000,
     retry: 0,
   })
 }
@@ -51,7 +51,7 @@ export function useLlmModels() {
   return useQuery<LlmModel[]>({
     queryKey: ['llm-models'],
     queryFn: () => get<{ data: LlmModel[] }>('/api/llm/models').then(r => r.data),
-    refetchInterval: 15_000,
+    refetchInterval: 5_000,
   })
 }
 
@@ -61,7 +61,8 @@ export function usePullModel() {
     mutationFn: (model: string) =>
       post<{ ok: boolean; op_id: string; message: string }>('/api/llm/models/pull', { model }),
     onSuccess: () => {
-      // Poll for model list updates after a delay
+      qc.invalidateQueries({ queryKey: ['llm-models'] })
+      qc.invalidateQueries({ queryKey: ['llm-status'] })
       setTimeout(() => {
         qc.invalidateQueries({ queryKey: ['llm-models'] })
         qc.invalidateQueries({ queryKey: ['llm-status'] })
@@ -130,7 +131,7 @@ export function useApps() {
   return useQuery<RegisteredApp[]>({
     queryKey: ['apps'],
     queryFn: () => get('/api/apps'),
-    refetchInterval: 15_000,
+    refetchInterval: 10_000,
   })
 }
 
@@ -149,7 +150,7 @@ export function useRunners() {
   return useQuery<Runner[]>({
     queryKey: ['runners'],
     queryFn: () => get('/api/runners'),
-    refetchInterval: 15_000,
+    refetchInterval: 5_000,
   })
 }
 
@@ -193,6 +194,8 @@ export function useLoadModel() {
     mutationFn: ({ model, runner_id }: { model: string; runner_id?: number }) =>
       post<{ ok: boolean; op_id: string }>(`/api/llm/models/load${runner_id ? `?runner_id=${runner_id}` : ''}`, { model }),
     onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['llm-status'] })
+      qc.invalidateQueries({ queryKey: ['llm-models'] })
       setTimeout(() => {
         qc.invalidateQueries({ queryKey: ['llm-status'] })
         qc.invalidateQueries({ queryKey: ['llm-models'] })
@@ -207,6 +210,8 @@ export function useUnloadModel() {
     mutationFn: ({ model, runner_id }: { model: string; runner_id?: number }) =>
       post<{ ok: boolean; op_id: string }>(`/api/llm/models/unload${runner_id ? `?runner_id=${runner_id}` : ''}`, { model }),
     onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['llm-status'] })
+      qc.invalidateQueries({ queryKey: ['llm-models'] })
       setTimeout(() => {
         qc.invalidateQueries({ queryKey: ['llm-status'] })
         qc.invalidateQueries({ queryKey: ['llm-models'] })
