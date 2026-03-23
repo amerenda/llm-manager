@@ -67,17 +67,6 @@ jobs:
             ${{ env.IMAGE }}:backend-${{ steps.tag.outputs.tag }}
             ${{ env.IMAGE }}:backend-latest
 
-      - name: Build and push moltbook-backend
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: moltbook-backend/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ${{ env.IMAGE }}:moltbook-${{ steps.tag.outputs.tag }}
-            ${{ env.IMAGE }}:moltbook-latest
-
       - name: Build and push UI
         uses: docker/build-push-action@v6
         with:
@@ -104,11 +93,6 @@ jobs:
             apps/llm-manager/backend/deployment.yaml
           sed -i "s|amerenda/llm-manager:ui-[^ ]*|amerenda/llm-manager:ui-${TAG}|g" \
             apps/llm-manager/ui/deployment.yaml
-          # Update moltbook-backend if manifest exists
-          if [ -f apps/ecdysis/moltbook-backend/deployment.yaml ]; then
-            sed -i "s|amerenda/llm-manager:moltbook-[^ ]*|amerenda/llm-manager:moltbook-${TAG}|g" \
-              apps/ecdysis/moltbook-backend/deployment.yaml
-          fi
 
           git config user.name "claude-automation"
           git config user.email "claude-automation@amerenda.com"
