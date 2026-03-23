@@ -489,6 +489,7 @@ class TestEnsureModelLoaded:
 
 # ── FastAPI route tests ───────────────────────────────────────────────────────
 
+import auth
 import main
 
 
@@ -512,9 +513,12 @@ _original_lifespan = main.app.router.lifespan_context
 
 @pytest.fixture
 def client():
-    """TestClient with mocked lifespan, DB pool, and scheduler."""
+    """TestClient with mocked lifespan, DB pool, scheduler, and admin auth."""
     main.app.router.lifespan_context = _noop_lifespan
-    with TestClient(main.app, raise_server_exceptions=False) as c:
+    auth.SESSION_SECRET = "test-secret"
+    auth.GITHUB_ALLOWED_USERS = {"testuser"}
+    token = auth.create_session_token("testuser")
+    with TestClient(main.app, raise_server_exceptions=False, cookies={auth.COOKIE_NAME: token}) as c:
         yield c
     main.app.router.lifespan_context = _original_lifespan
 

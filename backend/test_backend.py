@@ -121,6 +121,7 @@ class TestCheckModelFit:
 # We swap out the lifespan so TestClient doesn't try to connect to PostgreSQL.
 
 from contextlib import asynccontextmanager
+import auth
 import main
 
 
@@ -138,9 +139,13 @@ _original_lifespan = main.app.router.lifespan_context
 
 @pytest.fixture
 def client():
-    """TestClient with mocked lifespan and runner client."""
+    """TestClient with mocked lifespan, runner client, and admin auth cookie."""
     main.app.router.lifespan_context = _noop_lifespan
-    with TestClient(main.app, raise_server_exceptions=False) as c:
+    # Set known auth config for tests
+    auth.SESSION_SECRET = "test-secret"
+    auth.GITHUB_ALLOWED_USERS = {"testuser"}
+    token = auth.create_session_token("testuser")
+    with TestClient(main.app, raise_server_exceptions=False, cookies={auth.COOKIE_NAME: token}) as c:
         yield c
     main.app.router.lifespan_context = _original_lifespan
 
