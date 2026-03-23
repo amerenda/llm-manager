@@ -21,7 +21,9 @@ logger = logging.getLogger(__name__)
 GITHUB_CLIENT_ID = os.environ.get("GITHUB_CLIENT_ID", "")
 GITHUB_CLIENT_SECRET = os.environ.get("GITHUB_CLIENT_SECRET", "")
 SESSION_SECRET = os.environ.get("SESSION_SECRET", "dev-secret-change-me")
-GITHUB_ALLOWED_USER = os.environ.get("GITHUB_ALLOWED_USER", "amerenda")
+GITHUB_ALLOWED_USERS = {
+    u.strip() for u in os.environ.get("GITHUB_ALLOWED_USERS", "amerenda").split(",") if u.strip()
+}
 SESSION_TTL = 7 * 24 * 3600  # 7 days
 COOKIE_NAME = "llm_session"
 
@@ -63,7 +65,7 @@ def require_admin(request: Request) -> str:
     user = get_current_user(request)
     if not user:
         raise HTTPException(401, "Not authenticated")
-    if user != GITHUB_ALLOWED_USER:
+    if user not in GITHUB_ALLOWED_USERS:
         raise HTTPException(403, "Forbidden")
     return user
 

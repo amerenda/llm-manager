@@ -59,7 +59,7 @@ spec:
                 secretKeyRef:
                   name: session-secret
                   key: secret
-            - name: GITHUB_ALLOWED_USER
+            - name: GITHUB_ALLOWED_USERS
               value: "amerenda"
           readinessProbe:
             httpGet:
