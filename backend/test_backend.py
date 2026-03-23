@@ -150,6 +150,17 @@ def client():
     main.app.router.lifespan_context = _original_lifespan
 
 
+@pytest.fixture
+def unauthed_client():
+    """TestClient with NO auth cookie — for testing auth enforcement."""
+    main.app.router.lifespan_context = _noop_lifespan
+    auth.SESSION_SECRET = "test-secret"
+    auth.GITHUB_ALLOWED_USERS = {"testuser"}
+    with TestClient(main.app, raise_server_exceptions=False) as c:
+        yield c
+    main.app.router.lifespan_context = _original_lifespan
+
+
 class TestHealthEndpoint:
     def test_health_returns_200(self, client):
         resp = client.get("/health")
@@ -159,6 +170,34 @@ class TestHealthEndpoint:
         assert data["service"] == "llm-manager-backend"
         assert "node" in data
         assert data["db"] is True
+
+
+class TestAuthEnforcement:
+    """Verify that admin endpoints require auth and public ones don't."""
+
+    def test_public_health_no_auth(self, unauthed_client):
+        resp = unauthed_client.get("/health")
+        assert resp.status_code == 200
+
+    def test_public_stats_no_auth(self, unauthed_client):
+        resp = unauthed_client.get("/api/stats")
+        assert resp.status_code == 200
+
+    def test_gpu_requires_auth(self, unauthed_client):
+        resp = unauthed_client.get("/api/gpu")
+        assert resp.status_code == 401
+
+    def test_models_requires_auth(self, unauthed_client):
+        resp = unauthed_client.get("/api/models")
+        assert resp.status_code == 401
+
+    def test_apps_requires_auth(self, unauthed_client):
+        resp = unauthed_client.get("/api/apps")
+        assert resp.status_code == 401
+
+    def test_gpu_works_with_auth(self, client):
+        resp = client.get("/api/gpu")
+        assert resp.status_code == 200
 
 
 class TestGpuEndpoint:
