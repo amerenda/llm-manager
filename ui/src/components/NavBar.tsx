@@ -1,5 +1,5 @@
 import { NavLink } from 'react-router-dom'
-import { LayoutDashboard, Layers, AppWindow, Server, Sliders } from 'lucide-react'
+import { LayoutDashboard, Layers, AppWindow, Server, Sliders, LogIn, LogOut } from 'lucide-react'
 
 const navItems = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard },
@@ -9,7 +9,12 @@ const navItems = [
   { to: '/apps', label: 'Apps', icon: AppWindow },
 ]
 
-export function NavBar() {
+interface NavBarProps {
+  isAdmin: boolean
+  user?: string
+}
+
+export function NavBar({ isAdmin, user }: NavBarProps) {
   return (
     <nav className="bg-gray-900 border-b border-gray-800">
       <div className="max-w-5xl mx-auto px-4 flex items-center justify-between h-14">
@@ -19,8 +24,9 @@ export function NavBar() {
           </div>
           <span className="font-semibold text-gray-100 text-sm">LLM Manager</span>
         </div>
-        <div className="flex gap-1">
-          {navItems.map(({ to, label, icon: Icon }) => (
+
+        <div className="flex items-center gap-1">
+          {isAdmin && navItems.map(({ to, label, icon: Icon }) => (
             <NavLink
               key={to}
               to={to}
@@ -37,6 +43,27 @@ export function NavBar() {
               <span className="hidden sm:inline">{label}</span>
             </NavLink>
           ))}
+
+          {isAdmin ? (
+            <div className="flex items-center gap-2 ml-2 pl-2 border-l border-gray-700">
+              <span className="text-xs text-gray-500 hidden sm:inline">{user}</span>
+              <a
+                href="/auth/logout"
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm text-gray-400 hover:text-gray-200 hover:bg-gray-800 transition-colors"
+              >
+                <LogOut className="w-4 h-4" />
+                <span className="hidden sm:inline">Logout</span>
+              </a>
+            </div>
+          ) : (
+            <a
+              href="/auth/login"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm text-brand-400 hover:text-brand-300 hover:bg-brand-900/50 transition-colors"
+            >
+              <LogIn className="w-4 h-4" />
+              <span>Admin Login</span>
+            </a>
+          )}
         </div>
       </div>
     </nav>

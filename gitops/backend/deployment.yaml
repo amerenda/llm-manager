@@ -44,6 +44,23 @@ spec:
                 secretKeyRef:
                   name: registration-secret
                   key: secret
+            - name: GITHUB_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: github-oauth
+                  key: client-id
+            - name: GITHUB_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: github-oauth
+                  key: client-secret
+            - name: SESSION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: session-secret
+                  key: secret
+            - name: GITHUB_ALLOWED_USER
+              value: "amerenda"
           readinessProbe:
             httpGet:
               path: /health

@@ -17,7 +17,7 @@ import httpx
 import uvicorn
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import RedirectResponse, StreamingResponse
 from prometheus_client import (
     CONTENT_TYPE_LATEST,
     Counter,
@@ -38,6 +38,11 @@ from queue_routes import router as queue_router, model_router
 from library_routes import router as library_router, safety_router
 from library import classify_models_batch, parse_param_count, parse_quantization, refresh_library_cache
 import queue_db
+from auth import (
+    GITHUB_CLIENT_ID, COOKIE_NAME, SESSION_TTL,
+    create_session_token, get_current_user, require_admin,
+    exchange_code_for_user, GITHUB_ALLOWED_USER,
+)
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -164,9 +169,11 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="LLM Manager Backend", version="3.0.0", lifespan=lifespan)
+UI_ORIGIN = os.environ.get("UI_ORIGIN", "https://llm-manager.amer.dev")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[UI_ORIGIN, "http://localhost:5173"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -175,6 +182,54 @@ app.include_router(model_router)
 app.include_router(library_router)
 app.include_router(safety_router)
 
+# ── Auth middleware ───────────────────────────────────────────────────────────
+# Routes that DON'T need admin auth (they have their own auth or are public)
+_PUBLIC_PATHS = {
+    "/health", "/metrics", "/auth/login", "/auth/callback", "/auth/me",
+    "/auth/logout", "/api/stats",
+}
+_PUBLIC_PREFIXES = (
+    "/v1/",                    # OpenAI-compat proxy (app API key auth)
+    "/api/runners/",           # Agent PSK auth
+    "/api/apps/discover",      # Registration secret auth
+    "/api/apps/heartbeat",     # App API key auth
+    "/api/queue/jobs/",        # Job status (app API key or public)
+    "/api/queue/batches/",     # Batch status
+    "/api/queue/submit",       # Job submission (app API key)
+    "/api/profiles/list",      # App profile discovery (API key auth)
+    "/api/queue/status",       # Queue overview
+)
+
+
+@app.middleware("http")
+async def admin_auth_middleware(request: Request, call_next):
+    """Require admin auth for management API routes."""
+    path = request.url.path
+
+    # Skip auth for public/self-authenticated routes
+    if path in _PUBLIC_PATHS or any(path.startswith(p) for p in _PUBLIC_PREFIXES):
+        return await call_next(request)
+
+    # Skip auth for non-API routes (docs, openapi.json, etc.)
+    if not path.startswith("/api/"):
+        return await call_next(request)
+
+    # Allow through if request has a valid app API key
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        api_key = auth_header[7:].strip()
+        app_row = await db.get_app_by_api_key(request.app.state.db, api_key)
+        if app_row and app_row.get("status") == "active":
+            return await call_next(request)
+
+    # Admin routes: require session cookie
+    user = get_current_user(request)
+    if not user or user != GITHUB_ALLOWED_USER:
+        from fastapi.responses import JSONResponse
+        return JSONResponse(status_code=401, content={"detail": "Not authenticated"})
+
+    return await call_next(request)
+
 
 # ── Health ────────────────────────────────────────────────────────────────────
 
@@ -182,6 +237,107 @@ app.include_router(safety_router)
 async def health():
     db_ok = app.state.db is not None
     return {"ok": True, "service": "llm-manager-backend", "node": NODE, "db": db_ok}
+
+
+# ── Auth ──────────────────────────────────────────────────────────────────────
+
+@app.get("/auth/login")
+async def auth_login():
+    """Redirect to GitHub OAuth authorization page."""
+    if not GITHUB_CLIENT_ID:
+        raise HTTPException(500, "GitHub OAuth not configured")
+    params = f"client_id={GITHUB_CLIENT_ID}&scope=read:user"
+    return RedirectResponse(f"https://github.com/login/oauth/authorize?{params}")
+
+
+@app.get("/auth/callback")
+async def auth_callback(code: str = ""):
+    """Handle GitHub OAuth callback."""
+    if not code:
+        raise HTTPException(400, "Missing code parameter")
+
+    username = await exchange_code_for_user(code)
+    if not username:
+        raise HTTPException(401, "GitHub authentication failed")
+
+    if username != GITHUB_ALLOWED_USER:
+        logger.warning("Login rejected for GitHub user: %s", username)
+        raise HTTPException(403, f"User '{username}' is not authorized")
+
+    logger.info("Admin login: %s", username)
+    token = create_session_token(username)
+    response = RedirectResponse(UI_ORIGIN, status_code=302)
+    response.set_cookie(
+        key=COOKIE_NAME,
+        value=token,
+        max_age=SESSION_TTL,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+    )
+    return response
+
+
+@app.get("/auth/me")
+async def auth_me(request: Request):
+    """Return current authenticated user, or 401."""
+    user = get_current_user(request)
+    if not user:
+        raise HTTPException(401, "Not authenticated")
+    return {"user": user, "admin": user == GITHUB_ALLOWED_USER}
+
+
+@app.get("/auth/logout")
+async def auth_logout():
+    """Clear the session cookie."""
+    response = RedirectResponse(UI_ORIGIN, status_code=302)
+    response.delete_cookie(COOKIE_NAME)
+    return response
+
+
+# ── Public stats (no auth required) ──────────────────────────────────────────
+
+@app.get("/api/stats")
+async def public_stats():
+    """Aggregate stats visible without auth. No model names or app details."""
+    pool = app.state.db
+    gpu = {"name": "Unknown", "vram_total_gb": 0, "vram_used_gb": 0, "vram_free_gb": 0}
+    loaded_count = 0
+
+    try:
+        client = await _get_runner_client(pool)
+        status = await client.status()
+        total = status.get("gpu_vram_total_gb", 0)
+        used = status.get("gpu_vram_used_gb", 0)
+        gpu = {
+            "vram_total_gb": round(total, 2),
+            "vram_used_gb": round(used, 2),
+            "vram_free_gb": round(total - used, 2),
+        }
+        loaded_count = len(status.get("loaded_ollama_models", []))
+    except Exception:
+        pass
+
+    app_count = 0
+    try:
+        apps_list = await get_apps(pool)
+        app_count = len([a for a in apps_list if a.get("status") == "active"])
+    except Exception:
+        pass
+
+    runner_count = 0
+    try:
+        runners = await db.get_active_runners(pool)
+        runner_count = len(runners)
+    except Exception:
+        pass
+
+    return {
+        "gpu": gpu,
+        "active_models": loaded_count,
+        "connected_apps": app_count,
+        "active_runners": runner_count,
+    }
 
 
 # ── GPU info (proxied from active runner) ────────────────────────────────────

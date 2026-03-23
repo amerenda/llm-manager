@@ -3,7 +3,7 @@ import type { LlmStatus, LlmModel, RegisteredApp, Agent, Runner, Profile, Profil
 
 // nginx proxies /api to the backend service
 async function get<T>(path: string): Promise<T> {
-  const r = await fetch(path)
+  const r = await fetch(path, { credentials: 'include' })
   if (!r.ok) throw new Error(`${r.status} ${await r.text()}`)
   return r.json()
 }
@@ -11,6 +11,7 @@ async function get<T>(path: string): Promise<T> {
 async function post<T>(path: string, body?: unknown): Promise<T> {
   const r = await fetch(path, {
     method: 'POST',
+    credentials: 'include',
     headers: body ? { 'Content-Type': 'application/json' } : {},
     body: body ? JSON.stringify(body) : undefined,
   })
@@ -21,6 +22,7 @@ async function post<T>(path: string, body?: unknown): Promise<T> {
 async function patch<T>(path: string, body?: unknown): Promise<T> {
   const r = await fetch(path, {
     method: 'PATCH',
+    credentials: 'include',
     headers: body ? { 'Content-Type': 'application/json' } : {},
     body: body ? JSON.stringify(body) : undefined,
   })
@@ -29,9 +31,40 @@ async function patch<T>(path: string, body?: unknown): Promise<T> {
 }
 
 async function del<T>(path: string): Promise<T> {
-  const r = await fetch(path, { method: 'DELETE' })
+  const r = await fetch(path, { method: 'DELETE', credentials: 'include' })
   if (!r.ok) throw new Error(`${r.status} ${await r.text()}`)
   return r.json()
+}
+
+// ── Auth ──────────────────────────────────────────────────────────────────────
+
+export interface AuthUser {
+  user: string
+  admin: boolean
+}
+
+export interface PublicStats {
+  gpu: { vram_total_gb: number; vram_used_gb: number; vram_free_gb: number }
+  active_models: number
+  connected_apps: number
+  active_runners: number
+}
+
+export function useAuth() {
+  return useQuery<AuthUser>({
+    queryKey: ['auth'],
+    queryFn: () => get('/auth/me'),
+    retry: false,
+    refetchOnWindowFocus: true,
+  })
+}
+
+export function usePublicStats() {
+  return useQuery<PublicStats>({
+    queryKey: ['public-stats'],
+    queryFn: () => get('/api/stats'),
+    refetchInterval: 10_000,
+  })
 }
 
 // ── LLM Status ────────────────────────────────────────────────────────────────
