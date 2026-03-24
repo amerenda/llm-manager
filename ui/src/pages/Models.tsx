@@ -277,6 +277,7 @@ function LibraryBrowserSection() {
   const [search, setSearch] = useState('')
   const [safety, setSafety] = useState<string>('safe')
   const [fitsOnly, setFitsOnly] = useState(true)
+  const [hideDownloaded, setHideDownloaded] = useState(true)
   const [sort, setSort] = useState<string>('pulls')
   const pull = usePullModel()
   const refresh = useRefreshLibrary()
@@ -286,6 +287,7 @@ function LibraryBrowserSection() {
     search: search || undefined,
     safety,
     fits: fitsOnly || undefined,
+    downloaded: hideDownloaded ? false : undefined,
   })
 
   // Client-side sort (API also sorts, but this is instant for filter changes)
@@ -347,6 +349,17 @@ function LibraryBrowserSection() {
             className="w-full bg-gray-900 border border-gray-800 rounded-lg pl-8 pr-3 py-2 text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:border-brand-600"
           />
         </div>
+        <button
+          onClick={() => setHideDownloaded(!hideDownloaded)}
+          className={`flex items-center gap-1 text-xs px-2.5 py-2 rounded-lg transition-colors ${
+            hideDownloaded
+              ? 'bg-brand-900/40 text-brand-400 border border-brand-800'
+              : 'bg-gray-900 text-gray-400 border border-gray-800'
+          }`}
+        >
+          <Download className="w-3 h-3" />
+          {hideDownloaded ? 'Not downloaded' : 'All'}
+        </button>
         <button
           onClick={() => setFitsOnly(!fitsOnly)}
           className={`flex items-center gap-1 text-xs px-2.5 py-2 rounded-lg transition-colors ${
