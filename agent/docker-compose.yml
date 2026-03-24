@@ -1,3 +1,5 @@
+# Default compose file — NVIDIA GPU hosts (e.g. murderbot).
+# For AMD GPU hosts, use docker-compose.amd.yml instead.
 services:
   llm-agent:
     build: .
