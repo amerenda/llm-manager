@@ -183,21 +183,28 @@ class TestAuthEnforcement:
         resp = unauthed_client.get("/api/stats")
         assert resp.status_code == 200
 
-    def test_gpu_requires_auth(self, unauthed_client):
+    def test_gpu_public_no_auth(self, unauthed_client):
+        """GPU info is public (used by ecdysis)."""
         resp = unauthed_client.get("/api/gpu")
-        assert resp.status_code == 401
+        assert resp.status_code == 200
 
-    def test_models_requires_auth(self, unauthed_client):
+    def test_models_public_no_auth(self, unauthed_client):
+        """Model list is public (used by ecdysis config)."""
         resp = unauthed_client.get("/api/models")
-        assert resp.status_code == 401
+        # 200 or empty — depends on runner availability, but not 401
+        assert resp.status_code != 401
 
     def test_apps_requires_auth(self, unauthed_client):
         resp = unauthed_client.get("/api/apps")
         assert resp.status_code == 401
 
-    def test_gpu_works_with_auth(self, client):
-        resp = client.get("/api/gpu")
-        assert resp.status_code == 200
+    def test_cloud_keys_requires_auth(self, unauthed_client):
+        resp = unauthed_client.get("/api/cloud/keys")
+        assert resp.status_code == 401
+
+    def test_cloud_models_requires_auth(self, unauthed_client):
+        resp = unauthed_client.get("/api/cloud/models")
+        assert resp.status_code == 401
 
 
 class TestGpuEndpoint:
