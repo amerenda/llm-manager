@@ -1,5 +1,5 @@
 """
-LLM Agent — runs on the GPU host (murderbot).
+LLM Agent — runs on GPU hosts (NVIDIA or AMD).
 Wraps Ollama and ComfyUI, exposes HTTPS API + Prometheus metrics.
 Port 8090.  Self-signed TLS cert is generated on startup.
 """
@@ -34,12 +34,25 @@ from prometheus_client import (
 )
 from pydantic import BaseModel
 
+# ── GPU backend detection (NVIDIA via pynvml, AMD via amdsmi) ────────────────
+_GPU_BACKEND = "none"  # "nvidia", "amd", or "none"
+
 try:
     import pynvml
     pynvml.nvmlInit()
-    _NVML_OK = True
+    _GPU_BACKEND = "nvidia"
 except Exception:
-    _NVML_OK = False
+    pass
+
+if _GPU_BACKEND == "none":
+    try:
+        import amdsmi
+        amdsmi.amdsmi_init()
+        _amd_handles = amdsmi.amdsmi_get_processor_handles()
+        if _amd_handles:
+            _GPU_BACKEND = "amd"
+    except Exception:
+        pass
 
 logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
@@ -234,6 +247,7 @@ async def _build_capabilities() -> dict:
     loaded = await _ollama_loaded_models()
     comfyui_ok = await _comfyui_ok()
     caps = {
+        "gpu_vendor": gpu.get("gpu_vendor", "none"),
         "gpu_vram_total_bytes": gpu["vram_total_bytes"],
         "gpu_vram_used_bytes": gpu["vram_used_bytes"],
         "gpu_vram_free_bytes": max(0, gpu["vram_total_bytes"] - gpu["vram_used_bytes"]),
@@ -289,19 +303,36 @@ async def psk_auth(request: Request, call_next):
 # ── GPU helpers ───────────────────────────────────────────────────────────────
 
 def _gpu_stats() -> dict:
-    if not _NVML_OK:
-        return {"vram_used_bytes": 0, "vram_total_bytes": 0, "vram_pct": 0.0}
-    try:
-        handle = pynvml.nvmlDeviceGetHandleByIndex(0)
-        info = pynvml.nvmlDeviceGetMemoryInfo(handle)
-        pct = round(info.used / info.total * 100, 1) if info.total else 0.0
-        return {
-            "vram_used_bytes": info.used,
-            "vram_total_bytes": info.total,
-            "vram_pct": pct,
-        }
-    except Exception:
-        return {"vram_used_bytes": 0, "vram_total_bytes": 0, "vram_pct": 0.0}
+    _zero = {"vram_used_bytes": 0, "vram_total_bytes": 0, "vram_pct": 0.0, "gpu_vendor": _GPU_BACKEND}
+    if _GPU_BACKEND == "nvidia":
+        try:
+            handle = pynvml.nvmlDeviceGetHandleByIndex(0)
+            info = pynvml.nvmlDeviceGetMemoryInfo(handle)
+            pct = round(info.used / info.total * 100, 1) if info.total else 0.0
+            return {
+                "vram_used_bytes": info.used,
+                "vram_total_bytes": info.total,
+                "vram_pct": pct,
+                "gpu_vendor": "nvidia",
+            }
+        except Exception:
+            return _zero
+    elif _GPU_BACKEND == "amd":
+        try:
+            handle = _amd_handles[0]
+            vram_info = amdsmi.amdsmi_get_gpu_vram_usage(handle)
+            used = vram_info["vram_used"]
+            total = vram_info["vram_total"]
+            pct = round(used / total * 100, 1) if total else 0.0
+            return {
+                "vram_used_bytes": used,
+                "vram_total_bytes": total,
+                "vram_pct": pct,
+                "gpu_vendor": "amd",
+            }
+        except Exception:
+            return _zero
+    return _zero
 
 
 def _sys_stats() -> dict:
@@ -401,7 +432,7 @@ async def _comfyui_active_checkpoint() -> Optional[str]:
 async def health():
     ollama_up = await _ollama_ok()
     comfyui_up = await _comfyui_ok()
-    return {"ok": True, "node": NODE, "ollama": ollama_up, "comfyui": comfyui_up}
+    return {"ok": True, "node": NODE, "gpu_vendor": _GPU_BACKEND, "ollama": ollama_up, "comfyui": comfyui_up}
 
 
 @app.get("/v1/status")
@@ -420,6 +451,7 @@ async def status():
 
     return {
         "node": NODE,
+        "gpu_vendor": gpu.get("gpu_vendor", "none"),
         "gpu_vram_used_bytes": gpu["vram_used_bytes"],
         "gpu_vram_total_bytes": gpu["vram_total_bytes"],
         "gpu_vram_pct": gpu["vram_pct"],

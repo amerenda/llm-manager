@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # install.sh — Install and configure the llm-agent on the GPU host.
+# Auto-detects NVIDIA or AMD GPU and uses the appropriate compose file.
 # Run as root or a user with sudo and docker access.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SERVICE_NAME="llm-agent"
-COMPOSE_FILE="$SCRIPT_DIR/docker-compose.yml"
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -22,30 +22,75 @@ die()  { echo -e "${RED}[error]${NC} $*" >&2; exit 1; }
 log "Checking dependencies..."
 
 command -v docker >/dev/null 2>&1 || die "Docker is not installed. Install from https://docs.docker.com/engine/install/"
-
-# Check Docker is running
 docker info >/dev/null 2>&1 || die "Docker daemon is not running. Start it with: sudo systemctl start docker"
 
-# Check nvidia-container-toolkit (for GPU passthrough)
-if ! docker run --rm --gpus all nvidia/cuda:12.0-base-ubuntu22.04 nvidia-smi >/dev/null 2>&1; then
-    warn "nvidia-container-toolkit may not be installed or GPU unavailable."
-    warn "Install it from: https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html"
-    warn "Continuing anyway — agent will run without GPU metrics."
-fi
+# ── Detect GPU vendor ────────────────────────────────────────────────────────
 
-# Check nvidia-smi on host
-if command -v nvidia-smi >/dev/null 2>&1; then
+GPU_VENDOR="none"
+
+# Check for AMD first via device nodes (more reliable than CLI tools which
+# can be installed without matching hardware, e.g. nvidia-smi from Ollama deps).
+if [[ -e /dev/kfd ]] && [[ -d /dev/dri ]]; then
+    GPU_VENDOR="amd"
+    log "AMD GPU detected (ROCm devices present)"
+    if command -v rocm-smi >/dev/null 2>&1; then
+        rocm-smi --showproductname 2>/dev/null || true
+    fi
+elif command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi --query-gpu=name --format=csv,noheader >/dev/null 2>&1; then
+    GPU_VENDOR="nvidia"
     log "NVIDIA GPU detected:"
     nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 else
-    warn "nvidia-smi not found on host. GPU metrics may be unavailable."
+    warn "No GPU detected. Agent will run without GPU metrics."
 fi
 
-# ── Verify model directories ───────────────────────────────────────────────────
+log "GPU vendor: $GPU_VENDOR"
 
-if [[ ! -d /opt/models ]]; then
-    warn "/opt/models does not exist. Creating it."
-    sudo mkdir -p /opt/models/checkpoints /opt/models/lora /opt/models/vae
+# ── Select compose file ──────────────────────────────────────────────────────
+
+if [[ "$GPU_VENDOR" == "amd" ]]; then
+    COMPOSE_FILE="$SCRIPT_DIR/docker-compose.amd.yml"
+    log "Using AMD compose file: docker-compose.amd.yml"
+else
+    COMPOSE_FILE="$SCRIPT_DIR/docker-compose.yml"
+    log "Using NVIDIA compose file: docker-compose.yml"
+fi
+
+# ── Verify GPU toolkit (vendor-specific) ─────────────────────────────────────
+
+if [[ "$GPU_VENDOR" == "nvidia" ]]; then
+    if ! docker run --rm --gpus all nvidia/cuda:12.0-base-ubuntu22.04 nvidia-smi >/dev/null 2>&1; then
+        warn "nvidia-container-toolkit may not be installed or GPU unavailable."
+        warn "Install it from: https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html"
+        warn "Continuing anyway — agent will run without GPU metrics."
+    fi
+elif [[ "$GPU_VENDOR" == "amd" ]]; then
+    if [[ ! -e /dev/kfd ]]; then
+        warn "/dev/kfd not found — ROCm kernel driver may not be loaded."
+        warn "Install ROCm: https://rocm.docs.amd.com/en/latest/deploy/linux/installer/install.html"
+    fi
+    # Verify user is in video/render groups
+    if ! groups | grep -qE '\b(video|render)\b'; then
+        warn "Current user is not in video/render groups. Adding..."
+        sudo usermod -aG render,video "$USER"
+        warn "You may need to log out and back in for group changes to take effect."
+    fi
+fi
+
+# ── Verify .env ──────────────────────────────────────────────────────────────
+
+if [[ ! -f "$SCRIPT_DIR/.env" ]]; then
+    if [[ -f "$SCRIPT_DIR/.env.example" ]]; then
+        cp "$SCRIPT_DIR/.env.example" "$SCRIPT_DIR/.env"
+        warn ".env created from .env.example — edit it and set LLM_MANAGER_AGENT_PSK before continuing."
+        warn "Get the PSK from Bitwarden: llm-manager-agent-psk"
+        echo ""
+        echo "  $EDITOR $SCRIPT_DIR/.env"
+        echo ""
+        die "Edit .env and re-run this script."
+    else
+        die ".env file not found and no .env.example to copy from."
+    fi
 fi
 
 # ── Build and start the container ─────────────────────────────────────────────
@@ -64,7 +109,7 @@ log "Creating systemd service at $SYSTEMD_UNIT ..."
 
 sudo tee "$SYSTEMD_UNIT" > /dev/null <<EOF
 [Unit]
-Description=LLM Agent (Ollama + ComfyUI proxy)
+Description=LLM Agent (Ollama proxy — ${GPU_VENDOR} GPU)
 Requires=docker.service
 After=docker.service network-online.target
 Wants=network-online.target
@@ -90,26 +135,26 @@ log "Systemd service '${SERVICE_NAME}' enabled for auto-start on boot."
 
 log "Waiting for llm-agent to become healthy..."
 for i in $(seq 1 30); do
-    if curl -sf http://localhost:8090/health >/dev/null 2>&1; then
+    if curl -sf https://localhost:8090/health --insecure >/dev/null 2>&1; then
         log "llm-agent is up!"
-        curl -s http://localhost:8090/health | python3 -m json.tool
+        curl -s https://localhost:8090/health --insecure | python3 -m json.tool
         break
     fi
     echo -n "."
     sleep 2
 done
 
-if ! curl -sf http://localhost:8090/health >/dev/null 2>&1; then
+if ! curl -sf https://localhost:8090/health --insecure >/dev/null 2>&1; then
     warn "Agent didn't respond after 60s. Check logs with: docker logs llm-agent"
 fi
 
 echo ""
-log "Installation complete!"
+log "Installation complete! (GPU: $GPU_VENDOR)"
 echo ""
-echo "  Health:  http://localhost:8090/health"
-echo "  Status:  http://localhost:8090/v1/status"
-echo "  Models:  http://localhost:8090/v1/models"
-echo "  Metrics: http://localhost:8090/metrics"
+echo "  Health:  https://localhost:8090/health"
+echo "  Status:  https://localhost:8090/v1/status"
+echo "  Models:  https://localhost:8090/v1/models"
+echo "  Metrics: https://localhost:8090/metrics"
 echo ""
 echo "  View logs:    docker logs -f llm-agent"
 echo "  Stop:         docker compose -f $COMPOSE_FILE down"

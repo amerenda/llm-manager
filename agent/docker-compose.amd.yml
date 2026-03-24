@@ -1,0 +1,25 @@
+# Compose file for AMD GPU hosts (e.g. archlinux with RX 9070).
+# Uses /dev/kfd and /dev/dri for ROCm GPU passthrough instead of nvidia-container-toolkit.
+# amdsmi is installed in the container for VRAM monitoring.
+services:
+  llm-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile.amd
+    container_name: llm-agent
+    network_mode: host
+    restart: unless-stopped
+    env_file:
+      - .env
+    devices:
+      - /dev/kfd:/dev/kfd
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
+      - render
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./tls:/data/tls
+    environment:
+      - OLLAMA_URL=http://localhost:11434
+      - HSA_OVERRIDE_GFX_VERSION=11.0.0

@@ -7,3 +7,6 @@ prometheus-client
 python-multipart
 docker
 cryptography
+# AMD GPU monitoring — only needed on AMD hosts, ignored if not installed
+# Install via: pip install amdsmi (requires ROCm runtime on the host)
+# amdsmi
