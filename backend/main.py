@@ -388,31 +388,30 @@ async def models_for_agents():
                 total = caps.get("gpu_vram_total_bytes", 0) / (1024**3)
                 runner_vram[r["hostname"]] = round(total, 1)
 
-        # Get models from the first runner's Ollama
-        ollama_base = await _get_runner_ollama_base(pool)
-        async with httpx.AsyncClient(timeout=10) as c:
-            r = await c.get(f"{ollama_base}/api/tags")
-            r.raise_for_status()
-            data = r.json()
-
-        # Get loaded models
+        # Get models from ALL runners' Ollama instances
+        all_models_map: dict = {}  # name -> model dict
         loaded_names = set()
-        try:
-            async with httpx.AsyncClient(timeout=10) as c:
-                ps_resp = await c.get(f"{ollama_base}/api/ps")
-                if ps_resp.status_code == 200:
-                    for lm in ps_resp.json().get("models", []):
-                        loaded_names.add(lm["name"])
-        except Exception:
-            pass
+        for runner in runners_list:
+            try:
+                ollama_base = await _get_runner_ollama_base(pool, runner["id"])
+                async with httpx.AsyncClient(timeout=10) as c:
+                    r = await c.get(f"{ollama_base}/api/tags")
+                    if r.status_code == 200:
+                        for m in r.json().get("models", []):
+                            all_models_map[m.get("name", "")] = m
+                    ps_resp = await c.get(f"{ollama_base}/api/ps")
+                    if ps_resp.status_code == 200:
+                        for lm in ps_resp.json().get("models", []):
+                            loaded_names.add(lm["name"])
+            except Exception:
+                pass
 
         # Classify safety
-        model_names = [m.get("name", "") for m in data.get("models", [])]
+        model_names = list(all_models_map.keys())
         safety_map = await classify_models_batch(pool, model_names)
 
         models = []
-        for m in data.get("models", []):
-            name = m.get("name", "")
+        for name, m in all_models_map.items():
             size_gb = round(m.get("size", 0) / 1e9, 2)
             vram_est = round(vram_for_model(name), 2)
             fits_on = [
