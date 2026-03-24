@@ -18,14 +18,17 @@ jobs:
     runs-on: [self-hosted, mac-mini]
     steps:
       - uses: actions/checkout@v6
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
       - name: Install dependencies
         run: |
           cd backend
-          pip3 install -q -r requirements.txt -r requirements-test.txt
+          pip install -q -r requirements.txt -r requirements-test.txt
       - name: Run tests
         run: |
           cd backend
-          python3 -m pytest test_backend.py test_queue.py -v
+          python -m pytest test_backend.py test_queue.py -v
 
   build:
     name: Build and Push
