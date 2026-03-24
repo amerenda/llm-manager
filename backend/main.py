@@ -204,6 +204,10 @@ _PUBLIC_PREFIXES = (
     "/api/queue/submit",       # Job submission (app API key)
     "/api/profiles/list",      # App profile discovery (API key auth)
     "/api/queue/status",       # Queue overview
+    "/api/agents",             # Ecdysis agent management (behind its own Tailscale ingress)
+    "/api/gpu",                # GPU info (used by ecdysis)
+    "/api/models",             # Model list (used by ecdysis config)
+    "/api/vram-check",         # VRAM check (used by ecdysis)
 )
 
 
