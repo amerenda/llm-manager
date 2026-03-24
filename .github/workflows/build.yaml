@@ -15,7 +15,7 @@ env:
 jobs:
   test:
     name: Run Tests
-    runs-on: arc-runner-set
+    runs-on: [self-hosted, mac-mini]
     steps:
       - name: Docker Hub login
         run: echo "${DOCKERHUB_TOKEN}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin
@@ -31,7 +31,7 @@ jobs:
     name: Build and Push
     needs: test
     if: github.event_name != 'pull_request'
-    runs-on: arc-runner-set
+    runs-on: [self-hosted, mac-mini]
     steps:
       - uses: actions/checkout@v6
 
