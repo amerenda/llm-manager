@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 Tests for the LLM Manager backend.
 Covers gpu.py helpers, config.py reconstruction, and FastAPI endpoints.

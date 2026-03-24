@@ -5,6 +5,8 @@ profiles, profile_model_entries, profile_image_entries,
 profile_activations, app_allowed_models, ollama_library_cache,
 model_safety_tags, library_cache_meta.
 """
+from __future__ import annotations
+
 import json
 import secrets
 import logging

@@ -5,6 +5,8 @@ Keys are encrypted with Fernet (AES-128-CBC + HMAC) before storage in
 PostgreSQL. The encryption key comes from the API_KEY_ENCRYPTION_KEY
 env var, delivered via ExternalSecret.
 """
+from __future__ import annotations
+
 import logging
 import os
 from typing import Optional

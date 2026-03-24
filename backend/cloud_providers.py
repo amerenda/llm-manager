@@ -4,6 +4,8 @@ Cloud model providers for llm-manager.
 Translates OpenAI-compatible chat requests to provider-native APIs
 and back. Currently supports Anthropic (Claude).
 """
+from __future__ import annotations
+
 import logging
 import os
 import time

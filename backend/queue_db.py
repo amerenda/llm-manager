@@ -6,6 +6,8 @@ import asyncpg
 logger = logging.getLogger(__name__)
 
 QUEUE_TABLES_SQL = """
+from __future__ import annotations
+
 CREATE TABLE IF NOT EXISTS queue_jobs (
     id TEXT PRIMARY KEY,
     batch_id TEXT,

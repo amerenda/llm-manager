@@ -4,6 +4,8 @@ Ollama library scraper and model classification.
 Scrapes https://ollama.com/library for the model catalog,
 caches in postgres, classifies models as safe/unsafe.
 """
+from __future__ import annotations
+
 import asyncio
 import fnmatch
 import logging

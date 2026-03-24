@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 """
 Tests for the queue system: models, DB operations, scheduler, and routes.
 Covers queue_models.py, queue_db.py, scheduler.py, and queue_routes.py.
