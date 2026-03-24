@@ -61,12 +61,6 @@ spec:
                   key: secret
             - name: GITHUB_ALLOWED_USERS
               value: "amerenda"
-            - name: ANTHROPIC_API_KEY
-              valueFrom:
-                secretKeyRef:
-                  name: anthropic-api-key
-                  key: api-key
-                  optional: true
             - name: API_KEY_ENCRYPTION_KEY
               valueFrom:
                 secretKeyRef:
