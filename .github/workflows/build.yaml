@@ -21,11 +21,12 @@ jobs:
       - name: Install dependencies
         run: |
           cd backend
-          pip3 install -q -r requirements.txt -r requirements-test.txt
+          python3 -m venv .venv
+          .venv/bin/pip install -q -r requirements.txt -r requirements-test.txt
       - name: Run tests
         run: |
           cd backend
-          python3 -m pytest test_backend.py test_queue.py -v
+          .venv/bin/python -m pytest test_backend.py test_queue.py -v
 
   build:
     name: Build and Push
