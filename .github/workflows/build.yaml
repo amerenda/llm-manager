@@ -17,15 +17,18 @@ jobs:
     name: Run Tests
     runs-on: [self-hosted, mac-mini]
     steps:
-      - name: Docker Hub login
-        run: echo "${DOCKERHUB_TOKEN}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin
       - uses: actions/checkout@v6
-      - name: Run tests in container
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
         run: |
-          docker run --rm -v "$PWD/backend:/app" -w /app python:3.12-slim bash -c "
-            pip install -q -r requirements.txt -r requirements-test.txt &&
-            python -m pytest test_backend.py test_queue.py -v
-          "
+          cd backend
+          pip install -r requirements.txt -r requirements-test.txt
+      - name: Run tests
+        run: |
+          cd backend
+          python -m pytest test_backend.py test_queue.py -v
 
   build:
     name: Build and Push
