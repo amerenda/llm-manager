@@ -1,6 +1,6 @@
 import { useState } from 'react'
-import { AppWindow, Plus, Loader2, CheckCircle2, AlertCircle, Copy, Check, Shield, RefreshCw, Cpu, X } from 'lucide-react'
-import { useApps, useRegisterApp, useApproveApp, useUpdateAppPermissions, useUpdateAppAllowedModels, useLlmModels } from '../hooks/useBackend'
+import { AppWindow, Plus, Loader2, CheckCircle2, AlertCircle, Copy, Check, Shield, RefreshCw, Cpu, X, Cloud } from 'lucide-react'
+import { useApps, useRegisterApp, useApproveApp, useUpdateAppPermissions, useUpdateAppAllowedModels, useLlmModels, useCloudModels } from '../hooks/useBackend'
 import { StatusDot } from '../components/StatusDot'
 import type { RegisteredApp } from '../types'
 
@@ -45,17 +45,50 @@ function CopyButton({ text }: { text: string }) {
 function ModelRestrictionEditor({ appId, currentModels }: { appId: number; currentModels: string[] }) {
   const [open, setOpen] = useState(false)
   const [selected, setSelected] = useState<string[]>(currentModels)
+  const [customPattern, setCustomPattern] = useState('')
   const updateModels = useUpdateAppAllowedModels()
   const llmModels = useLlmModels()
+  const cloudModels = useCloudModels()
 
-  const availableModels = llmModels.data?.map((m: { id: string }) => m.id) ?? []
-  // Also show models that are in the allowed list but not currently downloaded
-  const allModels = [...new Set([...availableModels, ...selected])]
+  const localModels = llmModels.data?.map((m: { id: string; safety: string }) => ({ id: m.id, safety: m.safety })) ?? []
+  const cloudModelList = cloudModels.data?.filter((m: { enabled: boolean }) => m.enabled).map((m: { id: string }) => m.id) ?? []
+
+  // Separate custom patterns from specific model selections
+  const knownModels = new Set([...localModels.map(m => m.id), ...cloudModelList])
+  const customPatterns = selected.filter(s => !knownModels.has(s) && (s.includes('*') || s.includes('?')))
 
   function toggle(model: string) {
     setSelected(prev =>
       prev.includes(model) ? prev.filter(m => m !== model) : [...prev, model]
     )
+  }
+
+  function addPattern() {
+    const p = customPattern.trim()
+    if (p && !selected.includes(p)) {
+      setSelected(prev => [...prev, p])
+      setCustomPattern('')
+    }
+  }
+
+  function applyPreset(preset: 'unrestricted' | 'safe-local' | 'all-local' | 'safe-all') {
+    const safeLocal = localModels.filter(m => m.safety !== 'unsafe').map(m => m.id)
+    const allLocal = localModels.map(m => m.id)
+
+    switch (preset) {
+      case 'unrestricted':
+        setSelected([])
+        break
+      case 'safe-local':
+        setSelected(safeLocal)
+        break
+      case 'all-local':
+        setSelected(allLocal)
+        break
+      case 'safe-all':
+        setSelected([...safeLocal, ...cloudModelList])
+        break
+    }
   }
 
   function save() {
@@ -64,22 +97,15 @@ function ModelRestrictionEditor({ appId, currentModels }: { appId: number; curre
     })
   }
 
-  function setUnrestricted() {
-    updateModels.mutate({ appId, allowed_models: [] }, {
-      onSuccess: () => {
-        setSelected([])
-        setOpen(false)
-      },
-    })
-  }
-
   const isUnrestricted = currentModels.length === 0
+  const hasCloud = currentModels.some(m => m.startsWith('claude-'))
+  const modelCount = currentModels.length
 
   if (!open) {
     return (
       <button
         onClick={() => { setSelected(currentModels); setOpen(true) }}
-        title={isUnrestricted ? 'All models allowed' : `${currentModels.length} model(s) allowed`}
+        title={isUnrestricted ? 'All safe local models (no cloud)' : `${modelCount} model pattern(s)`}
         className={`flex items-center gap-1 text-xs px-2 py-1 rounded-lg transition-colors ${
           isUnrestricted
             ? 'bg-gray-800 text-gray-500 border border-gray-700 hover:border-gray-600'
@@ -87,57 +113,166 @@ function ModelRestrictionEditor({ appId, currentModels }: { appId: number; curre
         }`}
       >
         <Cpu className="w-3 h-3" />
-        {isUnrestricted ? 'All models' : `${currentModels.length} model${currentModels.length !== 1 ? 's' : ''}`}
+        {isUnrestricted ? 'Safe local' : `${modelCount} model${modelCount !== 1 ? 's' : ''}`}
+        {hasCloud && <Cloud className="w-3 h-3 text-indigo-400" />}
       </button>
     )
   }
 
   return (
     <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={() => setOpen(false)}>
-      <div className="bg-gray-900 border border-gray-700 rounded-xl p-5 w-96 max-h-[70vh] flex flex-col" onClick={e => e.stopPropagation()}>
+      <div className="bg-gray-900 border border-gray-700 rounded-xl p-5 w-[28rem] max-h-[80vh] flex flex-col" onClick={e => e.stopPropagation()}>
         <div className="flex items-center justify-between mb-4">
-          <h3 className="text-sm font-semibold text-gray-200">Allowed Models</h3>
+          <h3 className="text-sm font-semibold text-gray-200">Model Access</h3>
           <button onClick={() => setOpen(false)} className="text-gray-500 hover:text-gray-300">
             <X className="w-4 h-4" />
           </button>
         </div>
 
-        <p className="text-xs text-gray-500 mb-3">
-          Select which models this app can use. Empty selection means unrestricted access.
-        </p>
-
-        <div className="flex-1 overflow-y-auto space-y-1.5 mb-4">
-          {allModels.length === 0 ? (
-            <p className="text-xs text-gray-600 py-4 text-center">No models downloaded on any runner</p>
-          ) : (
-            allModels.sort().map(model => (
-              <label key={model} className="flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-gray-800 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={selected.includes(model)}
-                  onChange={() => toggle(model)}
-                  className="rounded border-gray-600 bg-gray-800 text-brand-500 focus:ring-brand-600"
-                />
-                <span className="text-sm text-gray-300 font-mono">{model}</span>
-              </label>
-            ))
-          )}
+        {/* Presets */}
+        <div className="mb-4">
+          <p className="text-[10px] text-gray-500 uppercase tracking-wide mb-2">Quick presets</p>
+          <div className="flex gap-1.5 flex-wrap">
+            {[
+              { id: 'unrestricted' as const, label: 'Safe local only', desc: 'Default — all safe local models, no cloud' },
+              { id: 'safe-local' as const, label: 'Safe local (explicit)', desc: 'Same but listed explicitly' },
+              { id: 'all-local' as const, label: 'All local', desc: 'Including unsafe models' },
+              { id: 'safe-all' as const, label: 'Safe + Cloud', desc: 'Safe local + all cloud models' },
+            ].map(p => (
+              <button
+                key={p.id}
+                onClick={() => applyPreset(p.id)}
+                title={p.desc}
+                className="text-xs px-2.5 py-1.5 rounded-lg bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200 transition-colors"
+              >
+                {p.label}
+              </button>
+            ))}
+          </div>
         </div>
 
-        <div className="flex gap-2">
-          <button
-            onClick={setUnrestricted}
-            className="flex-1 text-xs px-3 py-2 rounded-lg bg-gray-800 text-gray-400 hover:bg-gray-700 transition-colors"
-          >
-            Unrestricted
-          </button>
-          <button
-            onClick={save}
-            disabled={updateModels.isPending}
-            className="flex-1 text-xs px-3 py-2 rounded-lg bg-brand-600 text-white hover:bg-brand-500 disabled:opacity-40 transition-colors"
-          >
-            {updateModels.isPending ? 'Saving...' : `Save (${selected.length})`}
-          </button>
+        <div className="flex-1 overflow-y-auto space-y-4 mb-4">
+          {/* Local models */}
+          <div>
+            <p className="text-[10px] text-gray-500 uppercase tracking-wide mb-1.5 flex items-center gap-1">
+              <Cpu className="w-3 h-3" /> Local models
+            </p>
+            <div className="space-y-1">
+              {localModels.length === 0 ? (
+                <p className="text-xs text-gray-600 py-2 text-center">No local models downloaded</p>
+              ) : (
+                localModels.sort((a, b) => a.id.localeCompare(b.id)).map(m => (
+                  <label key={m.id} className="flex items-center gap-2 px-3 py-1.5 rounded-lg hover:bg-gray-800 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={selected.includes(m.id)}
+                      onChange={() => toggle(m.id)}
+                      className="rounded border-gray-600 bg-gray-800 text-brand-500 focus:ring-brand-600"
+                    />
+                    <span className="text-sm text-gray-300 font-mono flex-1">{m.id}</span>
+                    {m.safety === 'unsafe' && (
+                      <span className="text-[10px] bg-red-900/40 text-red-400 px-1.5 py-0.5 rounded">unsafe</span>
+                    )}
+                  </label>
+                ))
+              )}
+            </div>
+          </div>
+
+          {/* Cloud models */}
+          <div>
+            <p className="text-[10px] text-gray-500 uppercase tracking-wide mb-1.5 flex items-center gap-1">
+              <Cloud className="w-3 h-3" /> Cloud models
+              <span className="text-gray-600">(denied by default)</span>
+            </p>
+            <div className="space-y-1">
+              {cloudModelList.length === 0 ? (
+                <p className="text-xs text-gray-600 py-2 text-center">No cloud models configured</p>
+              ) : (
+                cloudModelList.sort().map((id: string) => (
+                  <label key={id} className="flex items-center gap-2 px-3 py-1.5 rounded-lg hover:bg-gray-800 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={selected.includes(id)}
+                      onChange={() => toggle(id)}
+                      className="rounded border-gray-600 bg-gray-800 text-brand-500 focus:ring-brand-600"
+                    />
+                    <span className="text-sm text-gray-300 font-mono">{id}</span>
+                  </label>
+                ))
+              )}
+              {/* Wildcard shortcut */}
+              <label className="flex items-center gap-2 px-3 py-1.5 rounded-lg hover:bg-gray-800 cursor-pointer border border-dashed border-gray-700">
+                <input
+                  type="checkbox"
+                  checked={selected.includes('claude-*')}
+                  onChange={() => toggle('claude-*')}
+                  className="rounded border-gray-600 bg-gray-800 text-brand-500 focus:ring-brand-600"
+                />
+                <span className="text-sm text-gray-400 font-mono">claude-*</span>
+                <span className="text-[10px] text-gray-600">All current + future Claude models</span>
+              </label>
+            </div>
+          </div>
+
+          {/* Custom patterns */}
+          <div>
+            <p className="text-[10px] text-gray-500 uppercase tracking-wide mb-1.5">Custom patterns</p>
+            {customPatterns.length > 0 && (
+              <div className="space-y-1 mb-2">
+                {customPatterns.map(p => (
+                  <div key={p} className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-gray-800">
+                    <span className="text-sm text-gray-300 font-mono flex-1">{p}</span>
+                    <button onClick={() => toggle(p)} className="text-gray-500 hover:text-red-400">
+                      <X className="w-3 h-3" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={customPattern}
+                onChange={e => setCustomPattern(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && addPattern()}
+                placeholder="e.g. llama3.2:* or *:7b"
+                className="flex-1 bg-gray-950 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:border-brand-600 font-mono"
+              />
+              <button
+                onClick={addPattern}
+                disabled={!customPattern.trim()}
+                className="text-xs px-3 py-1.5 rounded-lg bg-gray-800 text-gray-400 hover:bg-gray-700 disabled:opacity-30 transition-colors"
+              >
+                Add
+              </button>
+            </div>
+            <p className="text-[10px] text-gray-600 mt-1">Glob patterns: * matches any, ? matches one character</p>
+          </div>
+        </div>
+
+        {/* Footer info + save */}
+        <div className="border-t border-gray-800 pt-3">
+          <p className="text-[10px] text-gray-600 mb-3">
+            {selected.length === 0
+              ? 'No restrictions — app gets all safe local models, no cloud access.'
+              : `${selected.length} pattern${selected.length !== 1 ? 's' : ''} — only matched models are accessible.`}
+          </p>
+          <div className="flex gap-2">
+            <button
+              onClick={() => { setSelected([]); save() }}
+              className="flex-1 text-xs px-3 py-2 rounded-lg bg-gray-800 text-gray-400 hover:bg-gray-700 transition-colors"
+            >
+              Reset to default
+            </button>
+            <button
+              onClick={save}
+              disabled={updateModels.isPending}
+              className="flex-1 text-xs px-3 py-2 rounded-lg bg-brand-600 text-white hover:bg-brand-500 disabled:opacity-40 transition-colors"
+            >
+              {updateModels.isPending ? 'Saving...' : 'Save'}
+            </button>
+          </div>
         </div>
       </div>
     </div>
