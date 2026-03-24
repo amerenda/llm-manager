@@ -209,6 +209,9 @@ _PUBLIC_PREFIXES = (
     "/api/gpu",                # GPU info (used by ecdysis)
     "/api/models",             # Model list (used by ecdysis config)
     "/api/vram-check",         # VRAM check (used by ecdysis)
+    "/api/llm/",               # LLM status, models, load/unload (UI + ecdysis)
+    "/api/ops",                # Background operations status
+    "/api/profiles",           # Profile management
 )
 
 
