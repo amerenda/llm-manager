@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { Download, Trash2, Loader2, CheckCircle2, AlertCircle, Image, Layers, Cpu, Upload, Shield, ShieldOff, Play, Square, Search, RefreshCw, BookOpen, Cloud, Settings2, Power } from 'lucide-react'
-import { useLlmModels, usePullModel, useDeleteModel, useCheckpoints, useSwitchCheckpoint, useLlmStatus, useLoadModel, useUnloadModel, useStartComfyui, useStopComfyui, useLibrary, useRefreshLibrary, useCloudModels, useCloudStatus, useUpdateCloudModel, useCloudKeys, useStoreCloudKey, useDeleteCloudKey } from '../hooks/useBackend'
-import type { LlmModel, LibraryModel } from '../types'
+import { useLlmModels, usePullModel, useDeleteModel, useCheckpoints, useSwitchCheckpoint, useLlmStatus, useLoadModel, useUnloadModel, useStartComfyui, useStopComfyui, useLibrary, useRefreshLibrary, useCloudModels, useCloudStatus, useUpdateCloudModel, useCloudKeys, useStoreCloudKey, useDeleteCloudKey, useRunners } from '../hooks/useBackend'
+import type { LlmModel, LibraryModel, Runner } from '../types'
 import type { CloudModel, StoredApiKey } from '../hooks/useBackend'
 
 function stripExt(filename: string): string {
@@ -28,9 +28,9 @@ function TextModelsSection() {
     if (!name) return
     setPullMsg(null)
     try {
-      const result = await pull.mutateAsync(name)
+      const result = await pull.mutateAsync({ model: name })
       if (result.ok) {
-        setPullMsg({ type: 'ok', text: `Pulled ${name}` })
+        setPullMsg({ type: 'ok', text: `Pulling ${name}...` })
         setPullInput('')
       } else {
         setPullMsg({ type: 'err', text: 'Pull returned not ok' })
@@ -273,7 +273,7 @@ function ImageModelsSection() {
   )
 }
 
-function LibraryBrowserSection() {
+function LibraryBrowserSection({ selectedRunner }: { selectedRunner?: number }) {
   const [search, setSearch] = useState('')
   const [safety, setSafety] = useState<string>('safe')
   const [fitsOnly, setFitsOnly] = useState(true)
@@ -305,15 +305,14 @@ function LibraryBrowserSection() {
     if (sort === 'vram') return a.vram_estimate_gb - b.vram_estimate_gb
     return a.name.localeCompare(b.name)
   })
-  const runners = library.data?.runners ?? []
   const cacheAge = library.data?.cache_age_hours ?? 0
 
   async function handlePull(model: string) {
     setPullMsg({ model, type: 'pulling', text: 'Pulling...' })
     try {
-      await pull.mutateAsync(model)
-      setPullMsg({ model, type: 'ok', text: 'Pulled!' })
-      setTimeout(() => setPullMsg(null), 3000)
+      await pull.mutateAsync({ model, runner_id: selectedRunner })
+      setPullMsg({ model, type: 'ok', text: 'Pulling in background' })
+      setTimeout(() => setPullMsg(null), 5000)
     } catch (e) {
       setPullMsg({ model, type: 'err', text: (e as Error).message })
     }
@@ -765,36 +764,54 @@ function CloudModelsSection() {
 
 export function Models() {
   const [tab, setTab] = useState<'local' | 'cloud'>('local')
+  const runners = useRunners()
+  const runnerList = runners.data ?? []
+  const [selectedRunner, setSelectedRunner] = useState<number | undefined>(undefined)
 
   return (
     <div className="space-y-6">
-      {/* Tab bar */}
-      <div className="flex gap-1 bg-gray-900 rounded-lg p-1 w-fit">
-        <button
-          onClick={() => setTab('local')}
-          className={`flex items-center gap-1.5 px-4 py-2 rounded-md text-sm transition-colors ${
-            tab === 'local' ? 'bg-brand-900 text-brand-300' : 'text-gray-400 hover:text-gray-200'
-          }`}
-        >
-          <Layers className="w-4 h-4" />
-          Local Models
-        </button>
-        <button
-          onClick={() => setTab('cloud')}
-          className={`flex items-center gap-1.5 px-4 py-2 rounded-md text-sm transition-colors ${
-            tab === 'cloud' ? 'bg-brand-900 text-brand-300' : 'text-gray-400 hover:text-gray-200'
-          }`}
-        >
-          <Cloud className="w-4 h-4" />
-          Cloud Models
-        </button>
+      {/* Tab bar + runner selector */}
+      <div className="flex items-center justify-between">
+        <div className="flex gap-1 bg-gray-900 rounded-lg p-1 w-fit">
+          <button
+            onClick={() => setTab('local')}
+            className={`flex items-center gap-1.5 px-4 py-2 rounded-md text-sm transition-colors ${
+              tab === 'local' ? 'bg-brand-900 text-brand-300' : 'text-gray-400 hover:text-gray-200'
+            }`}
+          >
+            <Layers className="w-4 h-4" />
+            Local Models
+          </button>
+          <button
+            onClick={() => setTab('cloud')}
+            className={`flex items-center gap-1.5 px-4 py-2 rounded-md text-sm transition-colors ${
+              tab === 'cloud' ? 'bg-brand-900 text-brand-300' : 'text-gray-400 hover:text-gray-200'
+            }`}
+          >
+            <Cloud className="w-4 h-4" />
+            Cloud Models
+          </button>
+        </div>
+
+        {tab === 'local' && runnerList.length > 0 && (
+          <select
+            value={selectedRunner ?? ''}
+            onChange={e => setSelectedRunner(e.target.value ? parseInt(e.target.value) : undefined)}
+            className="text-xs bg-gray-900 border border-gray-800 rounded-lg px-2.5 py-2 text-gray-400 focus:outline-none focus:border-brand-600"
+          >
+            <option value="">All runners</option>
+            {runnerList.map((r: Runner) => (
+              <option key={r.id} value={r.id}>{r.hostname}</option>
+            ))}
+          </select>
+        )}
       </div>
 
       {tab === 'local' ? (
         <div className="space-y-8">
           <TextModelsSection />
           <div className="border-t border-gray-800" />
-          <LibraryBrowserSection />
+          <LibraryBrowserSection selectedRunner={selectedRunner} />
           <div className="border-t border-gray-800" />
           <ImageModelsSection />
         </div>

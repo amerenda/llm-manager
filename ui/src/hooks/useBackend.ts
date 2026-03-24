@@ -91,8 +91,8 @@ export function useLlmModels() {
 export function usePullModel() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (model: string) =>
-      post<{ ok: boolean; op_id: string; message: string }>('/api/llm/models/pull', { model }),
+    mutationFn: ({ model, runner_id }: { model: string; runner_id?: number }) =>
+      post<{ ok: boolean; op_id: string; message: string }>(`/api/llm/models/pull${runner_id ? `?runner_id=${runner_id}` : ''}`, { model }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['llm-models'] })
       qc.invalidateQueries({ queryKey: ['llm-status'] })
