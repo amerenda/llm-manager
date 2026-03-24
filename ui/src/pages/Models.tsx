@@ -538,7 +538,6 @@ function LibraryBrowserSection() {
             </div>
             )
           })
-          )
         )}
       </div>
     </section>
