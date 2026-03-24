@@ -5,8 +5,6 @@ from pydantic import BaseModel, Field
 
 class QueueJobRequest(BaseModel):
     """Single inference job submission."""
-from __future__ import annotations
-
     model: str
     messages: list[dict]
     temperature: float = 0.7
