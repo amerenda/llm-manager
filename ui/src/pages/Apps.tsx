@@ -1,8 +1,8 @@
 import { useState } from 'react'
 import { AppWindow, Plus, Loader2, CheckCircle2, AlertCircle, Copy, Check, Shield, RefreshCw, Cpu, X, Cloud } from 'lucide-react'
-import { useApps, useRegisterApp, useApproveApp, useUpdateAppPermissions, useUpdateAppAllowedModels, useLlmModels, useCloudModels } from '../hooks/useBackend'
+import { useApps, useRegisterApp, useApproveApp, useUpdateAppPermissions, useUpdateAppAllowedModels, useModelList, useCloudModels } from '../hooks/useBackend'
 import { StatusDot } from '../components/StatusDot'
-import type { RegisteredApp, LlmModel } from '../types'
+import type { RegisteredApp } from '../types'
 
 function relativeTime(iso: string | null): string {
   if (!iso) return 'Never'
@@ -47,10 +47,10 @@ function ModelRestrictionEditor({ appId, currentModels }: { appId: number; curre
   const [selected, setSelected] = useState<string[]>(currentModels)
   const [customPattern, setCustomPattern] = useState('')
   const updateModels = useUpdateAppAllowedModels()
-  const llmModels = useLlmModels()
+  const modelList = useModelList()
   const cloudModels = useCloudModels()
 
-  const localModels = llmModels.data?.map((m: LlmModel) => ({ id: m.id, safety: '' })) ?? []
+  const localModels = modelList.data?.map(m => ({ id: m.name, safety: m.safety })) ?? []
   const cloudModelList = cloudModels.data?.filter((m: { enabled: boolean }) => m.enabled).map((m: { id: string }) => m.id) ?? []
 
   // Separate custom patterns from specific model selections
@@ -72,9 +72,8 @@ function ModelRestrictionEditor({ appId, currentModels }: { appId: number; curre
   }
 
   function applyPreset(preset: 'unrestricted' | 'safe-local' | 'all-local' | 'safe-all') {
-    // Note: useLlmModels doesn't include safety info, so all local = safe local for now
+    const safeLocal = localModels.filter(m => m.safety !== 'unsafe').map(m => m.id)
     const allLocal = localModels.map(m => m.id)
-    const safeLocal = allLocal
 
     switch (preset) {
       case 'unrestricted':
@@ -171,6 +170,9 @@ function ModelRestrictionEditor({ appId, currentModels }: { appId: number; curre
                       className="rounded border-gray-600 bg-gray-800 text-brand-500 focus:ring-brand-600"
                     />
                     <span className="text-sm text-gray-300 font-mono flex-1">{m.id}</span>
+                    {m.safety === 'unsafe' && (
+                      <span className="text-[10px] bg-red-900/40 text-red-400 px-1.5 py-0.5 rounded">unsafe</span>
+                    )}
                   </label>
                 ))
               )}

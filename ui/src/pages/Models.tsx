@@ -150,7 +150,11 @@ function TextModelsSection() {
                           </button>
                         )}
                         <button
-                          onClick={() => del.mutate(m.id)}
+                          onClick={() => {
+                            if (window.confirm(`Delete ${m.id}? This will remove the model from disk.`)) {
+                              del.mutate(m.id)
+                            }
+                          }}
                           disabled={del.isPending}
                           title="Delete model"
                           className="p-1.5 rounded-lg bg-gray-800 hover:bg-red-900/50 hover:text-red-400 text-gray-500 transition-colors"

@@ -197,7 +197,7 @@ _PUBLIC_PATHS = {
 }
 _PUBLIC_PREFIXES = (
     "/v1/",                    # OpenAI-compat proxy (app API key auth)
-    "/api/runners/",           # Agent PSK auth
+    "/api/runners",            # Agent PSK auth + runner list
     "/api/apps/discover",      # Registration secret auth
     "/api/apps/heartbeat",     # App API key auth
     "/api/queue/jobs/",        # Job status (app API key or public)

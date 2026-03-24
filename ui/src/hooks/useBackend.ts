@@ -67,6 +67,27 @@ export function usePublicStats() {
   })
 }
 
+// ── Models with safety info (from /api/models) ──────────────────────────────
+
+export interface ModelInfo {
+  name: string
+  size_gb: number
+  vram_estimate_gb: number
+  safety: string
+  downloaded: boolean
+  loaded: boolean
+  fits: boolean
+  fits_on: { runner: string; vram_total_gb: number }[]
+}
+
+export function useModelList() {
+  return useQuery<ModelInfo[]>({
+    queryKey: ['model-list'],
+    queryFn: () => get('/api/models'),
+    refetchInterval: 10_000,
+  })
+}
+
 // ── LLM Status ────────────────────────────────────────────────────────────────
 
 export function useLlmStatus() {
