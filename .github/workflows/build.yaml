@@ -17,15 +17,15 @@ jobs:
     name: Run Tests
     runs-on: arc-runner-set
     steps:
+      - name: Docker Hub login
+        run: echo "${DOCKERHUB_TOKEN}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin
       - uses: actions/checkout@v6
-      - name: Install dependencies
+      - name: Run tests in container
         run: |
-          pip install -r backend/requirements.txt
-          pip install -r backend/requirements-test.txt
-      - name: Run tests
-        run: |
-          cd backend
-          python -m pytest test_backend.py test_queue.py -v
+          docker run --rm -v "$PWD/backend:/app" -w /app python:3.12-slim bash -c "
+            pip install -q -r requirements.txt -r requirements-test.txt &&
+            python -m pytest test_backend.py test_queue.py -v
+          "
 
   build:
     name: Build and Push
