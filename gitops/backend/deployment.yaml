@@ -66,6 +66,7 @@ spec:
                 secretKeyRef:
                   name: anthropic-api-key
                   key: api-key
+                  optional: true
             - name: API_KEY_ENCRYPTION_KEY
               valueFrom:
                 secretKeyRef:
