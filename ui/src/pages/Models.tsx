@@ -279,6 +279,7 @@ function LibraryBrowserSection() {
   const [fitsOnly, setFitsOnly] = useState(true)
   const [hideDownloaded, setHideDownloaded] = useState(true)
   const [sort, setSort] = useState<string>('pulls')
+  const [expanded, setExpanded] = useState<string | null>(null)
   const pull = usePullModel()
   const refresh = useRefreshLibrary()
   const [pullMsg, setPullMsg] = useState<{ model: string; type: 'ok' | 'err' | 'pulling'; text: string } | null>(null)
@@ -402,68 +403,142 @@ function LibraryBrowserSection() {
         ) : models.length === 0 ? (
           <div className="py-8 text-center text-gray-600 text-sm">No models match your filters</div>
         ) : (
-          models.map((m: LibraryModel) => (
-            <div key={m.name} className="bg-gray-900 border border-gray-800 rounded-xl p-4 hover:bg-gray-800/40 transition-colors">
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <span className="text-sm text-gray-200 font-medium">{m.name}</span>
-                    {m.safety === 'unsafe' && (
-                      <span className="text-[10px] bg-red-900/40 text-red-400 px-1.5 py-0.5 rounded">unsafe</span>
+          models.map((m: LibraryModel) => {
+            const isExpanded = expanded === m.name
+            return (
+            <div
+              key={m.name}
+              className={`bg-gray-900 border rounded-xl transition-colors cursor-pointer ${
+                isExpanded ? 'border-brand-700 bg-gray-800/30' : 'border-gray-800 hover:bg-gray-800/40'
+              }`}
+              onClick={() => setExpanded(isExpanded ? null : m.name)}
+            >
+              <div className="p-4">
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0 flex-1">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-sm text-gray-200 font-medium">{m.name}</span>
+                      {m.safety === 'unsafe' && (
+                        <span className="text-[10px] bg-red-900/40 text-red-400 px-1.5 py-0.5 rounded">unsafe</span>
+                      )}
+                      {m.downloaded && (
+                        <span className="flex items-center gap-0.5 text-[10px] text-green-400">
+                          <CheckCircle2 className="w-2.5 h-2.5" /> Downloaded
+                        </span>
+                      )}
+                      {m.loaded && (
+                        <span className="text-[10px] bg-green-900/40 text-green-400 px-1.5 py-0.5 rounded">In VRAM</span>
+                      )}
+                    </div>
+                    {m.description && (
+                      <p className={`text-xs text-gray-500 mt-1 ${isExpanded ? '' : 'line-clamp-1'}`}>{m.description}</p>
                     )}
-                    {m.downloaded && (
-                      <span className="flex items-center gap-0.5 text-[10px] text-green-400">
-                        <CheckCircle2 className="w-2.5 h-2.5" /> Downloaded
+                    {!isExpanded && (
+                      <div className="flex items-center gap-3 mt-2 flex-wrap">
+                        {m.parameter_sizes.length > 0 && (
+                          <div className="flex gap-1 flex-wrap">
+                            {m.parameter_sizes.slice(0, 4).map(s => (
+                              <span key={s} className="text-[10px] bg-blue-900/30 text-blue-400 px-1.5 py-0.5 rounded">{s}</span>
+                            ))}
+                            {m.parameter_sizes.length > 4 && (
+                              <span className="text-[10px] text-gray-600">+{m.parameter_sizes.length - 4} more</span>
+                            )}
+                          </div>
+                        )}
+                        <span className="text-[10px] text-gray-600">~{m.vram_estimate_gb}GB VRAM</span>
+                        {m.pulls && <span className="text-[10px] text-gray-600">{m.pulls} pulls</span>}
+                      </div>
+                    )}
+                  </div>
+                  <div className="flex-shrink-0" onClick={e => e.stopPropagation()}>
+                    {!m.downloaded && m.fits && (
+                      <button
+                        onClick={() => handlePull(m.name)}
+                        disabled={pullMsg?.model === m.name && pullMsg.type === 'pulling'}
+                        className="flex items-center gap-1 text-xs bg-brand-900/50 hover:bg-brand-800/50 text-brand-300 px-3 py-1.5 rounded-lg transition-colors disabled:opacity-40"
+                      >
+                        {pullMsg?.model === m.name && pullMsg.type === 'pulling'
+                          ? <Loader2 className="w-3 h-3 animate-spin" />
+                          : <Download className="w-3 h-3" />}
+                        Pull
+                      </button>
+                    )}
+                    {!m.fits && !m.downloaded && (
+                      <span className="text-[10px] text-gray-600">Too large</span>
+                    )}
+                    {pullMsg?.model === m.name && pullMsg.type !== 'pulling' && (
+                      <span className={`text-[10px] ${pullMsg.type === 'ok' ? 'text-green-400' : 'text-red-400'}`}>
+                        {pullMsg.text}
                       </span>
                     )}
                   </div>
-                  {m.description && (
-                    <p className="text-xs text-gray-500 mt-1 line-clamp-1">{m.description}</p>
-                  )}
-                  <div className="flex items-center gap-3 mt-2 flex-wrap">
-                    {m.parameter_sizes.length > 0 && (
-                      <div className="flex gap-1 flex-wrap">
-                        {m.parameter_sizes.map(s => (
-                          <span key={s} className="text-[10px] bg-blue-900/30 text-blue-400 px-1.5 py-0.5 rounded">{s}</span>
-                        ))}
-                      </div>
-                    )}
-                    {m.categories.length > 0 && (
-                      <div className="flex gap-1">
-                        {m.categories.map(c => (
-                          <span key={c} className="text-[10px] bg-indigo-900/30 text-indigo-400 px-1.5 py-0.5 rounded">{c}</span>
-                        ))}
-                      </div>
-                    )}
-                    <span className="text-[10px] text-gray-600">~{m.vram_estimate_gb}GB VRAM</span>
-                    {m.pulls && <span className="text-[10px] text-gray-600">{m.pulls} pulls</span>}
-                  </div>
-                </div>
-                <div className="flex-shrink-0">
-                  {!m.downloaded && m.fits && (
-                    <button
-                      onClick={() => handlePull(m.name)}
-                      disabled={pullMsg?.model === m.name && pullMsg.type === 'pulling'}
-                      className="flex items-center gap-1 text-xs bg-brand-900/50 hover:bg-brand-800/50 text-brand-300 px-3 py-1.5 rounded-lg transition-colors disabled:opacity-40"
-                    >
-                      {pullMsg?.model === m.name && pullMsg.type === 'pulling'
-                        ? <Loader2 className="w-3 h-3 animate-spin" />
-                        : <Download className="w-3 h-3" />}
-                      Pull
-                    </button>
-                  )}
-                  {!m.fits && !m.downloaded && (
-                    <span className="text-[10px] text-gray-600">Too large</span>
-                  )}
-                  {pullMsg?.model === m.name && pullMsg.type !== 'pulling' && (
-                    <span className={`text-[10px] ${pullMsg.type === 'ok' ? 'text-green-400' : 'text-red-400'}`}>
-                      {pullMsg.text}
-                    </span>
-                  )}
                 </div>
               </div>
+
+              {/* Expanded detail panel */}
+              {isExpanded && (
+                <div className="border-t border-gray-800 px-4 py-3 space-y-3">
+                  {/* Available sizes */}
+                  {m.parameter_sizes.length > 0 && (
+                    <div>
+                      <p className="text-[10px] text-gray-500 uppercase tracking-wide mb-1.5">Available sizes</p>
+                      <div className="flex gap-1.5 flex-wrap">
+                        {m.parameter_sizes.map(s => (
+                          <button
+                            key={s}
+                            onClick={e => { e.stopPropagation(); handlePull(`${m.name}:${s}`) }}
+                            disabled={pullMsg?.model === `${m.name}:${s}` && pullMsg.type === 'pulling'}
+                            className="flex items-center gap-1 text-xs bg-blue-900/20 hover:bg-blue-900/40 text-blue-400 px-2 py-1 rounded transition-colors"
+                          >
+                            <Download className="w-2.5 h-2.5" />
+                            {s}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Categories */}
+                  {m.categories.length > 0 && (
+                    <div>
+                      <p className="text-[10px] text-gray-500 uppercase tracking-wide mb-1.5">Categories</p>
+                      <div className="flex gap-1.5 flex-wrap">
+                        {m.categories.map(c => (
+                          <span key={c} className="text-[10px] bg-indigo-900/30 text-indigo-400 px-2 py-0.5 rounded">{c}</span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {/* Stats */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                    <div>
+                      <p className="text-[10px] text-gray-500 uppercase tracking-wide">VRAM estimate</p>
+                      <p className="text-sm text-gray-200 mt-0.5">~{m.vram_estimate_gb} GB</p>
+                    </div>
+                    {m.pulls && (
+                      <div>
+                        <p className="text-[10px] text-gray-500 uppercase tracking-wide">Downloads</p>
+                        <p className="text-sm text-gray-200 mt-0.5">{m.pulls}</p>
+                      </div>
+                    )}
+                    <div>
+                      <p className="text-[10px] text-gray-500 uppercase tracking-wide">Safety</p>
+                      <p className={`text-sm mt-0.5 ${m.safety === 'safe' ? 'text-green-400' : 'text-red-400'}`}>{m.safety}</p>
+                    </div>
+                    {m.fits_on.length > 0 && (
+                      <div>
+                        <p className="text-[10px] text-gray-500 uppercase tracking-wide">Fits on</p>
+                        <p className="text-sm text-gray-200 mt-0.5">{m.fits_on.map(r => r.runner).join(', ')}</p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
-          ))
+            )
+          })
+          )
         )}
       </div>
     </section>
