@@ -16,18 +16,12 @@ jobs:
   test:
     name: Run Tests
     runs-on: arc-runner-set
-    container:
-      image: python:3.12-slim
-      credentials:
-        username: ${{ secrets.DOCKERHUB_USERNAME }}
-        password: ${{ secrets.DOCKERHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v6
       - name: Install dependencies
         run: |
-          cd backend
-          pip install -r requirements.txt
-          pip install -r requirements-test.txt
+          pip install -r backend/requirements.txt
+          pip install -r backend/requirements-test.txt
       - name: Run tests
         run: |
           cd backend
