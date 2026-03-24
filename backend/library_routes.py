@@ -23,7 +23,6 @@ safety_router = APIRouter(prefix="/api/safety-tags", tags=["safety"])
 
 def _parse_jsonb(val):
     """asyncpg may return JSONB as strings — parse them."""
-from __future__ import annotations
 
     if isinstance(val, str):
         import json

@@ -2,7 +2,6 @@
 HTTP client for the llm-agent service.
 Supports TLS with certificate pinning when a PEM cert is provided.
 """
-from __future__ import annotations
 
 import logging
 import os

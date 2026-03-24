@@ -1,4 +1,3 @@
-from __future__ import annotations
 
 """
 Tests for the queue system: models, DB operations, scheduler, and routes.

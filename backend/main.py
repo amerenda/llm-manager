@@ -4,7 +4,6 @@ Runs as a stateless k8s Deployment on port 8081.
 LLM proxy, model management, app registry, and queue scheduler.
 LLM runners self-register via PSK instead of being polled.
 """
-from __future__ import annotations
 
 import asyncio
 import logging

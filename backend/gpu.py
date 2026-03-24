@@ -64,7 +64,6 @@ def vram_for_model(model_name: str) -> float:
 
 def detect_gpu() -> Optional[dict]:
     """Run nvidia-smi and return GPU info, or None if no NVIDIA GPU found."""
-from __future__ import annotations
 
     try:
         result = subprocess.run(

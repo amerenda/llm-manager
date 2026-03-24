@@ -7,7 +7,6 @@ Flow:
   3. Backend exchanges code for token, verifies username, sets session cookie
   4. All admin API calls include the session cookie
 """
-from __future__ import annotations
 
 import logging
 import os

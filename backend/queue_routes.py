@@ -33,7 +33,6 @@ def _get_scheduler(request: Request) -> Scheduler:
 
 async def _resolve_app(request: Request, authorization: Optional[str]) -> Optional[int]:
     """Resolve app_id from Bearer token. Returns None if no auth."""
-from __future__ import annotations
 
     if not authorization or not authorization.startswith("Bearer "):
         return None

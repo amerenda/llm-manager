@@ -4,7 +4,6 @@ Queue scheduler with VRAM-aware model management.
 Single async worker that processes jobs grouped by model,
 handles model loading/unloading with eviction policies.
 """
-from __future__ import annotations
 
 import asyncio
 import json
