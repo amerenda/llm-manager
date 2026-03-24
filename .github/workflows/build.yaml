@@ -81,6 +81,7 @@ jobs:
           TAG: ${{ steps.tag.outputs.tag }}
           PREFIX: ${{ steps.tag.outputs.pr_prefix }}
         run: |
+          rm -rf /tmp/gitops
           git clone https://x-access-token:${GITOPS_PAT}@github.com/${GITOPS_REPO}.git /tmp/gitops
           cd /tmp/gitops
 
