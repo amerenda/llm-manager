@@ -60,6 +60,9 @@ logger = logging.getLogger(__name__)
 AGENT_PSK = os.environ.get("LLM_MANAGER_AGENT_PSK", "")
 REGISTRATION_SECRET = os.environ.get("LLM_MANAGER_REGISTRATION_SECRET", "")
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://llm:llm@localhost:5432/llmmanager")
+DISABLE_SCHEDULER = os.environ.get("DISABLE_SCHEDULER", "").lower() in ("true", "1", "yes")
+UAT_TEST_RUNNER = os.environ.get("UAT_TEST_RUNNER", "")  # runner_id for UAT connectivity tests
+UAT_TEST_MODEL = os.environ.get("UAT_TEST_MODEL", "")  # model name for UAT connectivity tests
 NODE = socket.gethostname()
 
 # Background operations tracker (pull, load, unload)
@@ -152,7 +155,9 @@ async def lifespan(app: FastAPI):
     scheduler = Scheduler(pool, get_ollama, lock_conn=lock_conn if got_lock else None)
     app.state.scheduler = scheduler
 
-    if got_lock:
+    if DISABLE_SCHEDULER:
+        logger.info("Scheduler disabled via DISABLE_SCHEDULER env var")
+    elif got_lock:
         scheduler.start()
         logger.info("Queue scheduler started (advisory lock acquired)")
     else:
@@ -251,6 +256,54 @@ async def admin_auth_middleware(request: Request, call_next):
 async def health():
     db_ok = app.state.db is not None
     return {"ok": True, "service": "llm-manager-backend", "node": NODE, "db": db_ok}
+
+
+@app.post("/api/uat/test-model")
+async def uat_test_model():
+    """Send a tiny prompt to the configured UAT runner/model to verify connectivity.
+    Requires UAT_TEST_RUNNER and UAT_TEST_MODEL env vars to be set."""
+    if not UAT_TEST_RUNNER or not UAT_TEST_MODEL:
+        raise HTTPException(
+            400,
+            "UAT test not configured — set UAT_TEST_RUNNER and UAT_TEST_MODEL env vars",
+        )
+    pool = app.state.db
+    runners_list = await db.get_active_runners(pool)
+    runner = next(
+        (r for r in runners_list if r["name"] == UAT_TEST_RUNNER),
+        None,
+    )
+    if not runner:
+        raise HTTPException(
+            503,
+            f"UAT test runner '{UAT_TEST_RUNNER}' not found or not active",
+        )
+    ollama_base = await _get_runner_ollama_base(pool, runner["id"])
+    try:
+        async with httpx.AsyncClient(timeout=30) as c:
+            resp = await c.post(
+                f"{ollama_base}/api/chat",
+                json={
+                    "model": UAT_TEST_MODEL,
+                    "messages": [{"role": "user", "content": "Say hello in exactly 3 words."}],
+                    "stream": False,
+                    "options": {"num_predict": 20},
+                },
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            content = data.get("message", {}).get("content", "")
+            return {
+                "ok": True,
+                "runner": UAT_TEST_RUNNER,
+                "model": UAT_TEST_MODEL,
+                "response": content,
+                "eval_duration_ms": data.get("eval_duration", 0) // 1_000_000,
+            }
+    except httpx.TimeoutException:
+        raise HTTPException(504, f"Model '{UAT_TEST_MODEL}' timed out on runner '{UAT_TEST_RUNNER}'")
+    except Exception as e:
+        raise HTTPException(502, f"Model test failed: {e}")
 
 
 # ── Auth ──────────────────────────────────────────────────────────────────────

@@ -65,7 +65,7 @@ Stateless service running in k8s. Discovers GPU runners from DB (heartbeat < 90s
 
 - **Port:** 8081
 - **State:** PostgreSQL only — no local files, no volumes
-- **Replicas:** 1 (scale to 2 requires distributed locking for moltbook runners)
+- **Replicas:** 2 (PostgreSQL advisory lock ensures only one pod runs the scheduler)
 
 ### `ui/` — React dashboard
 
@@ -303,6 +303,51 @@ Auto-discovery requires a shared registration secret (Bitwarden: `llm-manager-re
 | `DATABASE_URL` | ExternalSecret `postgres-credentials` | PostgreSQL DSN |
 | `LLM_MANAGER_AGENT_PSK` | ExternalSecret `agent-psk` | PSK for runner auth |
 | `LLM_MANAGER_REGISTRATION_SECRET` | ExternalSecret `registration-secret` | Shared secret for app auto-discovery |
+| `GITHUB_CLIENT_ID` | ExternalSecret `github-oauth` | GitHub OAuth app client ID |
+| `GITHUB_CLIENT_SECRET` | ExternalSecret `github-oauth` | GitHub OAuth app client secret |
+| `SESSION_SECRET` | ExternalSecret `session-secret` | JWT session signing secret |
+| `GITHUB_ALLOWED_USERS` | Deployment env | Comma-separated GitHub usernames for admin access |
+| `API_KEY_ENCRYPTION_KEY` | ExternalSecret `api-key-encryption-key` | Fernet key for encrypting stored API keys |
+| `DISABLE_SCHEDULER` | Deployment env | Set `true` to disable the job scheduler (UAT) |
+| `UAT_TEST_RUNNER` | Deployment env | Runner name for UAT connectivity tests |
+| `UAT_TEST_MODEL` | Deployment env | Model name for UAT connectivity tests |
+
+---
+
+## UAT Environment
+
+UAT runs alongside prod with a separate database, disabled scheduler, and its own UI.
+
+| Component | Prod | UAT |
+|-----------|------|-----|
+| Backend | `llm-manager-backend:8081` | `llm-manager-backend-uat:8081` |
+| UI | `llm-manager.amer.dev` | `llm-manager-uat.amer.dev` |
+| Database | `llmmanager` | `llm_manager_uat` |
+| Scheduler | Enabled (advisory lock) | Disabled (`DISABLE_SCHEDULER=true`) |
+| Queue submissions | Accepted | Rejected (503) |
+
+UAT shares the same GPU runners as prod (read-only access for GPU stats and model lists) but cannot load/evict models or process queue jobs.
+
+### UAT Test Endpoint
+
+`POST /api/uat/test-model` sends a tiny prompt to a configured runner/model to verify connectivity. Requires `UAT_TEST_RUNNER` and `UAT_TEST_MODEL` env vars. Returns the model response and eval timing.
+
+### Resetting UAT Database
+
+A k8s Job wipes and seeds the UAT database with test data. The seed SQL has a safety check that aborts if the database name doesn't contain "uat".
+
+```bash
+# Delete previous job run (if any), then create new one
+kubectl delete job uat-db-reset -n llm-manager --ignore-not-found
+kubectl apply -f k3s-dean-gitops/apps/llm-manager/backend-uat/jobs/reset-db-job.yaml
+kubectl logs -n llm-manager -l app=llm-manager-uat-db-reset -f
+```
+
+Seed data includes:
+- 3 profiles (Default, Creative, Safe Only) with model entries
+- 4 model safety tags (uncensored, dolphin, abliterated patterns)
+- 2 runners (murderbot, archbox)
+- 3 apps (ecdysis, home-assistant, dev-notebook) with API keys, rate limits, and model restrictions
 
 ---
 

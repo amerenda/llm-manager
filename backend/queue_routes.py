@@ -64,6 +64,9 @@ async def _check_rate_limit(pool, app_id: int):
 @router.post("/submit", response_model=QueueJobResponse)
 async def submit_job(body: QueueJobRequest, request: Request,
                      authorization: Optional[str] = Header(None)):
+    import os
+    if os.environ.get("DISABLE_SCHEDULER", "").lower() in ("true", "1", "yes"):
+        raise HTTPException(503, "Queue submissions disabled — scheduler is not running")
     pool = _get_pool(request)
     scheduler = _get_scheduler(request)
     app_id = await _resolve_app(request, authorization)
@@ -100,6 +103,9 @@ async def submit_job(body: QueueJobRequest, request: Request,
 @router.post("/submit-batch", response_model=QueueBatchResponse)
 async def submit_batch(body: QueueBatchRequest, request: Request,
                        authorization: Optional[str] = Header(None)):
+    import os
+    if os.environ.get("DISABLE_SCHEDULER", "").lower() in ("true", "1", "yes"):
+        raise HTTPException(503, "Queue submissions disabled — scheduler is not running")
     pool = _get_pool(request)
     scheduler = _get_scheduler(request)
     app_id = await _resolve_app(request, authorization)
