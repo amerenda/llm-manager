@@ -1,5 +1,11 @@
 name: Reset UAT Database
 
+# Trigger from murderbot or any machine with kubectl:
+#   kubectl delete job uat-db-reset -n llm-manager --ignore-not-found
+#   kubectl apply -f https://raw.githubusercontent.com/amerenda/k3s-dean-gitops/main/apps/llm-manager/backend-uat/jobs/reset-db-job.yaml
+#   kubectl wait --for=condition=complete job/uat-db-reset -n llm-manager --timeout=120s
+#   kubectl rollout restart deployment/llm-manager-backend-uat -n llm-manager
+
 on:
   workflow_dispatch:
     inputs:
@@ -11,6 +17,8 @@ jobs:
   reset:
     name: Reset UAT DB
     runs-on: arc-runner-set
+    container:
+      image: bitnami/kubectl:latest
     if: github.event.inputs.confirm == 'reset'
     steps:
       - name: Delete previous job if exists
