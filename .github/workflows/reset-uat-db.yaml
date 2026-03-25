@@ -10,22 +10,21 @@ on:
 jobs:
   reset:
     name: Reset UAT DB
-    runs-on: [self-hosted, mac-mini]
+    runs-on: arc-runner-set
     if: github.event.inputs.confirm == 'reset'
     steps:
       - name: Delete previous job if exists
         run: kubectl delete job uat-db-reset -n llm-manager --ignore-not-found
 
       - name: Create reset job from manifest
-        run: |
-          kubectl apply -f https://raw.githubusercontent.com/amerenda/k3s-dean-gitops/main/apps/llm-manager/backend-uat/jobs/reset-db-job.yaml
+        run: kubectl apply -f https://raw.githubusercontent.com/amerenda/k3s-dean-gitops/main/apps/llm-manager/backend-uat/jobs/reset-db-job.yaml
 
       - name: Wait for job to complete
         run: kubectl wait --for=condition=complete job/uat-db-reset -n llm-manager --timeout=120s
 
       - name: Show job logs
         if: always()
-        run: kubectl logs job/uat-db-reset -n llm-manager -c reset --tail=30
+        run: kubectl logs job/uat-db-reset -n llm-manager -c reset --tail=30 2>/dev/null || echo "No logs available"
 
       - name: Restart UAT backend
         run: kubectl rollout restart deployment/llm-manager-backend-uat -n llm-manager
