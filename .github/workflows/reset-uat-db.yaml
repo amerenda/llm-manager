@@ -16,68 +16,9 @@ jobs:
       - name: Delete previous job if exists
         run: kubectl delete job uat-db-reset -n llm-manager --ignore-not-found
 
-      - name: Create reset job
-        run: kubectl create job uat-db-reset --from=job/uat-db-reset -n llm-manager 2>/dev/null || kubectl apply -f - <<'EOF'
-          apiVersion: batch/v1
-          kind: Job
-          metadata:
-            name: uat-db-reset
-            namespace: llm-manager
-          spec:
-            ttlSecondsAfterFinished: 300
-            backoffLimit: 0
-            template:
-              spec:
-                nodeSelector:
-                  kubernetes.io/hostname: murderbot
-                tolerations:
-                  - key: node.kubernetes.io/disk-pressure
-                    operator: Exists
-                    effect: NoSchedule
-                restartPolicy: Never
-                initContainers:
-                  - name: wait-for-proxy
-                    image: postgres:16-alpine
-                    command: ["sh", "-c", "until pg_isready -h 127.0.0.1 -p 5432; do echo 'waiting for cloud-sql-proxy...'; sleep 2; done"]
-                containers:
-                  - name: reset
-                    image: postgres:16-alpine
-                    command: ["sh", "-c", "psql -h 127.0.0.1 -p 5432 -U llm_uat -d llm_manager_uat -f /seed/seed.sql && curl -sf http://localhost:9091/quitquitquit"]
-                    env:
-                      - name: PGPASSWORD
-                        valueFrom:
-                          secretKeyRef:
-                            name: cloud-sql-postgres-credentials-uat
-                            key: postgres-password
-                    volumeMounts:
-                      - name: seed-data
-                        mountPath: /seed
-                        readOnly: true
-                  - name: cloud-sql-proxy
-                    image: gcr.io/cloud-sql-connectors/cloud-sql-proxy:2
-                    args: ["--port=5432", "--quitquitquit", "--http-port=9091", "amerenda-k3s:us-east1:k3s-dean-postgres"]
-                    env:
-                      - name: GOOGLE_APPLICATION_CREDENTIALS
-                        value: /secrets/sa-key.json
-                    volumeMounts:
-                      - name: gcp-sa-key
-                        mountPath: /secrets
-                        readOnly: true
-                    resources:
-                      requests:
-                        cpu: 10m
-                        memory: 32Mi
-                      limits:
-                        cpu: 100m
-                        memory: 64Mi
-                volumes:
-                  - name: seed-data
-                    configMap:
-                      name: uat-seed-data
-                  - name: gcp-sa-key
-                    secret:
-                      secretName: cloud-sql-sa-key
-          EOF
+      - name: Create reset job from manifest
+        run: |
+          kubectl apply -f https://raw.githubusercontent.com/amerenda/k3s-dean-gitops/main/apps/llm-manager/backend-uat/jobs/reset-db-job.yaml
 
       - name: Wait for job to complete
         run: kubectl wait --for=condition=complete job/uat-db-reset -n llm-manager --timeout=120s
@@ -86,5 +27,5 @@ jobs:
         if: always()
         run: kubectl logs job/uat-db-reset -n llm-manager -c reset --tail=30
 
-      - name: Restart UAT backend to pick up fresh data
+      - name: Restart UAT backend
         run: kubectl rollout restart deployment/llm-manager-backend-uat -n llm-manager
