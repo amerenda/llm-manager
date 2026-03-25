@@ -1,16 +1,33 @@
-// GPU / system stats returned by GET /api/llm/status
+// Per-runner status
+export interface RunnerStatus {
+  runner_id: number
+  runner_hostname: string
+  error?: string
+  gpu_vram_used_gb: number
+  gpu_vram_total_gb: number
+  gpu_vram_pct?: number
+  cpu_pct?: number
+  mem_used_gb?: number
+  mem_total_gb?: number
+  loaded_ollama_models?: { name: string; size_gb: number }[]
+  comfyui_running?: boolean
+  gpu_vendor?: string
+}
+
+// Aggregated status from GET /api/llm/status
 export interface LlmStatus {
-  node: string
+  node?: string
+  runners?: RunnerStatus[]
   gpu_vram_used_gb: number
   gpu_vram_total_gb: number
   gpu_vram_pct: number
   cpu_pct: number
   mem_used_gb: number
   mem_total_gb: number
-  loaded_ollama_models: { name: string; size_gb: number }[]
-  comfyui_running: boolean
-  comfyui_checkpoints: string[]
-  comfyui_active_checkpoint: string | null
+  loaded_ollama_models: { name: string; size_gb: number; runner?: string }[]
+  comfyui_running?: boolean
+  comfyui_checkpoints?: string[]
+  comfyui_active_checkpoint?: string | null
 }
 
 // A model entry from GET /api/llm/models

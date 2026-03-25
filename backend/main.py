@@ -636,28 +636,104 @@ def _agent_unavailable(detail: str = "No active llm-runner available") -> HTTPEx
 
 @app.get("/api/llm/status")
 async def llm_status(runner_id: Optional[int] = None):
+    """Status from a single runner, or aggregated from all runners."""
     _inc_request("/api/llm/status", "GET", 200)
-    try:
-        client = await _get_runner_client(app.state.db, runner_id)
-        return await client.status()
-    except HTTPException:
-        raise
-    except Exception as e:
-        _inc_request("/api/llm/status", "GET", 503)
-        raise _agent_unavailable(f"Runner error: {e}")
+    pool = app.state.db
+
+    if runner_id is not None:
+        try:
+            client = await _get_runner_client(pool, runner_id)
+            return await client.status()
+        except Exception as e:
+            raise _agent_unavailable(f"Runner error: {e}")
+
+    # Aggregate from all runners
+    runners_list = await db.get_active_runners(pool)
+    if not runners_list:
+        return {"runners": [], "gpu_vram_total_gb": 0, "gpu_vram_used_gb": 0,
+                "loaded_ollama_models": [], "cpu_pct": 0, "mem_total_gb": 0,
+                "mem_used_gb": 0, "gpu_vram_pct": 0}
+
+    runner_statuses = []
+    all_loaded_models = []
+    total_vram = 0.0
+    used_vram = 0.0
+    total_cpu = 0.0
+    total_mem = 0.0
+    used_mem = 0.0
+
+    for r in runners_list:
+        try:
+            client = await _get_runner_client(pool, r["id"])
+            status = await client.status()
+            status["runner_id"] = r["id"]
+            status["runner_hostname"] = r["hostname"]
+            runner_statuses.append(status)
+
+            rv_total = status.get("gpu_vram_total_gb", 0)
+            rv_used = status.get("gpu_vram_used_gb", 0)
+            total_vram += rv_total
+            used_vram += rv_used
+            total_cpu += status.get("cpu_pct", 0)
+            total_mem += status.get("mem_total_gb", 0)
+            used_mem += status.get("mem_used_gb", 0)
+
+            for m in status.get("loaded_ollama_models", []):
+                m["runner"] = r["hostname"]
+                all_loaded_models.append(m)
+        except Exception:
+            runner_statuses.append({
+                "runner_id": r["id"],
+                "runner_hostname": r["hostname"],
+                "error": "unreachable",
+                "gpu_vram_total_gb": 0,
+                "gpu_vram_used_gb": 0,
+            })
+
+    vram_pct = round((used_vram / total_vram * 100) if total_vram > 0 else 0, 1)
+
+    return {
+        "runners": runner_statuses,
+        "gpu_vram_total_gb": round(total_vram, 2),
+        "gpu_vram_used_gb": round(used_vram, 2),
+        "gpu_vram_pct": vram_pct,
+        "loaded_ollama_models": all_loaded_models,
+        "cpu_pct": round(total_cpu / len(runners_list), 1) if runners_list else 0,
+        "mem_total_gb": round(total_mem, 2),
+        "mem_used_gb": round(used_mem, 2),
+    }
 
 
 @app.get("/api/llm/models")
 async def llm_models(runner_id: Optional[int] = None):
+    """Models from a single runner or aggregated from all."""
     _inc_request("/api/llm/models", "GET", 200)
-    try:
-        client = await _get_runner_client(app.state.db, runner_id)
-        return await client.models()
-    except HTTPException:
-        raise
-    except Exception as e:
-        _inc_request("/api/llm/models", "GET", 503)
-        raise _agent_unavailable(f"Runner error: {e}")
+    pool = app.state.db
+
+    if runner_id is not None:
+        try:
+            client = await _get_runner_client(pool, runner_id)
+            return await client.models()
+        except Exception as e:
+            raise _agent_unavailable(f"Runner error: {e}")
+
+    # Aggregate from all runners
+    runners_list = await db.get_active_runners(pool)
+    all_models = []
+    seen = set()
+    for r in runners_list:
+        try:
+            client = await _get_runner_client(pool, r["id"])
+            result = await client.models()
+            for m in result.get("data", []):
+                if m.get("id") not in seen:
+                    m["runner"] = r["hostname"]
+                    all_models.append(m)
+                    seen.add(m.get("id"))
+        except Exception:
+            pass
+
+    return {"data": all_models}
 
 
 class LLMPullRequest(BaseModel):
