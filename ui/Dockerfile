@@ -1,10 +1,11 @@
 FROM node:20-alpine AS build
+ARG CACHE_BUST=0
 
 WORKDIR /app
 COPY package.json package-lock.json* ./
 RUN npm install
 COPY . .
-RUN npm run build
+RUN echo "build: ${CACHE_BUST}" && npm run build
 
 FROM nginx:alpine
 COPY --from=build /app/dist /usr/share/nginx/html
