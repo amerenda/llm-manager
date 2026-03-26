@@ -36,6 +36,7 @@ export interface LlmModel {
   type: 'text' | 'image'
   owned_by: string
   created: number
+  runners?: { runner_id: number; hostname: string }[]
 }
 
 // A registered GPU/TTS runner from GET /api/runners

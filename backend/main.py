@@ -788,34 +788,47 @@ async def llm_status(runner_id: Optional[int] = None):
 
 @app.get("/api/llm/models")
 async def llm_models(runner_id: Optional[int] = None):
-    """Models from a single runner or aggregated from all."""
+    """Models from a single runner or aggregated from all.
+
+    When aggregating, returns per-model runner presence so the UI can show
+    which models are on which runners.
+    """
     _inc_request("/api/llm/models", "GET", 200)
     pool = app.state.db
 
     if runner_id is not None:
         try:
+            runners_list = await db.get_active_runners(pool)
+            r = next((x for x in runners_list if x["id"] == runner_id), None)
+            hostname = r["hostname"] if r else "unknown"
             client = await _get_runner_client(pool, runner_id)
-            return await client.models()
+            result = await client.models()
+            for m in result.get("data", []):
+                m["runners"] = [{"runner_id": runner_id, "hostname": hostname}]
+            return result
         except Exception as e:
             raise _agent_unavailable(f"Runner error: {e}")
 
-    # Aggregate from all runners
+    # Aggregate from all runners — track which runners have each model
     runners_list = await db.get_active_runners(pool)
-    all_models = []
-    seen = set()
+    model_map: dict[str, dict] = {}  # model_id -> model data with runners list
+
     for r in runners_list:
         try:
             client = await _get_runner_client(pool, r["id"])
             result = await client.models()
             for m in result.get("data", []):
-                if m.get("id") not in seen:
-                    m["runner"] = r["hostname"]
-                    all_models.append(m)
-                    seen.add(m.get("id"))
+                mid = m.get("id")
+                if mid not in model_map:
+                    model_map[mid] = {**m, "runners": []}
+                model_map[mid]["runners"].append({
+                    "runner_id": r["id"],
+                    "hostname": r["hostname"],
+                })
         except Exception:
             pass
 
-    return {"data": all_models}
+    return {"data": list(model_map.values())}
 
 
 class LLMPullRequest(BaseModel):
@@ -866,18 +879,21 @@ async def update_model(model: str, runner_id: Optional[int] = None):
     return {"ok": True, "op_id": op_id, "message": f"Updating {model} in background"}
 
 
-@app.post("/api/llm/models/mirror")
-async def mirror_models():
-    """Mirror downloaded models across all runners that have space.
+@app.post("/api/llm/models/sync")
+@app.post("/api/llm/models/mirror")  # backwards compat
+async def sync_models():
+    """Sync models across all runners.
 
-    For each model downloaded on any runner, pull it to every other runner
-    where it fits (based on total VRAM) but isn't already downloaded.
+    For each model base name (e.g. 'qwen2.5') downloaded on any runner,
+    ensure every other runner that can fit it has the biggest weight variant
+    that fits in its VRAM. If the runner already has that model (any weight),
+    skip it.
     """
-    _inc_request("/api/llm/models/mirror", "POST", 200)
+    _inc_request("/api/llm/models/sync", "POST", 200)
     pool = app.state.db
     runners_list = await db.get_active_runners(pool)
     if len(runners_list) < 2:
-        return {"ok": True, "pulls": [], "message": "Need at least 2 runners to mirror"}
+        return {"ok": True, "pulls": [], "message": "Need at least 2 runners to sync"}
 
     # Gather per-runner downloaded models and VRAM capacity
     runner_models: dict[int, set[str]] = {}
@@ -895,7 +911,6 @@ async def mirror_models():
         else:
             runner_vram[rid] = 0
 
-        # Query Ollama on this runner for downloaded models
         try:
             addr = r["address"]
             host = re.sub(r'^https?://', '', addr)
@@ -907,28 +922,58 @@ async def mirror_models():
                     for m in resp.json().get("models", []):
                         runner_models[rid].add(m["name"])
         except Exception:
-            logger.warning("mirror: failed to query runner %s", hostname)
+            logger.warning("sync: failed to query runner %s", hostname)
 
-    # Find models to pull: model on runner A, fits on runner B, not on runner B
+    # Extract base model names (e.g. 'qwen2.5' from 'qwen2.5:7b')
+    def _base_name(model: str) -> str:
+        return model.split(":")[0]
+
+    # For each base model present on any runner, find the best weight for each target
+    all_base_names = set()
+    for models in runner_models.values():
+        for m in models:
+            all_base_names.add(_base_name(m))
+
     pulls = []
-    for source_rid, models in runner_models.items():
-        for model_name in models:
-            model_vram = vram_for_model(model_name)
-            for target_rid in runner_models:
-                if target_rid == source_rid:
-                    continue
-                if model_name in runner_models[target_rid]:
-                    continue  # already downloaded
-                if runner_vram.get(target_rid, 0) < model_vram:
-                    continue  # won't fit
+    for base in all_base_names:
+        # Collect all weight variants of this model across all runners
+        variants = set()
+        for models in runner_models.values():
+            for m in models:
+                if _base_name(m) == base:
+                    variants.add(m)
+
+        for target_rid in runner_models:
+            # Skip if this runner already has any variant of this base model
+            target_has = [m for m in runner_models[target_rid] if _base_name(m) == base]
+            if target_has:
+                continue
+
+            # Find the biggest variant that fits on this runner's VRAM
+            target_cap = runner_vram.get(target_rid, 0)
+            best_variant = None
+            best_vram = 0.0
+            for v in variants:
+                v_vram = vram_for_model(v)
+                if v_vram <= target_cap and v_vram > best_vram:
+                    best_variant = v
+                    best_vram = v_vram
+
+            if best_variant:
+                # Find a source runner that has this variant
+                source_name = "unknown"
+                for src_rid, models in runner_models.items():
+                    if best_variant in models:
+                        source_name = runner_names[src_rid]
+                        break
                 pulls.append({
-                    "model": model_name,
+                    "model": best_variant,
                     "target_runner_id": target_rid,
                     "target_runner": runner_names[target_rid],
-                    "source_runner": runner_names[source_rid],
+                    "source_runner": source_name,
                 })
 
-    # Deduplicate (same model+target from different sources)
+    # Deduplicate (same model+target)
     seen = set()
     unique_pulls = []
     for p in pulls:
@@ -939,11 +984,11 @@ async def mirror_models():
 
     # Trigger pulls in background
     for p in unique_pulls:
-        op_id = f"mirror-{p['model']}-{p['target_runner_id']}"
-        _ops[op_id] = {"status": "running", "model": p["model"], "type": "mirror",
+        op_id = f"sync-{p['model']}-{p['target_runner_id']}"
+        _ops[op_id] = {"status": "running", "model": p["model"], "type": "sync",
                        "target": p["target_runner"], "progress": ""}
 
-        async def _do_mirror_pull(model=p["model"], rid=p["target_runner_id"], oid=op_id):
+        async def _do_sync_pull(model=p["model"], rid=p["target_runner_id"], oid=op_id):
             try:
                 client = await _get_runner_client(pool, rid)
                 async for chunk in client.pull_model(model):
@@ -953,12 +998,12 @@ async def mirror_models():
                 _ops[oid]["status"] = "failed"
                 _ops[oid]["error"] = str(e)
 
-        asyncio.create_task(_do_mirror_pull())
+        asyncio.create_task(_do_sync_pull())
 
     return {
         "ok": True,
         "pulls": [{"model": p["model"], "target": p["target_runner"]} for p in unique_pulls],
-        "message": f"Mirroring {len(unique_pulls)} model(s) across runners",
+        "message": f"Syncing {len(unique_pulls)} model(s) across runners",
     }
 
 

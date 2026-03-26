@@ -126,11 +126,11 @@ export function usePullModel() {
   })
 }
 
-export function useMirrorModels() {
+export function useSyncModels() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: () =>
-      post<{ ok: boolean; pulls: { model: string; target: string }[]; message: string }>('/api/llm/models/mirror'),
+      post<{ ok: boolean; pulls: { model: string; target: string }[]; message: string }>('/api/llm/models/sync'),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['llm-models'] })
       qc.invalidateQueries({ queryKey: ['llm-status'] })
