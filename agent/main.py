@@ -40,9 +40,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# ── GPU backend detection (NVIDIA via pynvml, AMD via amdsmi) ────────────────
+# ── GPU backend detection (NVIDIA via pynvml, AMD via sysfs) ─────────────────
 _GPU_BACKEND = "none"  # "nvidia", "amd", or "none"
-_amd_handles = []
+_amd_sysfs_dir = ""  # path to /sys/class/drm/cardN/device/ for AMD
 
 try:
     import pynvml
@@ -53,17 +53,20 @@ except Exception as exc:
     logger.debug("pynvml init failed: %s", exc)
 
 if _GPU_BACKEND == "none":
-    try:
-        import amdsmi
-        amdsmi.amdsmi_init()
-        _amd_handles = amdsmi.amdsmi_get_processor_handles()
-        if _amd_handles:
+    # AMD: find the first drm card with amdgpu VRAM sysfs files
+    import glob as _glob
+    for card_dir in sorted(_glob.glob("/sys/class/drm/card[0-9]*/device")):
+        vram_total_path = os.path.join(card_dir, "mem_info_vram_total")
+        vram_used_path = os.path.join(card_dir, "mem_info_vram_used")
+        if os.path.isfile(vram_total_path) and os.path.isfile(vram_used_path):
+            _amd_sysfs_dir = card_dir
             _GPU_BACKEND = "amd"
-            logger.info("GPU backend: amd (amdsmi, %d handle(s))", len(_amd_handles))
-        else:
-            logger.warning("amdsmi init OK but no GPU handles found")
-    except Exception as exc:
-        logger.warning("amdsmi init failed: %s", exc)
+            logger.info("GPU backend: amd (sysfs: %s)", card_dir)
+            break
+    if _GPU_BACKEND != "amd":
+        # Also check /dev/kfd as a hint that AMD GPU exists but sysfs isn't exposed
+        if os.path.exists("/dev/kfd"):
+            logger.warning("AMD GPU detected (/dev/kfd) but no VRAM sysfs found — is /sys mounted in the container?")
 
 if _GPU_BACKEND == "none":
     logger.warning("No GPU backend detected — VRAM stats will be unavailable")
@@ -328,11 +331,12 @@ def _gpu_stats() -> dict:
             return _zero
     elif _GPU_BACKEND == "amd":
         try:
-            handle = _amd_handles[0]
-            vram_info = amdsmi.amdsmi_get_gpu_vram_usage(handle)
-            logger.debug("amdsmi vram_info raw: %s", vram_info)
-            used = vram_info["vram_used"]
-            total = vram_info["vram_total"]
+            total_path = os.path.join(_amd_sysfs_dir, "mem_info_vram_total")
+            used_path = os.path.join(_amd_sysfs_dir, "mem_info_vram_used")
+            with open(total_path) as f:
+                total = int(f.read().strip())
+            with open(used_path) as f:
+                used = int(f.read().strip())
             pct = round(used / total * 100, 1) if total else 0.0
             return {
                 "vram_used_bytes": used,

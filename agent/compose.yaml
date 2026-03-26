@@ -45,6 +45,7 @@ services:
     volumes:
       - agent-tls:/data/tls
       - /var/run/docker.sock:/var/run/docker.sock
+      - /sys:/sys:ro
 
 volumes:
   agent-tls:
