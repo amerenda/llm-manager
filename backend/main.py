@@ -61,6 +61,7 @@ AGENT_PSK = os.environ.get("LLM_MANAGER_AGENT_PSK", "")
 REGISTRATION_SECRET = os.environ.get("LLM_MANAGER_REGISTRATION_SECRET", "")
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://llm:llm@localhost:5432/llmmanager")
 DISABLE_SCHEDULER = os.environ.get("DISABLE_SCHEDULER", "").lower() in ("true", "1", "yes")
+DISABLE_AUTH = os.environ.get("DISABLE_AUTH", "").lower() in ("true", "1", "yes")
 UAT_TEST_RUNNER = os.environ.get("UAT_TEST_RUNNER", "")  # runner_id for UAT connectivity tests
 UAT_TEST_MODEL = os.environ.get("UAT_TEST_MODEL", "")  # model name for UAT connectivity tests
 NODE = socket.gethostname()
@@ -223,6 +224,9 @@ _PUBLIC_PREFIXES = (
 @app.middleware("http")
 async def admin_auth_middleware(request: Request, call_next):
     """Require admin auth for management API routes."""
+    if DISABLE_AUTH:
+        return await call_next(request)
+
     path = request.url.path
 
     # Skip auth for public/self-authenticated routes
@@ -348,6 +352,8 @@ async def auth_callback(code: str = ""):
 @app.get("/auth/me")
 async def auth_me(request: Request):
     """Return current authenticated user, or 401."""
+    if DISABLE_AUTH:
+        return {"user": "uat", "admin": True}
     user = get_current_user(request)
     if not user:
         raise HTTPException(401, "Not authenticated")
