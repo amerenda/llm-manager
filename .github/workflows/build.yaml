@@ -118,8 +118,8 @@ jobs:
             apps/llm-manager/ui-uat/deployment.yaml \
             apps/llm-manager/ui/deployment.yaml
 
-          git config user.name "deploy-bot[bot]"
-          git config user.email "deploy-bot[bot]@users.noreply.github.com"
+          git config user.name "amerenda-deploy-bot[bot]"
+          git config user.email "3192609+amerenda-deploy-bot[bot]@users.noreply.github.com"
           git add -A
           git diff --cached --quiet && exit 0
           git commit -m "${PREFIX}: llm-manager ${TAG}"
