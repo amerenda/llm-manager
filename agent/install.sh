@@ -64,22 +64,42 @@ if [[ ! -f "$SCRIPT_DIR/.env" ]]; then
     fi
     [[ -z "$PSK" ]] && die "PSK is required."
 
-    read -rp "Backend URL [https://llm-manager-backend.amer.dev]: " BACKEND
-    BACKEND="${BACKEND:-https://llm-manager-backend.amer.dev}"
+    BACKEND="${BACKEND_URL:-https://llm-manager-backend.amer.dev}"
+    log "Backend URL: $BACKEND"
 
     cat > "$SCRIPT_DIR/.env" <<EOF
 LLM_MANAGER_AGENT_PSK=${PSK}
 BACKEND_URL=${BACKEND}
 EOF
 
-    # AMD-specific: prompt for GFX version override
+    # AMD-specific: auto-detect GFX version and set override for ROCm compatibility
     if [[ "$GPU_VENDOR" == "amd" ]]; then
-        echo ""
-        warn "AMD GPUs may need HSA_OVERRIDE_GFX_VERSION set for ROCm compatibility."
-        warn "Common values: 11.0.0 (RDNA 4 / RX 9070), 10.3.0 (RDNA 2), 11.0.0 (RDNA 3)"
-        read -rp "HSA_OVERRIDE_GFX_VERSION (leave blank to skip): " GFX_VER
+        # Read gfx_target_version from KFD topology (skip node 0 which is usually the CPU)
+        GFX_VER=""
+        for props in /sys/class/kfd/kfd/topology/nodes/*/properties; do
+            ver=$(awk '/gfx_target_version/ {print $2}' "$props" 2>/dev/null)
+            # Skip 0 (CPU nodes) and pick the first real GPU
+            if [[ -n "$ver" ]] && [[ "$ver" != "0" ]]; then
+                # Convert packed int to major.minor.patch: e.g. 120001 → 12.0.1, 110000 → 11.0.0
+                major=$(( ver / 10000 ))
+                minor=$(( (ver % 10000) / 100 ))
+                patch=$(( ver % 100 ))
+                GFX_VER="${major}.${minor}.${patch}"
+                break
+            fi
+        done
+
         if [[ -n "$GFX_VER" ]]; then
-            echo "HSA_OVERRIDE_GFX_VERSION=${GFX_VER}" >> "$SCRIPT_DIR/.env"
+            log "Detected GPU GFX version: $GFX_VER"
+            # RDNA 4 (gfx12) isn't supported by ROCm yet — override to 11.0.0 (RDNA 3)
+            if [[ "$GFX_VER" == 12.* ]]; then
+                warn "RDNA 4 detected (gfx $GFX_VER) — overriding to 11.0.0 for ROCm compatibility"
+                echo "HSA_OVERRIDE_GFX_VERSION=11.0.0" >> "$SCRIPT_DIR/.env"
+            else
+                echo "HSA_OVERRIDE_GFX_VERSION=${GFX_VER}" >> "$SCRIPT_DIR/.env"
+            fi
+        else
+            warn "Could not detect GFX version — skipping HSA_OVERRIDE_GFX_VERSION"
         fi
     fi
 
