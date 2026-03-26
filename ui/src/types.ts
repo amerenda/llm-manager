@@ -180,6 +180,7 @@ export interface LibraryModel {
   categories: string[]
   safety: string
   downloaded: boolean
+  downloaded_on: string[]
   loaded: boolean
   fits: boolean
   fits_on: { runner: string; vram_total_gb: number }[]

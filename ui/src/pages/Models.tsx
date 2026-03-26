@@ -1,6 +1,6 @@
 import { useState } from 'react'
-import { Download, Trash2, Loader2, CheckCircle2, AlertCircle, Image, Layers, Cpu, Upload, Shield, ShieldOff, Play, Square, Search, RefreshCw, BookOpen, Cloud, Settings2, Power } from 'lucide-react'
-import { useLlmModels, usePullModel, useDeleteModel, useCheckpoints, useSwitchCheckpoint, useLlmStatus, useLoadModel, useUnloadModel, useStartComfyui, useStopComfyui, useLibrary, useRefreshLibrary, useCloudModels, useCloudStatus, useUpdateCloudModel, useCloudKeys, useStoreCloudKey, useDeleteCloudKey, useRunners } from '../hooks/useBackend'
+import { Download, Trash2, Loader2, CheckCircle2, AlertCircle, Image, Layers, Cpu, Upload, Shield, ShieldOff, Play, Square, Search, RefreshCw, BookOpen, Cloud, Settings2, Power, Copy } from 'lucide-react'
+import { useLlmModels, usePullModel, useDeleteModel, useCheckpoints, useSwitchCheckpoint, useLlmStatus, useLoadModel, useUnloadModel, useStartComfyui, useStopComfyui, useLibrary, useRefreshLibrary, useCloudModels, useCloudStatus, useUpdateCloudModel, useCloudKeys, useStoreCloudKey, useDeleteCloudKey, useRunners, useMirrorModels } from '../hooks/useBackend'
 import type { LlmModel, LibraryModel, Runner } from '../types'
 import type { CloudModel, StoredApiKey } from '../hooks/useBackend'
 
@@ -8,7 +8,7 @@ function stripExt(filename: string): string {
   return filename.replace(/\.[^.]+$/, '')
 }
 
-function TextModelsSection() {
+function TextModelsSection({ selectedRunner, selectedRunnerHostname }: { selectedRunner?: number; selectedRunnerHostname?: string }) {
   const models = useLlmModels()
   const status = useLlmStatus()
   const pull = usePullModel()
@@ -20,7 +20,11 @@ function TextModelsSection() {
   const [showUnsafe, setShowUnsafe] = useState(false)
 
   const textModels = (models.data ?? []).filter((m: LlmModel) => m.type === 'text')
-  const loadedModels = status.data?.loaded_ollama_models ?? []
+  const allLoadedModels = status.data?.loaded_ollama_models ?? []
+  // Filter loaded models by selected runner
+  const loadedModels = selectedRunnerHostname
+    ? allLoadedModels.filter(m => m.runner === selectedRunnerHostname)
+    : allLoadedModels
   const loadedNames = new Set(loadedModels.map(m => m.name))
 
   async function handlePull() {
@@ -28,9 +32,10 @@ function TextModelsSection() {
     if (!name) return
     setPullMsg(null)
     try {
-      const result = await pull.mutateAsync({ model: name })
+      const result = await pull.mutateAsync({ model: name, runner_id: selectedRunner })
       if (result.ok) {
-        setPullMsg({ type: 'ok', text: `Pulling ${name}...` })
+        const target = selectedRunnerHostname ? ` on ${selectedRunnerHostname}` : ''
+        setPullMsg({ type: 'ok', text: `Pulling ${name}${target}...` })
         setPullInput('')
       } else {
         setPullMsg({ type: 'err', text: 'Pull returned not ok' })
@@ -130,7 +135,7 @@ function TextModelsSection() {
                       <div className="flex items-center justify-end gap-2">
                         {isLoaded ? (
                           <button
-                            onClick={() => unload.mutate({ model: m.id })}
+                            onClick={() => unload.mutate({ model: m.id, runner_id: selectedRunner })}
                             disabled={unload.isPending}
                             title="Unload from VRAM"
                             className="flex items-center gap-1 text-xs bg-yellow-900/30 hover:bg-yellow-800/40 text-yellow-400 px-2.5 py-1 rounded-lg transition-colors disabled:opacity-40"
@@ -140,7 +145,7 @@ function TextModelsSection() {
                           </button>
                         ) : (
                           <button
-                            onClick={() => load.mutate({ model: m.id })}
+                            onClick={() => load.mutate({ model: m.id, runner_id: selectedRunner })}
                             disabled={load.isPending}
                             title="Load into VRAM"
                             className="flex items-center gap-1 text-xs bg-brand-900/50 hover:bg-brand-800/50 text-brand-300 px-2.5 py-1 rounded-lg transition-colors disabled:opacity-40"
@@ -277,7 +282,7 @@ function ImageModelsSection() {
   )
 }
 
-function LibraryBrowserSection({ selectedRunner }: { selectedRunner?: number }) {
+function LibraryBrowserSection({ selectedRunner, selectedRunnerHostname }: { selectedRunner?: number; selectedRunnerHostname?: string }) {
   const [search, setSearch] = useState('')
   const [safety, setSafety] = useState<string>('safe')
   const [fitsOnly, setFitsOnly] = useState(true)
@@ -425,8 +430,8 @@ function LibraryBrowserSection({ selectedRunner }: { selectedRunner?: number }) 
                         <span className="text-[10px] bg-red-900/40 text-red-400 px-1.5 py-0.5 rounded">unsafe</span>
                       )}
                       {m.downloaded && (
-                        <span className="flex items-center gap-0.5 text-[10px] text-green-400">
-                          <CheckCircle2 className="w-2.5 h-2.5" /> Downloaded
+                        <span className="flex items-center gap-0.5 text-[10px] text-green-400" title={m.downloaded_on?.length ? `On: ${m.downloaded_on.join(', ')}` : undefined}>
+                          <CheckCircle2 className="w-2.5 h-2.5" /> {m.downloaded_on?.length > 1 ? `${m.downloaded_on.length} runners` : m.downloaded_on?.[0] || 'Downloaded'}
                         </span>
                       )}
                       {m.loaded && (
@@ -458,12 +463,13 @@ function LibraryBrowserSection({ selectedRunner }: { selectedRunner?: number }) 
                       <button
                         onClick={() => handlePull(m.name)}
                         disabled={pullMsg?.model === m.name && pullMsg.type === 'pulling'}
+                        title={selectedRunnerHostname ? `Pull to ${selectedRunnerHostname}` : 'Pull to first available runner'}
                         className="flex items-center gap-1 text-xs bg-brand-900/50 hover:bg-brand-800/50 text-brand-300 px-3 py-1.5 rounded-lg transition-colors disabled:opacity-40"
                       >
                         {pullMsg?.model === m.name && pullMsg.type === 'pulling'
                           ? <Loader2 className="w-3 h-3 animate-spin" />
                           : <Download className="w-3 h-3" />}
-                        Pull
+                        {selectedRunnerHostname ? `Pull → ${selectedRunnerHostname}` : 'Pull'}
                       </button>
                     )}
                     {!m.fits && !m.downloaded && (
@@ -771,6 +777,8 @@ export function Models() {
   const runners = useRunners()
   const runnerList = runners.data ?? []
   const [selectedRunner, setSelectedRunner] = useState<number | undefined>(undefined)
+  const mirror = useMirrorModels()
+  const [mirrorMsg, setMirrorMsg] = useState<string | null>(null)
 
   return (
     <div className="space-y-6">
@@ -798,24 +806,56 @@ export function Models() {
         </div>
 
         {tab === 'local' && runnerList.length > 0 && (
-          <select
-            value={selectedRunner ?? ''}
-            onChange={e => setSelectedRunner(e.target.value ? parseInt(e.target.value) : undefined)}
-            className="text-xs bg-gray-900 border border-gray-800 rounded-lg px-2.5 py-2 text-gray-400 focus:outline-none focus:border-brand-600"
-          >
-            <option value="">All runners</option>
-            {runnerList.map((r: Runner) => (
-              <option key={r.id} value={r.id}>{r.hostname}</option>
-            ))}
-          </select>
+          <div className="flex items-center gap-2">
+            {runnerList.length >= 2 && (
+              <button
+                onClick={async () => {
+                  setMirrorMsg(null)
+                  try {
+                    const result = await mirror.mutateAsync()
+                    if (result.pulls.length === 0) {
+                      setMirrorMsg('All models already synced')
+                    } else {
+                      setMirrorMsg(`Mirroring ${result.pulls.length} model(s): ${result.pulls.map(p => `${p.model} → ${p.target}`).join(', ')}`)
+                    }
+                    setTimeout(() => setMirrorMsg(null), 8000)
+                  } catch (e) {
+                    setMirrorMsg(`Error: ${(e as Error).message}`)
+                  }
+                }}
+                disabled={mirror.isPending}
+                title="Pull missing models to all runners that can fit them"
+                className="flex items-center gap-1.5 text-xs bg-indigo-900/40 hover:bg-indigo-800/50 text-indigo-300 border border-indigo-800 px-3 py-2 rounded-lg transition-colors disabled:opacity-40"
+              >
+                {mirror.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Copy className="w-3 h-3" />}
+                Mirror
+              </button>
+            )}
+            <select
+              value={selectedRunner ?? ''}
+              onChange={e => setSelectedRunner(e.target.value ? parseInt(e.target.value) : undefined)}
+              className="text-xs bg-gray-900 border border-gray-800 rounded-lg px-2.5 py-2 text-gray-400 focus:outline-none focus:border-brand-600"
+            >
+              <option value="">All runners</option>
+              {runnerList.map((r: Runner) => (
+                <option key={r.id} value={r.id}>{r.hostname}</option>
+              ))}
+            </select>
+          </div>
         )}
       </div>
 
+      {mirrorMsg && (
+        <div className="text-xs bg-indigo-900/20 border border-indigo-800/50 text-indigo-300 px-3 py-2 rounded-lg">
+          {mirrorMsg}
+        </div>
+      )}
+
       {tab === 'local' ? (
         <div className="space-y-8">
-          <TextModelsSection />
+          <TextModelsSection selectedRunner={selectedRunner} selectedRunnerHostname={runnerList.find((r: Runner) => r.id === selectedRunner)?.hostname} />
           <div className="border-t border-gray-800" />
-          <LibraryBrowserSection selectedRunner={selectedRunner} />
+          <LibraryBrowserSection selectedRunner={selectedRunner} selectedRunnerHostname={runnerList.find((r: Runner) => r.id === selectedRunner)?.hostname} />
           <div className="border-t border-gray-800" />
           <ImageModelsSection />
         </div>

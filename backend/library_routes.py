@@ -58,34 +58,41 @@ async def browse_library(
     # Get library models
     library_models = await db.get_library_models(pool, search=search)
 
-    # Get downloaded models from runner
+    # Get downloaded models from all runners
     downloaded_names = set()
     loaded_names = set()
     runner_vram = {}
+    # Track per-runner downloads for richer UI data
+    per_runner_downloads: dict[str, set[str]] = {}
     try:
         runners = await db.get_active_runners(pool)
         if runners:
             import httpx, re
-            r = runners[0]
-            addr = r["address"]
-            host = re.sub(r'^https?://', '', addr)
-            host = re.sub(r':\d+$', '', host)
-            ollama_base = f"http://{host}:11434"
             async with httpx.AsyncClient(timeout=10) as c:
-                tags_resp = await c.get(f"{ollama_base}/api/tags")
-                if tags_resp.status_code == 200:
-                    for m in tags_resp.json().get("models", []):
-                        downloaded_names.add(m["name"])
-                ps_resp = await c.get(f"{ollama_base}/api/ps")
-                if ps_resp.status_code == 200:
-                    for m in ps_resp.json().get("models", []):
-                        loaded_names.add(m["name"])
-            for r in runners:
-                caps = r.get("capabilities", {})
-                if isinstance(caps, dict):
-                    total = caps.get("gpu_vram_total_bytes", 0) / (1024**3)
-                    if total > 0:
-                        runner_vram[r["hostname"]] = round(total, 1)
+                for r in runners:
+                    addr = r["address"]
+                    host = re.sub(r'^https?://', '', addr)
+                    host = re.sub(r':\d+$', '', host)
+                    ollama_base = f"http://{host}:11434"
+                    hostname = r["hostname"]
+                    per_runner_downloads[hostname] = set()
+                    try:
+                        tags_resp = await c.get(f"{ollama_base}/api/tags")
+                        if tags_resp.status_code == 200:
+                            for m in tags_resp.json().get("models", []):
+                                downloaded_names.add(m["name"])
+                                per_runner_downloads[hostname].add(m["name"])
+                        ps_resp = await c.get(f"{ollama_base}/api/ps")
+                        if ps_resp.status_code == 200:
+                            for m in ps_resp.json().get("models", []):
+                                loaded_names.add(m["name"])
+                    except Exception:
+                        logger.warning("Failed to query Ollama on runner %s at %s", hostname, ollama_base)
+                    caps = r.get("capabilities", {})
+                    if isinstance(caps, dict):
+                        total = caps.get("gpu_vram_total_bytes", 0) / (1024**3)
+                        if total > 0:
+                            runner_vram[hostname] = round(total, 1)
     except Exception:
         logger.warning("Failed to get runner info for library browse")
 
@@ -129,6 +136,12 @@ async def browse_library(
             if not downloaded and is_downloaded:
                 continue
 
+        # Which runners have this model downloaded?
+        downloaded_on = [
+            hostname for hostname, models in per_runner_downloads.items()
+            if any(d.startswith(name) for d in models)
+        ]
+
         results.append({
             "name": name,
             "description": m.get("description", ""),
@@ -137,6 +150,7 @@ async def browse_library(
             "categories": categories,
             "safety": model_safety,
             "downloaded": is_downloaded,
+            "downloaded_on": downloaded_on,
             "loaded": any(l.startswith(name) for l in loaded_names),
             "fits": model_fits,
             "fits_on": fits_on,

@@ -125,6 +125,23 @@ export function usePullModel() {
   })
 }
 
+export function useMirrorModels() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () =>
+      post<{ ok: boolean; pulls: { model: string; target: string }[]; message: string }>('/api/llm/models/mirror'),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['llm-models'] })
+      qc.invalidateQueries({ queryKey: ['llm-status'] })
+      qc.invalidateQueries({ queryKey: ['library'] })
+      setTimeout(() => {
+        qc.invalidateQueries({ queryKey: ['llm-models'] })
+        qc.invalidateQueries({ queryKey: ['llm-status'] })
+      }, 10000)
+    },
+  })
+}
+
 export function useDeleteModel() {
   const qc = useQueryClient()
   return useMutation({

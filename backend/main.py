@@ -837,6 +837,102 @@ async def update_model(model: str, runner_id: Optional[int] = None):
     return {"ok": True, "op_id": op_id, "message": f"Updating {model} in background"}
 
 
+@app.post("/api/llm/models/mirror")
+async def mirror_models():
+    """Mirror downloaded models across all runners that have space.
+
+    For each model downloaded on any runner, pull it to every other runner
+    where it fits (based on total VRAM) but isn't already downloaded.
+    """
+    _inc_request("/api/llm/models/mirror", "POST", 200)
+    pool = app.state.db
+    runners_list = await db.get_active_runners(pool)
+    if len(runners_list) < 2:
+        return {"ok": True, "pulls": [], "message": "Need at least 2 runners to mirror"}
+
+    # Gather per-runner downloaded models and VRAM capacity
+    runner_models: dict[int, set[str]] = {}
+    runner_vram: dict[int, float] = {}
+    runner_names: dict[int, str] = {}
+
+    for r in runners_list:
+        rid = r["id"]
+        hostname = r["hostname"]
+        runner_names[rid] = hostname
+        runner_models[rid] = set()
+        caps = r.get("capabilities", {})
+        if isinstance(caps, dict):
+            runner_vram[rid] = caps.get("gpu_vram_total_bytes", 0) / (1024**3)
+        else:
+            runner_vram[rid] = 0
+
+        # Query Ollama on this runner for downloaded models
+        try:
+            addr = r["address"]
+            host = re.sub(r'^https?://', '', addr)
+            host = re.sub(r':\d+$', '', host)
+            ollama_base = f"http://{host}:11434"
+            async with httpx.AsyncClient(timeout=10) as c:
+                resp = await c.get(f"{ollama_base}/api/tags")
+                if resp.status_code == 200:
+                    for m in resp.json().get("models", []):
+                        runner_models[rid].add(m["name"])
+        except Exception:
+            logger.warning("mirror: failed to query runner %s", hostname)
+
+    # Find models to pull: model on runner A, fits on runner B, not on runner B
+    pulls = []
+    for source_rid, models in runner_models.items():
+        for model_name in models:
+            model_vram = vram_for_model(model_name)
+            for target_rid in runner_models:
+                if target_rid == source_rid:
+                    continue
+                if model_name in runner_models[target_rid]:
+                    continue  # already downloaded
+                if runner_vram.get(target_rid, 0) < model_vram:
+                    continue  # won't fit
+                pulls.append({
+                    "model": model_name,
+                    "target_runner_id": target_rid,
+                    "target_runner": runner_names[target_rid],
+                    "source_runner": runner_names[source_rid],
+                })
+
+    # Deduplicate (same model+target from different sources)
+    seen = set()
+    unique_pulls = []
+    for p in pulls:
+        key = (p["model"], p["target_runner_id"])
+        if key not in seen:
+            seen.add(key)
+            unique_pulls.append(p)
+
+    # Trigger pulls in background
+    for p in unique_pulls:
+        op_id = f"mirror-{p['model']}-{p['target_runner_id']}"
+        _ops[op_id] = {"status": "running", "model": p["model"], "type": "mirror",
+                       "target": p["target_runner"], "progress": ""}
+
+        async def _do_mirror_pull(model=p["model"], rid=p["target_runner_id"], oid=op_id):
+            try:
+                client = await _get_runner_client(pool, rid)
+                async for chunk in client.pull_model(model):
+                    _ops[oid]["progress"] = chunk.decode().strip()
+                _ops[oid]["status"] = "completed"
+            except Exception as e:
+                _ops[oid]["status"] = "failed"
+                _ops[oid]["error"] = str(e)
+
+        asyncio.create_task(_do_mirror_pull())
+
+    return {
+        "ok": True,
+        "pulls": [{"model": p["model"], "target": p["target_runner"]} for p in unique_pulls],
+        "message": f"Mirroring {len(unique_pulls)} model(s) across runners",
+    }
+
+
 @app.get("/api/ops")
 async def list_operations():
     """List all background operations and their status."""

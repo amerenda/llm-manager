@@ -34,15 +34,23 @@ from prometheus_client import (
 )
 from pydantic import BaseModel
 
+logging.basicConfig(
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    level=logging.INFO,
+)
+logger = logging.getLogger(__name__)
+
 # ── GPU backend detection (NVIDIA via pynvml, AMD via amdsmi) ────────────────
 _GPU_BACKEND = "none"  # "nvidia", "amd", or "none"
+_amd_handles = []
 
 try:
     import pynvml
     pynvml.nvmlInit()
     _GPU_BACKEND = "nvidia"
-except Exception:
-    pass
+    logger.info("GPU backend: nvidia (pynvml)")
+except Exception as exc:
+    logger.debug("pynvml init failed: %s", exc)
 
 if _GPU_BACKEND == "none":
     try:
@@ -51,14 +59,14 @@ if _GPU_BACKEND == "none":
         _amd_handles = amdsmi.amdsmi_get_processor_handles()
         if _amd_handles:
             _GPU_BACKEND = "amd"
-    except Exception:
-        pass
+            logger.info("GPU backend: amd (amdsmi, %d handle(s))", len(_amd_handles))
+        else:
+            logger.warning("amdsmi init OK but no GPU handles found")
+    except Exception as exc:
+        logger.warning("amdsmi init failed: %s", exc)
 
-logging.basicConfig(
-    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    level=logging.INFO,
-)
-logger = logging.getLogger(__name__)
+if _GPU_BACKEND == "none":
+    logger.warning("No GPU backend detected — VRAM stats will be unavailable")
 
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 COMFYUI_URL = os.environ.get("COMFYUI_URL", "http://localhost:8188")
@@ -315,12 +323,14 @@ def _gpu_stats() -> dict:
                 "vram_pct": pct,
                 "gpu_vendor": "nvidia",
             }
-        except Exception:
+        except Exception as exc:
+            logger.warning("NVIDIA VRAM read failed: %s", exc)
             return _zero
     elif _GPU_BACKEND == "amd":
         try:
             handle = _amd_handles[0]
             vram_info = amdsmi.amdsmi_get_gpu_vram_usage(handle)
+            logger.debug("amdsmi vram_info raw: %s", vram_info)
             used = vram_info["vram_used"]
             total = vram_info["vram_total"]
             pct = round(used / total * 100, 1) if total else 0.0
@@ -330,7 +340,8 @@ def _gpu_stats() -> dict:
                 "vram_pct": pct,
                 "gpu_vendor": "amd",
             }
-        except Exception:
+        except Exception as exc:
+            logger.warning("AMD VRAM read failed: %s", exc, exc_info=True)
             return _zero
     return _zero
 
