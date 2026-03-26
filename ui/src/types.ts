@@ -44,6 +44,7 @@ export interface Runner {
   hostname: string
   address: string
   port: number
+  enabled: boolean
   capabilities: {
     // GPU runner fields
     gpu_vram_total_bytes?: number
@@ -70,6 +71,7 @@ export interface RegisteredApp {
   status: string             // 'pending' | 'active'
   allow_profile_switch: boolean
   allowed_models: string[]   // empty = unrestricted
+  allowed_runner_ids: number[] // empty = any runner
   api_key_preview?: string
   last_seen: string | null   // ISO timestamp or null
   metadata: Record<string, unknown>

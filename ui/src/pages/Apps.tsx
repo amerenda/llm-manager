@@ -1,8 +1,8 @@
 import { useState } from 'react'
-import { AppWindow, Plus, Loader2, CheckCircle2, AlertCircle, Copy, Check, Shield, RefreshCw, Cpu, X, Cloud } from 'lucide-react'
-import { useApps, useRegisterApp, useApproveApp, useUpdateAppPermissions, useUpdateAppAllowedModels, useModelList, useCloudModels } from '../hooks/useBackend'
+import { AppWindow, Plus, Loader2, CheckCircle2, AlertCircle, Copy, Check, Shield, RefreshCw, Cpu, X, Cloud, Server } from 'lucide-react'
+import { useApps, useRegisterApp, useApproveApp, useUpdateAppPermissions, useUpdateAppAllowedModels, useModelList, useCloudModels, useRunners, useUpdateAppAllowedRunners } from '../hooks/useBackend'
 import { StatusDot } from '../components/StatusDot'
-import type { RegisteredApp } from '../types'
+import type { RegisteredApp, Runner } from '../types'
 
 function relativeTime(iso: string | null): string {
   if (!iso) return 'Never'
@@ -279,6 +279,93 @@ function ModelRestrictionEditor({ appId, currentModels }: { appId: number; curre
   )
 }
 
+function RunnerAffinityEditor({ appId, currentRunnerIds }: { appId: number; currentRunnerIds: number[] }) {
+  const [open, setOpen] = useState(false)
+  const [selected, setSelected] = useState<number[]>(currentRunnerIds)
+  const runners = useRunners()
+  const update = useUpdateAppAllowedRunners()
+  const runnerList = runners.data ?? []
+
+  const isUnrestricted = currentRunnerIds.length === 0
+
+  function toggle(id: number) {
+    setSelected(prev => prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id])
+  }
+
+  function save() {
+    update.mutate({ appId, allowed_runner_ids: selected }, {
+      onSuccess: () => setOpen(false),
+    })
+  }
+
+  if (!open) {
+    return (
+      <button
+        onClick={() => { setSelected(currentRunnerIds); setOpen(true) }}
+        title={isUnrestricted ? 'Any runner' : `Restricted to ${currentRunnerIds.length} runner(s)`}
+        className={`flex items-center gap-1 text-xs px-2 py-1 rounded-lg transition-colors ${
+          isUnrestricted
+            ? 'bg-gray-800 text-gray-500 border border-gray-700 hover:border-gray-600'
+            : 'bg-purple-900/30 text-purple-400 border border-purple-800'
+        }`}
+      >
+        <Server className="w-3 h-3" />
+        {isUnrestricted ? 'Any runner' : `${currentRunnerIds.length} runner${currentRunnerIds.length !== 1 ? 's' : ''}`}
+      </button>
+    )
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={() => setOpen(false)}>
+      <div className="bg-gray-900 border border-gray-700 rounded-xl p-5 w-80" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-sm font-semibold text-gray-200">Runner Affinity</h3>
+          <button onClick={() => setOpen(false)} className="text-gray-500 hover:text-gray-300">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+        <p className="text-[10px] text-gray-500 mb-3">
+          {selected.length === 0
+            ? 'No restriction — app can use any enabled runner.'
+            : `Restricted to ${selected.length} runner(s).`}
+        </p>
+        <div className="space-y-1 mb-4">
+          {runnerList.map((r: Runner) => (
+            <label key={r.id} className="flex items-center gap-2 px-3 py-1.5 rounded-lg hover:bg-gray-800 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={selected.includes(r.id)}
+                onChange={() => toggle(r.id)}
+                className="rounded border-gray-600 bg-gray-800 text-brand-500 focus:ring-brand-600"
+              />
+              <span className="text-sm text-gray-300">{r.hostname}</span>
+              {!r.enabled && <span className="text-[10px] text-gray-600">disabled</span>}
+            </label>
+          ))}
+          {runnerList.length === 0 && (
+            <p className="text-xs text-gray-600 py-2 text-center">No runners available</p>
+          )}
+        </div>
+        <div className="flex gap-2">
+          <button
+            onClick={() => { setSelected([]); update.mutate({ appId, allowed_runner_ids: [] }, { onSuccess: () => setOpen(false) }) }}
+            className="flex-1 text-xs px-3 py-2 rounded-lg bg-gray-800 text-gray-400 hover:bg-gray-700 transition-colors"
+          >
+            Any runner
+          </button>
+          <button
+            onClick={save}
+            disabled={update.isPending}
+            className="flex-1 text-xs px-3 py-2 rounded-lg bg-brand-600 text-white hover:bg-brand-500 disabled:opacity-40 transition-colors"
+          >
+            {update.isPending ? 'Saving...' : 'Save'}
+          </button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export function Apps() {
   const apps = useApps()
   const register = useRegisterApp()
@@ -400,6 +487,7 @@ export function Apps() {
                         {a.allow_profile_switch ? 'Profiles' : 'No profiles'}
                       </button>
                       <ModelRestrictionEditor appId={a.id} currentModels={a.allowed_models ?? []} />
+                      <RunnerAffinityEditor appId={a.id} currentRunnerIds={a.allowed_runner_ids ?? []} />
                     </div>
                   </td>
                 </tr>

@@ -1,5 +1,5 @@
-import { Server, Cpu, MemoryStick, Volume2, RefreshCw } from 'lucide-react'
-import { useRunners } from '../hooks/useBackend'
+import { Server, Cpu, MemoryStick, Volume2, RefreshCw, Power } from 'lucide-react'
+import { useRunners, useUpdateRunner } from '../hooks/useBackend'
 import { StatusDot } from '../components/StatusDot'
 import type { Runner } from '../types'
 
@@ -24,6 +24,7 @@ function bytes(n: number): string {
 
 export function Runners() {
   const runners = useRunners()
+  const update = useUpdateRunner()
   const list = runners.data ?? []
 
   const gpuRunners = list.filter((r: Runner) => r.capabilities.gpu_vram_total_bytes)
@@ -48,6 +49,7 @@ export function Runners() {
         <div className="space-y-3">
           {list.map((runner: Runner) => {
             const online = isOnline(runner.last_seen)
+            const enabled = runner.enabled !== false
             const caps = runner.capabilities
             const isGpu = !!caps.gpu_vram_total_bytes
             const isTts = !!caps.tts
@@ -58,12 +60,14 @@ export function Runners() {
             return (
               <div
                 key={runner.id}
-                className="bg-gray-900 border border-gray-800 rounded-xl p-4 space-y-3"
+                className={`bg-gray-900 border rounded-xl p-4 space-y-3 transition-opacity ${
+                  enabled ? 'border-gray-800' : 'border-gray-800/50 opacity-50'
+                }`}
               >
                 {/* Header */}
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
-                    <StatusDot online={online} />
+                    <StatusDot online={online && enabled} />
                     <span className="text-sm font-medium text-gray-200">{runner.hostname}</span>
                     <span className="text-xs text-gray-600 font-mono">#{runner.id}</span>
                     <div className="flex gap-1">
@@ -73,9 +77,26 @@ export function Runners() {
                       {isTts && (
                         <span className="text-[10px] bg-blue-900/50 text-blue-400 border border-blue-800 px-1.5 py-0.5 rounded-full">TTS</span>
                       )}
+                      {!enabled && (
+                        <span className="text-[10px] bg-gray-800 text-gray-500 px-1.5 py-0.5 rounded-full">disabled</span>
+                      )}
                     </div>
                   </div>
-                  <span className="text-xs text-gray-600 tabular-nums">{relativeTime(runner.last_seen)}</span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => update.mutate({ runnerId: runner.id, enabled: !enabled })}
+                      disabled={update.isPending}
+                      title={enabled ? 'Disable runner' : 'Enable runner'}
+                      className={`p-1.5 rounded-lg transition-colors ${
+                        enabled
+                          ? 'bg-green-900/30 hover:bg-green-900/50 text-green-400'
+                          : 'bg-gray-800 hover:bg-gray-700 text-gray-500'
+                      }`}
+                    >
+                      <Power className="w-3.5 h-3.5" />
+                    </button>
+                    <span className="text-xs text-gray-600 tabular-nums">{relativeTime(runner.last_seen)}</span>
+                  </div>
                 </div>
 
                 {/* GPU VRAM bar */}

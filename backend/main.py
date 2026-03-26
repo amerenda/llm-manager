@@ -85,9 +85,16 @@ def _inc_request(endpoint: str, method: str, status: int):
 
 # ── Runner helpers ─────────────────────────────────────────────────────────────
 
-async def _get_runner_client(pool: asyncpg.Pool, runner_id: Optional[int] = None) -> LLMAgentClient:
-    """Return an LLMAgentClient pointed at an active runner."""
+async def _get_runner_client(
+    pool: asyncpg.Pool,
+    runner_id: Optional[int] = None,
+    allowed_runner_ids: Optional[list[int]] = None,
+) -> LLMAgentClient:
+    """Return an LLMAgentClient pointed at an active (enabled) runner.
+    If allowed_runner_ids is set, only those runners are candidates."""
     runners_list = await db.get_active_runners(pool)
+    if allowed_runner_ids:
+        runners_list = [r for r in runners_list if r["id"] in allowed_runner_ids]
     if not runners_list:
         raise HTTPException(503, "No active llm-runners available")
     if runner_id is not None:
@@ -684,7 +691,22 @@ async def runner_heartbeat(
 
 @app.get("/api/runners")
 async def list_runners():
-    return await db.get_active_runners(app.state.db)
+    """Return all recent runners (including disabled) for UI display."""
+    return await db.get_all_runners(app.state.db)
+
+
+class RunnerUpdateRequest(BaseModel):
+    enabled: Optional[bool] = None
+
+
+@app.patch("/api/runners/{runner_id}")
+async def update_runner(runner_id: int, req: RunnerUpdateRequest):
+    """Update runner settings (enable/disable)."""
+    if req.enabled is not None:
+        found = await db.set_runner_enabled(app.state.db, runner_id, req.enabled)
+        if not found:
+            raise HTTPException(404, "Runner not found")
+    return {"ok": True}
 
 
 # ── LLM proxy — all ops target active runner(s) ───────────────────────────────
@@ -1034,13 +1056,15 @@ async def proxy_chat_completions(request: Request, runner_id: Optional[int] = No
     model = body.get("model", "")
     stream = body.get("stream", False)
 
-    # Enforce per-app model restrictions
+    # Enforce per-app model + runner restrictions
+    app_allowed_runners: list[int] = []
     auth_header = request.headers.get("Authorization", "")
     if auth_header.startswith("Bearer "):
         api_key = auth_header.removeprefix("Bearer ").strip()
         allowed = await db.check_model_allowed(app.state.db, api_key, model)
         if not allowed:
             raise HTTPException(403, f"Model '{model}' is not allowed for this application")
+        app_allowed_runners = await db.get_app_allowed_runners(app.state.db, api_key)
 
     provider = detect_provider(model)
     _inc_request("/v1/chat/completions", "POST", 200)
@@ -1077,7 +1101,10 @@ async def proxy_chat_completions(request: Request, runner_id: Optional[int] = No
 
     # ── Local model routing (Ollama) ─────────────────────────────────────
     try:
-        client = await _get_runner_client(app.state.db, runner_id)
+        client = await _get_runner_client(
+            app.state.db, runner_id,
+            allowed_runner_ids=app_allowed_runners or None,
+        )
 
         if stream:
             async def _forward_stream():
@@ -1149,6 +1176,8 @@ async def list_apps():
         # Ensure new fields are present (for backwards compatibility)
         a_copy.setdefault("status", "active")
         a_copy.setdefault("allow_profile_switch", False)
+        a_copy.setdefault("allowed_runner_ids", [])
+        a_copy["allowed_runner_ids"] = list(a_copy["allowed_runner_ids"] or [])
         a_copy["allowed_models"] = await db.get_app_allowed_models(app.state.db, a_copy["id"])
         result.append(a_copy)
     return result
@@ -1279,6 +1308,28 @@ class AppAllowedModelsRequest(BaseModel):
 @app.put("/api/apps/{app_id}/allowed-models")
 async def set_app_allowed_models_endpoint(app_id: int, req: AppAllowedModelsRequest):
     await db.set_app_allowed_models(app.state.db, app_id, req.allowed_models)
+    return {"ok": True}
+
+
+class AppAllowedRunnersRequest(BaseModel):
+    allowed_runner_ids: list[int]
+
+
+@app.get("/api/apps/{app_id}/allowed-runners")
+async def get_app_allowed_runners_endpoint(app_id: int):
+    apps = await db.get_apps(app.state.db)
+    a = next((x for x in apps if x["id"] == app_id), None)
+    if not a:
+        raise HTTPException(404, "App not found")
+    runner_ids = list(a.get("allowed_runner_ids") or [])
+    return {"app_id": app_id, "allowed_runner_ids": runner_ids, "unrestricted": len(runner_ids) == 0}
+
+
+@app.put("/api/apps/{app_id}/allowed-runners")
+async def set_app_allowed_runners_endpoint(app_id: int, req: AppAllowedRunnersRequest):
+    found = await db.set_app_allowed_runners(app.state.db, app_id, req.allowed_runner_ids)
+    if not found:
+        raise HTTPException(404, "App not found")
     return {"ok": True}
 
 

@@ -33,6 +33,7 @@ CREATE TABLE IF NOT EXISTS registered_apps (
     api_key TEXT UNIQUE NOT NULL,
     status TEXT NOT NULL DEFAULT 'active',
     allow_profile_switch BOOLEAN NOT NULL DEFAULT FALSE,
+    allowed_runner_ids INTEGER[] NOT NULL DEFAULT '{}',
     last_seen TIMESTAMPTZ,
     metadata JSONB DEFAULT '{}'::jsonb,
     created_at TIMESTAMPTZ DEFAULT NOW()
@@ -44,6 +45,7 @@ CREATE TABLE IF NOT EXISTS llm_runners (
     address TEXT NOT NULL,
     port INT NOT NULL DEFAULT 8090,
     capabilities JSONB DEFAULT '{}'::jsonb,
+    enabled BOOLEAN NOT NULL DEFAULT TRUE,
     last_seen TIMESTAMPTZ,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
@@ -167,15 +169,26 @@ async def init_db(pool: asyncpg.Pool) -> None:
             ("status", "'active'"),
             ("allow_profile_switch", "FALSE"),
             ("allow_unsafe", "FALSE"),
+            ("allowed_runner_ids", "'{}'"),
         ]:
+            col_type = "TEXT" if col == "status" else "INTEGER[]" if col == "allowed_runner_ids" else "BOOLEAN"
             try:
                 await conn.execute(
                     f"ALTER TABLE registered_apps ADD COLUMN {col} "
-                    f"{'TEXT' if col == 'status' else 'BOOLEAN'} NOT NULL DEFAULT {default}"
+                    f"{col_type} NOT NULL DEFAULT {default}"
                 )
                 logger.info("Added column registered_apps.%s", col)
             except asyncpg.DuplicateColumnError:
                 pass
+
+        # Runner migrations
+        try:
+            await conn.execute(
+                "ALTER TABLE llm_runners ADD COLUMN enabled BOOLEAN NOT NULL DEFAULT TRUE"
+            )
+            logger.info("Added column llm_runners.enabled")
+        except asyncpg.DuplicateColumnError:
+            pass
 
         # Ensure the Default profile always exists
         await conn.execute(
@@ -384,12 +397,34 @@ async def get_apps(pool: asyncpg.Pool) -> list[dict]:
         rows = await conn.fetch(
             """
             SELECT id, name, base_url, api_key, status, allow_profile_switch,
-                   last_seen, metadata, created_at
+                   allowed_runner_ids, last_seen, metadata, created_at
             FROM registered_apps
             ORDER BY name
             """
         )
     return [dict(r) for r in rows]
+
+
+async def set_app_allowed_runners(pool: asyncpg.Pool, app_id: int, runner_ids: list[int]) -> bool:
+    """Set allowed runner IDs for an app. Empty list = any runner."""
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "UPDATE registered_apps SET allowed_runner_ids = $1 WHERE id = $2",
+            runner_ids, app_id,
+        )
+    return result.endswith("1")
+
+
+async def get_app_allowed_runners(pool: asyncpg.Pool, api_key: str) -> list[int]:
+    """Get allowed runner IDs for an app by API key. Empty = unrestricted."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT allowed_runner_ids FROM registered_apps WHERE api_key = $1",
+            api_key,
+        )
+    if row is None:
+        return []
+    return list(row["allowed_runner_ids"] or [])
 
 
 async def deregister_app(pool: asyncpg.Pool, api_key: str) -> bool:
@@ -452,23 +487,42 @@ async def heartbeat_runner(
 
 
 async def get_active_runners(pool: asyncpg.Pool) -> list[dict]:
-    """Return runners seen in the last 90 seconds, ordered by hostname."""
+    """Return enabled runners seen in the last 90 seconds, ordered by hostname."""
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT id, hostname, address, port, capabilities, last_seen, created_at
+            SELECT id, hostname, address, port, capabilities, enabled, last_seen, created_at
+            FROM llm_runners
+            WHERE last_seen > NOW() - INTERVAL '90 seconds'
+              AND enabled = TRUE
+            ORDER BY hostname
+            """
+        )
+    return [_deserialize_runner(r) for r in rows]
+
+
+async def get_all_runners(pool: asyncpg.Pool) -> list[dict]:
+    """Return all runners seen recently (including disabled), for UI display."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, hostname, address, port, capabilities, enabled, last_seen, created_at
             FROM llm_runners
             WHERE last_seen > NOW() - INTERVAL '90 seconds'
             ORDER BY hostname
             """
         )
-    result = []
-    for r in rows:
-        d = dict(r)
-        if isinstance(d.get("capabilities"), str):
-            d["capabilities"] = json.loads(d["capabilities"])
-        result.append(d)
-    return result
+    return [_deserialize_runner(r) for r in rows]
+
+
+async def set_runner_enabled(pool: asyncpg.Pool, runner_id: int, enabled: bool) -> bool:
+    """Enable or disable a runner. Returns False if not found."""
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "UPDATE llm_runners SET enabled = $1 WHERE id = $2",
+            enabled, runner_id,
+        )
+    return result.endswith("1")
 
 
 async def get_runner_by_id(pool: asyncpg.Pool, runner_id: int) -> Optional[dict]:
@@ -476,7 +530,7 @@ async def get_runner_by_id(pool: asyncpg.Pool, runner_id: int) -> Optional[dict]
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            SELECT id, hostname, address, port, capabilities, last_seen, created_at
+            SELECT id, hostname, address, port, capabilities, enabled, last_seen, created_at
             FROM llm_runners
             WHERE id = $1
             """,
@@ -484,6 +538,11 @@ async def get_runner_by_id(pool: asyncpg.Pool, runner_id: int) -> Optional[dict]
         )
     if row is None:
         return None
+    return _deserialize_runner(row)
+
+
+def _deserialize_runner(row) -> dict:
+    """Convert a runner DB row to dict with deserialized capabilities."""
     d = dict(row)
     if isinstance(d.get("capabilities"), str):
         d["capabilities"] = json.loads(d["capabilities"])

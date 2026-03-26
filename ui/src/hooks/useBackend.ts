@@ -225,6 +225,31 @@ export function useRunners() {
   })
 }
 
+export function useUpdateAppAllowedRunners() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ appId, allowed_runner_ids }: { appId: number; allowed_runner_ids: number[] }) =>
+      fetch(`/api/apps/${appId}/allowed-runners`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ allowed_runner_ids }),
+      }).then(r => { if (!r.ok) throw new Error('Failed'); return r.json() }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['apps'] }),
+  })
+}
+
+export function useUpdateRunner() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ runnerId, enabled }: { runnerId: number; enabled: boolean }) =>
+      patch<{ ok: boolean }>(`/api/runners/${runnerId}`, { enabled }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['runners'] })
+      qc.invalidateQueries({ queryKey: ['llm-status'] })
+    },
+  })
+}
+
 // ── App management ───────────────────────────────────────────────────────────
 
 export function useApproveApp() {
