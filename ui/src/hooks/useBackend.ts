@@ -41,6 +41,7 @@ async function del<T>(path: string): Promise<T> {
 export interface AuthUser {
   user: string
   admin: boolean
+  environment?: string
 }
 
 export interface PublicStats {

@@ -12,17 +12,24 @@ const navItems = [
 interface NavBarProps {
   isAdmin: boolean
   user?: string
+  environment?: string
 }
 
-export function NavBar({ isAdmin, user }: NavBarProps) {
+export function NavBar({ isAdmin, user, environment }: NavBarProps) {
+  const isUat = environment === 'uat'
   return (
-    <nav className="bg-gray-900 border-b border-gray-800">
+    <nav className={`border-b ${isUat ? 'bg-yellow-900/30 border-yellow-800/50' : 'bg-gray-900 border-gray-800'}`}>
       <div className="max-w-5xl mx-auto px-4 flex items-center justify-between h-14">
         <div className="flex items-center gap-2">
-          <div className="w-7 h-7 rounded-lg bg-brand-600 flex items-center justify-center">
+          <div className={`w-7 h-7 rounded-lg flex items-center justify-center ${isUat ? 'bg-yellow-600' : 'bg-brand-600'}`}>
             <span className="text-white text-xs font-bold">L</span>
           </div>
           <span className="font-semibold text-gray-100 text-sm">LLM Manager</span>
+          {isUat && (
+            <span className="text-[10px] bg-yellow-800 text-yellow-300 px-2 py-0.5 rounded-full font-bold uppercase tracking-wider">
+              UAT
+            </span>
+          )}
         </div>
 
         <div className="flex items-center gap-1">

@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Download, Trash2, Loader2, CheckCircle2, AlertCircle, Image, Layers, Cpu, Upload, Shield, ShieldOff, Play, Square, Search, RefreshCw, BookOpen, Cloud, Settings2, Power, Copy } from 'lucide-react'
+import { Download, Trash2, Loader2, CheckCircle2, AlertCircle, Image, Layers, Cpu, Upload, Shield, ShieldOff, Play, Square, Search, RefreshCw, BookOpen, Cloud, Settings2, Power, Copy, Server } from 'lucide-react'
 import { useLlmModels, usePullModel, useDeleteModel, useCheckpoints, useSwitchCheckpoint, useLlmStatus, useLoadModel, useUnloadModel, useStartComfyui, useStopComfyui, useLibrary, useRefreshLibrary, useCloudModels, useCloudStatus, useUpdateCloudModel, useCloudKeys, useStoreCloudKey, useDeleteCloudKey, useRunners, useMirrorModels } from '../hooks/useBackend'
 import type { LlmModel, LibraryModel, Runner } from '../types'
 import type { CloudModel, StoredApiKey } from '../hooks/useBackend'
@@ -852,6 +852,13 @@ export function Models() {
       )}
 
       {tab === 'local' ? (
+        runnerList.length === 0 ? (
+          <div className="bg-gray-900 border border-gray-800 rounded-xl py-12 text-center">
+            <Server className="w-8 h-8 text-gray-700 mx-auto mb-3" />
+            <p className="text-sm text-gray-500">No runners connected</p>
+            <p className="text-xs text-gray-600 mt-1">Start an llm-agent on a GPU host to manage models.</p>
+          </div>
+        ) : (
         <div className="space-y-8">
           <TextModelsSection selectedRunner={selectedRunner} selectedRunnerHostname={runnerList.find((r: Runner) => r.id === selectedRunner)?.hostname} />
           <div className="border-t border-gray-800" />
@@ -859,6 +866,7 @@ export function Models() {
           <div className="border-t border-gray-800" />
           <ImageModelsSection />
         </div>
+        )
       ) : (
         <CloudModelsSection />
       )}

@@ -23,7 +23,7 @@ export default function App() {
 
   return (
     <div className="min-h-screen">
-      <NavBar isAdmin={isAdmin} user={auth.data?.user} />
+      <NavBar isAdmin={isAdmin} user={auth.data?.user} environment={auth.data?.environment} />
       <main className="max-w-5xl mx-auto px-4 py-6">
         {isAdmin ? (
           <Routes>
