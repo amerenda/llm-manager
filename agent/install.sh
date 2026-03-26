@@ -1,12 +1,17 @@
 #!/usr/bin/env bash
-# install.sh — Install and configure the llm-agent on the GPU host.
-# Auto-detects NVIDIA or AMD GPU and uses the appropriate compose file.
-# Run as root or a user with sudo and docker access.
+# install.sh — Set up the llm-agent on a GPU host.
+#
+# Prerequisites:
+#   - Docker with Compose plugin (docker compose)
+#   - Ollama running on the host (localhost:11434)
+#
+# The agent is a pre-built container image pulled from Docker Hub.
+# Auto-detects NVIDIA or AMD GPU and selects the correct profile.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SERVICE_NAME="llm-agent"
+COMPOSE_FILE="$SCRIPT_DIR/compose.yaml"
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -17,127 +22,88 @@ log()  { echo -e "${GREEN}[install]${NC} $*"; }
 warn() { echo -e "${YELLOW}[warn]${NC} $*"; }
 die()  { echo -e "${RED}[error]${NC} $*" >&2; exit 1; }
 
-# ── Check dependencies ────────────────────────────────────────────────────────
+# ── Check prerequisites ──────────────────────────────────────────────────────
 
-log "Checking dependencies..."
+log "Checking prerequisites..."
 
 command -v docker >/dev/null 2>&1 || die "Docker is not installed. Install from https://docs.docker.com/engine/install/"
-docker info >/dev/null 2>&1 || die "Docker daemon is not running. Start it with: sudo systemctl start docker"
+docker compose version >/dev/null 2>&1 || die "Docker Compose plugin is not installed."
+docker info >/dev/null 2>&1 || die "Docker daemon is not running."
+
+if ! curl -sf http://localhost:11434/api/tags >/dev/null 2>&1; then
+    die "Ollama is not running on localhost:11434. Install and start Ollama first: https://ollama.com/download"
+fi
+log "Ollama is running."
 
 # ── Detect GPU vendor ────────────────────────────────────────────────────────
 
 GPU_VENDOR="none"
 
-# Check for AMD first via device nodes (more reliable than CLI tools which
-# can be installed without matching hardware, e.g. nvidia-smi from Ollama deps).
 if [[ -e /dev/kfd ]] && [[ -d /dev/dri ]]; then
     GPU_VENDOR="amd"
     log "AMD GPU detected (ROCm devices present)"
-    if command -v rocm-smi >/dev/null 2>&1; then
-        rocm-smi --showproductname 2>/dev/null || true
-    fi
 elif command -v nvidia-smi >/dev/null 2>&1 && nvidia-smi --query-gpu=name --format=csv,noheader >/dev/null 2>&1; then
     GPU_VENDOR="nvidia"
-    log "NVIDIA GPU detected:"
-    nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
+    log "NVIDIA GPU detected: $(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader)"
 else
-    warn "No GPU detected. Agent will run without GPU metrics."
+    die "No GPU detected. The agent requires a GPU for VRAM monitoring."
 fi
 
-log "GPU vendor: $GPU_VENDOR"
+PROFILE="$GPU_VENDOR"
 
-# ── Select compose file ──────────────────────────────────────────────────────
-
-if [[ "$GPU_VENDOR" == "amd" ]]; then
-    COMPOSE_FILE="$SCRIPT_DIR/docker-compose.amd.yml"
-    log "Using AMD compose file: docker-compose.amd.yml"
-else
-    COMPOSE_FILE="$SCRIPT_DIR/docker-compose.yml"
-    log "Using NVIDIA compose file: docker-compose.yml"
-fi
-
-# ── Verify GPU toolkit (vendor-specific) ─────────────────────────────────────
-
-if [[ "$GPU_VENDOR" == "nvidia" ]]; then
-    if ! docker run --rm --gpus all nvidia/cuda:12.0-base-ubuntu22.04 nvidia-smi >/dev/null 2>&1; then
-        warn "nvidia-container-toolkit may not be installed or GPU unavailable."
-        warn "Install it from: https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html"
-        warn "Continuing anyway — agent will run without GPU metrics."
-    fi
-elif [[ "$GPU_VENDOR" == "amd" ]]; then
-    if [[ ! -e /dev/kfd ]]; then
-        warn "/dev/kfd not found — ROCm kernel driver may not be loaded."
-        warn "Install ROCm: https://rocm.docs.amd.com/en/latest/deploy/linux/installer/install.html"
-    fi
-    # Verify user is in video/render groups
-    if ! groups | grep -qE '\b(video|render)\b'; then
-        warn "Current user is not in video/render groups. Adding..."
-        sudo usermod -aG render,video "$USER"
-        warn "You may need to log out and back in for group changes to take effect."
-    fi
-fi
-
-# ── Verify .env ──────────────────────────────────────────────────────────────
+# ── Configure .env ───────────────────────────────────────────────────────────
 
 if [[ ! -f "$SCRIPT_DIR/.env" ]]; then
-    if [[ -f "$SCRIPT_DIR/.env.example" ]]; then
-        cp "$SCRIPT_DIR/.env.example" "$SCRIPT_DIR/.env"
-        warn ".env created from .env.example — edit it and set LLM_MANAGER_AGENT_PSK before continuing."
-        warn "Get the PSK from Bitwarden: llm-manager-agent-psk"
-        echo ""
-        echo "  $EDITOR $SCRIPT_DIR/.env"
-        echo ""
-        die "Edit .env and re-run this script."
+    log "No .env found — creating one."
+
+    PSK="${LLM_AGENT_PSK:-}"
+    if [[ -z "$PSK" ]]; then
+        read -rp "Enter agent PSK (from Bitwarden: llm-manager-agent-psk): " PSK
     else
-        die ".env file not found and no .env.example to copy from."
+        log "Using PSK from \$LLM_AGENT_PSK"
     fi
-fi
+    [[ -z "$PSK" ]] && die "PSK is required."
 
-# ── Build and start the container ─────────────────────────────────────────────
+    read -rp "Backend URL [https://llm-manager-backend.amer.dev]: " BACKEND
+    BACKEND="${BACKEND:-https://llm-manager-backend.amer.dev}"
 
-log "Building llm-agent container..."
-docker compose -f "$COMPOSE_FILE" build
-
-log "Starting llm-agent container..."
-docker compose -f "$COMPOSE_FILE" up -d
-
-# ── Create systemd service for auto-start ─────────────────────────────────────
-
-SYSTEMD_UNIT="/etc/systemd/system/${SERVICE_NAME}.service"
-
-log "Creating systemd service at $SYSTEMD_UNIT ..."
-
-sudo tee "$SYSTEMD_UNIT" > /dev/null <<EOF
-[Unit]
-Description=LLM Agent (Ollama proxy — ${GPU_VENDOR} GPU)
-Requires=docker.service
-After=docker.service network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-WorkingDirectory=${SCRIPT_DIR}
-ExecStart=/usr/bin/docker compose -f ${COMPOSE_FILE} up -d
-ExecStop=/usr/bin/docker compose -f ${COMPOSE_FILE} down
-TimeoutStartSec=120
-
-[Install]
-WantedBy=multi-user.target
+    cat > "$SCRIPT_DIR/.env" <<EOF
+LLM_MANAGER_AGENT_PSK=${PSK}
+BACKEND_URL=${BACKEND}
 EOF
 
-sudo systemctl daemon-reload
-sudo systemctl enable "${SERVICE_NAME}.service"
+    # AMD-specific: prompt for GFX version override
+    if [[ "$GPU_VENDOR" == "amd" ]]; then
+        echo ""
+        warn "AMD GPUs may need HSA_OVERRIDE_GFX_VERSION set for ROCm compatibility."
+        warn "Common values: 11.0.0 (RDNA 4 / RX 9070), 10.3.0 (RDNA 2), 11.0.0 (RDNA 3)"
+        read -rp "HSA_OVERRIDE_GFX_VERSION (leave blank to skip): " GFX_VER
+        if [[ -n "$GFX_VER" ]]; then
+            echo "HSA_OVERRIDE_GFX_VERSION=${GFX_VER}" >> "$SCRIPT_DIR/.env"
+        fi
+    fi
 
-log "Systemd service '${SERVICE_NAME}' enabled for auto-start on boot."
+    log ".env created."
+else
+    log "Using existing .env"
+fi
 
-# ── Wait for health check ──────────────────────────────────────────────────────
+# ── Pull and start ───────────────────────────────────────────────────────────
 
-log "Waiting for llm-agent to become healthy..."
+log "Pulling agent image (profile: $PROFILE)..."
+docker compose -f "$COMPOSE_FILE" --profile "$PROFILE" pull
+
+log "Starting llm-agent..."
+docker compose -f "$COMPOSE_FILE" --profile "$PROFILE" up -d
+
+# ── Health check ─────────────────────────────────────────────────────────────
+
+log "Waiting for agent to become healthy..."
 for i in $(seq 1 30); do
     if curl -sf https://localhost:8090/health --insecure >/dev/null 2>&1; then
+        echo ""
         log "llm-agent is up!"
-        curl -s https://localhost:8090/health --insecure | python3 -m json.tool
+        curl -s https://localhost:8090/health --insecure | python3 -m json.tool 2>/dev/null || true
         break
     fi
     echo -n "."
@@ -145,17 +111,14 @@ for i in $(seq 1 30); do
 done
 
 if ! curl -sf https://localhost:8090/health --insecure >/dev/null 2>&1; then
-    warn "Agent didn't respond after 60s. Check logs with: docker logs llm-agent"
+    warn "Agent didn't respond after 60s. Check: docker logs llm-agent"
 fi
 
 echo ""
-log "Installation complete! (GPU: $GPU_VENDOR)"
+log "Done! (GPU: $GPU_VENDOR, profile: $PROFILE)"
 echo ""
-echo "  Health:  https://localhost:8090/health"
-echo "  Status:  https://localhost:8090/v1/status"
-echo "  Models:  https://localhost:8090/v1/models"
-echo "  Metrics: https://localhost:8090/metrics"
+echo "  Health:   curl -sk https://localhost:8090/health"
+echo "  Logs:     docker logs -f llm-agent"
+echo "  Stop:     docker compose -f $COMPOSE_FILE --profile $PROFILE down"
+echo "  Restart:  docker compose -f $COMPOSE_FILE --profile $PROFILE restart"
 echo ""
-echo "  View logs:    docker logs -f llm-agent"
-echo "  Stop:         docker compose -f $COMPOSE_FILE down"
-echo "  Restart:      docker compose -f $COMPOSE_FILE restart"

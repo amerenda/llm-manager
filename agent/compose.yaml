@@ -1,0 +1,50 @@
+# llm-agent — GPU monitoring + Ollama proxy
+# Prerequisites: Docker Compose, Ollama running on host
+#
+# Usage:
+#   docker compose --profile nvidia up -d
+#   docker compose --profile amd up -d
+
+services:
+  llm-agent:
+    profiles: ["nvidia"]
+    image: amerenda/llm-manager:agent-latest
+    container_name: llm-agent
+    network_mode: host
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      OLLAMA_URL: http://localhost:11434
+    volumes:
+      - agent-tls:/data/tls
+      - /var/run/docker.sock:/var/run/docker.sock
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  llm-agent-amd:
+    profiles: ["amd"]
+    image: amerenda/llm-manager:agent-amd-latest
+    container_name: llm-agent
+    network_mode: host
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      OLLAMA_URL: http://localhost:11434
+      HSA_OVERRIDE_GFX_VERSION: ${HSA_OVERRIDE_GFX_VERSION:-}
+    devices:
+      - /dev/kfd:/dev/kfd
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
+      - render
+    volumes:
+      - agent-tls:/data/tls
+      - /var/run/docker.sock:/var/run/docker.sock
+
+volumes:
+  agent-tls:
