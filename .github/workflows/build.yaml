@@ -144,7 +144,7 @@ jobs:
           git commit -m "${PREFIX}: llm-manager ${TAG}"
           git push origin "${BRANCH}"
 
-          curl -s -X POST \
+          PR_RESPONSE=$(curl -s -X POST \
             -H "Authorization: token ${GITOPS_PAT}" \
             -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/${GITOPS_REPO}/pulls" \
@@ -153,7 +153,14 @@ jobs:
               \"body\": \"Deploy llm-manager ${TAG}.\\n\\nUAT deploys automatically when this PR opens (via ApplicationSet).\\nProd deploys when this PR is merged.\\n\\nImages:\\n- \`amerenda/llm-manager:backend-${TAG}\`\\n- \`amerenda/llm-manager:ui-${TAG}\`\\n\\nSource: https://github.com/amerenda/llm-manager/commit/${GITHUB_SHA}\",
               \"head\": \"${BRANCH}\",
               \"base\": \"main\"
-            }"
+            }")
+
+          # Add label so ApplicationSet only creates llm-manager UAT apps
+          PR_NUMBER=$(echo "$PR_RESPONSE" | python3 -c "import json,sys; print(json.load(sys.stdin)['number'])")
+          curl -s -X POST \
+            -H "Authorization: token ${GITOPS_PAT}" \
+            "https://api.github.com/repos/${GITOPS_REPO}/issues/${PR_NUMBER}/labels" \
+            -d '["deploy:llm-manager"]'
 
 
   notify-failure:
