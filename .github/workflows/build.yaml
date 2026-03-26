@@ -84,6 +84,7 @@ jobs:
           file: agent/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
+          no-cache: true
           tags: |
             ${{ env.IMAGE }}:agent-${{ steps.tag.outputs.tag }}
             ${{ env.IMAGE }}:agent-latest
@@ -95,6 +96,7 @@ jobs:
           file: agent/Dockerfile.amd
           platforms: linux/amd64
           push: true
+          no-cache: true
           tags: |
             ${{ env.IMAGE }}:agent-amd-${{ steps.tag.outputs.tag }}
             ${{ env.IMAGE }}:agent-amd-latest
