@@ -12,6 +12,17 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMPOSE_FILE="$SCRIPT_DIR/compose.yaml"
+UPDATE_ONLY=false
+NEW_PSK=""
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --update|-u) UPDATE_ONLY=true; shift ;;
+        --psk) NEW_PSK="$2"; shift 2 ;;
+        --psk=*) NEW_PSK="${1#--psk=}"; shift ;;
+        *) echo "Usage: $0 [--update|-u] [--psk <value>]" >&2; exit 1 ;;
+    esac
+done
 
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -30,10 +41,14 @@ command -v docker >/dev/null 2>&1 || die "Docker is not installed. Install from 
 docker compose version >/dev/null 2>&1 || die "Docker Compose plugin is not installed."
 docker info >/dev/null 2>&1 || die "Docker daemon is not running."
 
-if ! curl -sf http://localhost:11434/api/tags >/dev/null 2>&1; then
-    die "Ollama is not running on localhost:11434. Install and start Ollama first: https://ollama.com/download"
+if ! "$UPDATE_ONLY"; then
+    if ! curl -sf http://localhost:11434/api/tags >/dev/null 2>&1; then
+        die "Ollama is not running on localhost:11434. Install and start Ollama first: https://ollama.com/download"
+    fi
+    log "Ollama is running."
+else
+    log "Update mode — skipping Ollama check."
 fi
-log "Ollama is running."
 
 # ── Detect GPU vendor ────────────────────────────────────────────────────────
 
@@ -53,7 +68,12 @@ PROFILE="$GPU_VENDOR"
 
 # ── Configure .env ───────────────────────────────────────────────────────────
 
-if [[ ! -f "$SCRIPT_DIR/.env" ]]; then
+if [[ -n "$NEW_PSK" ]] && [[ -f "$SCRIPT_DIR/.env" ]]; then
+    sed -i "s|^LLM_MANAGER_AGENT_PSK=.*|LLM_MANAGER_AGENT_PSK=${NEW_PSK}|" "$SCRIPT_DIR/.env"
+    log "Updated PSK in existing .env"
+elif "$UPDATE_ONLY" && [[ -f "$SCRIPT_DIR/.env" ]]; then
+    log "Update mode — using existing .env"
+elif [[ ! -f "$SCRIPT_DIR/.env" ]]; then
     log "No .env found — creating one."
 
     PSK="${LLM_AGENT_PSK:-}"
