@@ -24,12 +24,7 @@ export function NavBar({ isAdmin, user, environment }: NavBarProps) {
           <div className={`w-7 h-7 rounded-lg flex items-center justify-center ${isUat ? 'bg-yellow-600' : 'bg-brand-600'}`}>
             <span className="text-white text-xs font-bold">L</span>
           </div>
-          <span className="font-semibold text-gray-100 text-sm">LLM Manager</span>
-          {isUat && (
-            <span className="text-[10px] bg-yellow-800 text-yellow-300 px-2 py-0.5 rounded-full font-bold uppercase tracking-wider">
-              UAT
-            </span>
-          )}
+          <span className="font-semibold text-gray-100 text-sm">LLM Manager{isUat ? ' UAT' : ''}</span>
         </div>
 
         <div className="flex items-center gap-1">
