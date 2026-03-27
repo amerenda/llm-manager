@@ -14,13 +14,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 COMPOSE_FILE="$SCRIPT_DIR/compose.yaml"
 UPDATE_ONLY=false
 NEW_PSK=""
+MODEL_STORAGE=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --update|-u) UPDATE_ONLY=true; shift ;;
         --psk) NEW_PSK="$2"; shift 2 ;;
         --psk=*) NEW_PSK="${1#--psk=}"; shift ;;
-        *) echo "Usage: $0 [--update|-u] [--psk <value>]" >&2; exit 1 ;;
+        --model-storage) MODEL_STORAGE="$2"; shift 2 ;;
+        --model-storage=*) MODEL_STORAGE="${1#--model-storage=}"; shift ;;
+        *) echo "Usage: $0 [--update|-u] [--psk <value>] [--model-storage <path>]" >&2; exit 1 ;;
     esac
 done
 
@@ -89,8 +92,15 @@ elif [[ ! -f "$SCRIPT_DIR/.env" ]]; then
 
     # Detect Ollama model storage path
     OLLAMA_MODELS_PATH=""
+    # --model-storage flag takes priority, then MODEL_STORAGE_PATH env var
+    if [[ -n "$MODEL_STORAGE" ]]; then
+        OLLAMA_MODELS_PATH="$MODEL_STORAGE"
+        log "Ollama models path (from --model-storage flag): $OLLAMA_MODELS_PATH"
+    elif [[ -n "${MODEL_STORAGE_PATH:-}" ]]; then
+        OLLAMA_MODELS_PATH="$MODEL_STORAGE_PATH"
+        log "Ollama models path (from MODEL_STORAGE_PATH env): $OLLAMA_MODELS_PATH"
     # Check OLLAMA_MODELS env var (set by user or ollama systemd unit)
-    if [[ -n "${OLLAMA_MODELS:-}" ]]; then
+    elif [[ -n "${OLLAMA_MODELS:-}" ]]; then
         OLLAMA_MODELS_PATH="$OLLAMA_MODELS"
         log "Ollama models path (from env): $OLLAMA_MODELS_PATH"
     elif [[ -d "/usr/share/ollama/.ollama/models" ]]; then

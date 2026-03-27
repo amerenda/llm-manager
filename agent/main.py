@@ -74,7 +74,8 @@ if _GPU_BACKEND == "none":
 
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 # Ollama model storage — used for disk space reporting
-OLLAMA_MODELS_DIR = os.environ.get("OLLAMA_MODELS", os.path.expanduser("~/.ollama/models"))
+# MODEL_STORAGE_PATH takes priority, then OLLAMA_MODELS, then default
+OLLAMA_MODELS_DIR = os.environ.get("MODEL_STORAGE_PATH") or os.environ.get("OLLAMA_MODELS", os.path.expanduser("~/.ollama/models"))
 COMFYUI_URL = os.environ.get("COMFYUI_URL", "http://localhost:8188")
 COMFYUI_OUTPUT_DIR = os.environ.get("COMFYUI_OUTPUT_DIR", "/outputs")
 COMFYUI_IMAGE = os.environ.get("COMFYUI_IMAGE", "murderbot-image-comfyui:latest")
