@@ -147,13 +147,22 @@ jobs:
           git commit -m "${PREFIX}: llm-manager ${TAG}"
           git push origin "${BRANCH}"
 
+          # Get source commit message for the PR body
+          COMMIT_MSG=$(git -C "${GITHUB_WORKSPACE}" log -1 --format='%s' 2>/dev/null || echo "")
+          COMMIT_BODY=$(git -C "${GITHUB_WORKSPACE}" log -1 --format='%b' 2>/dev/null | head -5 || echo "")
+          PR_BODY="**llm-manager ${TAG}**\n\n${COMMIT_MSG}"
+          if [ -n "${COMMIT_BODY}" ]; then
+            PR_BODY="${PR_BODY}\n\n${COMMIT_BODY}"
+          fi
+          PR_BODY="${PR_BODY}\n\nImages: \`amerenda/llm-manager:backend-${TAG}\`, \`amerenda/llm-manager:ui-${TAG}\`\nSource: https://github.com/amerenda/llm-manager/commit/${GITHUB_SHA}"
+
           PR_RESPONSE=$(curl -s -X POST \
             -H "Authorization: token ${GITOPS_PAT}" \
             -H "Accept: application/vnd.github.v3+json" \
             "https://api.github.com/repos/${GITOPS_REPO}/pulls" \
             -d "{
               \"title\": \"${PREFIX}: llm-manager ${TAG}\",
-              \"body\": \"Deploy llm-manager ${TAG}.\\n\\nUAT deploys automatically when this PR opens (via ApplicationSet).\\nProd deploys when this PR is merged.\\n\\nImages:\\n- \`amerenda/llm-manager:backend-${TAG}\`\\n- \`amerenda/llm-manager:ui-${TAG}\`\\n\\nSource: https://github.com/amerenda/llm-manager/commit/${GITHUB_SHA}\",
+              \"body\": \"$(echo -e "${PR_BODY}" | sed 's/"/\\"/g')\",
               \"head\": \"${BRANCH}\",
               \"base\": \"main\"
             }")
