@@ -175,6 +175,12 @@ jobs:
             "https://api.github.com/repos/${GITOPS_REPO}/issues/${PR_NUMBER}/labels" \
             -d '["deploy:llm-manager"]'
 
+          # Assign Alex so he gets a phone notification
+          curl -s -X POST \
+            -H "Authorization: token ${GITOPS_PAT}" \
+            "https://api.github.com/repos/${GITOPS_REPO}/issues/${PR_NUMBER}/assignees" \
+            -d '{"assignees":["amerenda"]}'
+
 
   notify-failure:
     if: failure()
