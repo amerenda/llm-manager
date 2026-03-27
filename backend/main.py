@@ -424,10 +424,10 @@ async def public_stats():
 # ── GPU info (proxied from active runner) ────────────────────────────────────
 
 @app.get("/api/gpu")
-async def gpu_info():
-    """GPU info from the primary active runner."""
+async def gpu_info(runner_id: Optional[int] = None):
+    """GPU info from a specific runner, or the first active runner."""
     try:
-        client = await _get_runner_client(app.state.db)
+        client = await _get_runner_client(app.state.db, runner_id)
         status = await client.status()
         total = status.get("gpu_vram_total_gb", 0)
         used = status.get("gpu_vram_used_gb", 0)
