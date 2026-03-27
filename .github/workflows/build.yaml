@@ -150,18 +150,12 @@ jobs:
           # Get source commit message for the PR body
           COMMIT_MSG=$(git -C "${GITHUB_WORKSPACE}" log -1 --format='%s' 2>/dev/null || echo "")
           COMMIT_BODY=$(git -C "${GITHUB_WORKSPACE}" log -1 --format='%b' 2>/dev/null | head -5 || echo "")
-          PR_BODY="**llm-manager ${TAG}**
-
-${COMMIT_MSG}"
+          NL=$'\n'
+          PR_BODY="**llm-manager ${TAG}**${NL}${NL}${COMMIT_MSG}"
           if [ -n "${COMMIT_BODY}" ]; then
-            PR_BODY="${PR_BODY}
-
-${COMMIT_BODY}"
+            PR_BODY="${PR_BODY}${NL}${NL}${COMMIT_BODY}"
           fi
-          PR_BODY="${PR_BODY}
-
-Images: \`amerenda/llm-manager:backend-${TAG}\`, \`amerenda/llm-manager:ui-${TAG}\`
-Source: https://github.com/amerenda/llm-manager/commit/${GITHUB_SHA}"
+          PR_BODY="${PR_BODY}${NL}${NL}Images: \`amerenda/llm-manager:backend-${TAG}\`, \`amerenda/llm-manager:ui-${TAG}\`${NL}Source: https://github.com/amerenda/llm-manager/commit/${GITHUB_SHA}"
 
           PR_RESPONSE=$(curl -s -X POST \
             -H "Authorization: token ${GITOPS_PAT}" \
