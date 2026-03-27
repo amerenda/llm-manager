@@ -47,7 +47,7 @@ function AllRunnersModelView({ runners }: { runners: Runner[] }) {
   const status = useLlmStatus()
   const allLoadedModels = status.data?.loaded_ollama_models ?? []
   const runnerStatuses = status.data?.runners ?? []
-  const textModels = (models.data ?? []).filter((m: LlmModel) => m.type === 'text')
+  const textModels = (models.data ?? []).filter((m: LlmModel) => m.type === 'text').sort((a, b) => a.id.localeCompare(b.id))
 
   // Group by base model name to detect same-model-different-weights
   const baseGroups: Record<string, LlmModel[]> = {}
@@ -179,6 +179,7 @@ function RunnerModelView({ runnerId, runnerHostname }: { runnerId: number; runne
   const textModels = (models.data ?? [])
     .filter((m: LlmModel) => m.type === 'text')
     .filter((m: LlmModel) => m.runners?.some(r => r.runner_id === runnerId))
+    .sort((a, b) => a.id.localeCompare(b.id))
 
   const allLoadedModels = status.data?.loaded_ollama_models ?? []
   const loadedModels = allLoadedModels.filter(m => m.runner === runnerHostname)
