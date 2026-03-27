@@ -15,9 +15,11 @@ services:
     env_file: .env
     environment:
       OLLAMA_URL: http://localhost:11434
+      OLLAMA_MODELS: /hostfs${OLLAMA_MODELS_PATH:-/root/.ollama/models}
     volumes:
       - agent-tls:/data/tls
       - /var/run/docker.sock:/var/run/docker.sock
+      - /:/hostfs:ro
     deploy:
       resources:
         reservations:
@@ -36,6 +38,7 @@ services:
     environment:
       OLLAMA_URL: http://localhost:11434
       HSA_OVERRIDE_GFX_VERSION: ${HSA_OVERRIDE_GFX_VERSION:-}
+      OLLAMA_MODELS: /hostfs${OLLAMA_MODELS_PATH:-/root/.ollama/models}
     devices:
       - /dev/kfd:/dev/kfd
       - /dev/dri:/dev/dri
@@ -46,6 +49,7 @@ services:
       - agent-tls:/data/tls
       - /var/run/docker.sock:/var/run/docker.sock
       - /sys:/sys:ro
+      - /:/hostfs:ro
 
 volumes:
   agent-tls:

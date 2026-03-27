@@ -87,9 +87,33 @@ elif [[ ! -f "$SCRIPT_DIR/.env" ]]; then
     BACKEND="${BACKEND_URL:-https://llm-manager-backend.amer.dev}"
     log "Backend URL: $BACKEND"
 
+    # Detect Ollama model storage path
+    OLLAMA_MODELS_PATH=""
+    # Check OLLAMA_MODELS env var (set by user or ollama systemd unit)
+    if [[ -n "${OLLAMA_MODELS:-}" ]]; then
+        OLLAMA_MODELS_PATH="$OLLAMA_MODELS"
+        log "Ollama models path (from env): $OLLAMA_MODELS_PATH"
+    elif [[ -d "/usr/share/ollama/.ollama/models" ]]; then
+        OLLAMA_MODELS_PATH="/usr/share/ollama/.ollama/models"
+        log "Ollama models path: $OLLAMA_MODELS_PATH"
+    elif [[ -d "$HOME/.ollama/models" ]]; then
+        OLLAMA_MODELS_PATH="$HOME/.ollama/models"
+        log "Ollama models path: $OLLAMA_MODELS_PATH"
+    else
+        # Check ollama systemd env for OLLAMA_MODELS override
+        if systemctl is-active --quiet ollama 2>/dev/null; then
+            OLLAMA_MODELS_PATH=$(systemctl show ollama -p Environment 2>/dev/null | grep -oP 'OLLAMA_MODELS=\K[^ ]+' || true)
+        fi
+        if [[ -z "$OLLAMA_MODELS_PATH" ]]; then
+            OLLAMA_MODELS_PATH="/root/.ollama/models"
+            warn "Could not detect Ollama models path, defaulting to $OLLAMA_MODELS_PATH"
+        fi
+    fi
+
     cat > "$SCRIPT_DIR/.env" <<EOF
 LLM_MANAGER_AGENT_PSK=${PSK}
 BACKEND_URL=${BACKEND}
+OLLAMA_MODELS_PATH=${OLLAMA_MODELS_PATH}
 EOF
 
     # AMD-specific: auto-detect GFX version and set override for ROCm compatibility

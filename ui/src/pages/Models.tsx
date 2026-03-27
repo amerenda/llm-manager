@@ -46,6 +46,7 @@ function AllRunnersModelView({ runners }: { runners: Runner[] }) {
   const models = useLlmModels()
   const status = useLlmStatus()
   const allLoadedModels = status.data?.loaded_ollama_models ?? []
+  const runnerStatuses = status.data?.runners ?? []
   const textModels = (models.data ?? []).filter((m: LlmModel) => m.type === 'text')
 
   // Group by base model name to detect same-model-different-weights
@@ -68,6 +69,34 @@ function AllRunnersModelView({ runners }: { runners: Runner[] }) {
   }
 
   return (
+    <div className="space-y-3">
+      {/* Per-runner disk bars */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+        {runners.map(r => {
+          const rs = runnerStatuses.find(s => s.runner_id === r.id)
+          const diskTotal = rs?.disk_total_gb ?? 0
+          const diskFree = rs?.disk_free_gb ?? 0
+          const diskPct = diskTotal > 0 ? Math.round((diskTotal - diskFree) / diskTotal * 100) : 0
+          if (!diskTotal) return null
+          return (
+            <div key={r.id} className="bg-gray-900 border border-gray-800 rounded-xl p-3">
+              <div className="flex items-center justify-between text-xs text-gray-400 mb-1.5">
+                <span>{r.hostname} disk</span>
+                <span>{diskFree.toFixed(1)} GB free</span>
+              </div>
+              <div className="h-1.5 bg-gray-800 rounded-full overflow-hidden">
+                <div className={`h-full rounded-full transition-all ${
+                  diskPct > 95 ? 'bg-red-500' : diskPct > 85 ? 'bg-yellow-500' : 'bg-emerald-500'
+                }`} style={{ width: `${diskPct}%` }} />
+              </div>
+              {diskFree < 5 && (
+                <p className="text-[10px] text-red-400 mt-1">Low disk space</p>
+              )}
+            </div>
+          )
+        })}
+      </div>
+
     <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
       <table className="w-full text-sm">
         <thead>
@@ -130,6 +159,7 @@ function AllRunnersModelView({ runners }: { runners: Runner[] }) {
         <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-blue-900" /> Loaded in VRAM</span>
       </div>
     </div>
+    </div>
   )
 }
 
@@ -160,6 +190,11 @@ function RunnerModelView({ runnerId, runnerHostname }: { runnerId: number; runne
   const vramTotal = runnerStatus?.gpu_vram_total_gb ?? 0
   const vramPct = vramTotal > 0 ? Math.round(vramUsed / vramTotal * 100) : 0
 
+  const diskUsed = runnerStatus?.disk_used_gb ?? 0
+  const diskTotal = runnerStatus?.disk_total_gb ?? 0
+  const diskFree = runnerStatus?.disk_free_gb ?? 0
+  const diskPct = diskTotal > 0 ? Math.round(diskUsed / diskTotal * 100) : 0
+
   async function handlePull() {
     const name = pullInput.trim()
     if (!name) return
@@ -177,23 +212,49 @@ function RunnerModelView({ runnerId, runnerHostname }: { runnerId: number; runne
 
   return (
     <section className="space-y-4">
-      {/* VRAM bar */}
-      {vramTotal > 0 && (
-        <div className="bg-gray-900 border border-gray-800 rounded-xl p-3">
-          <div className="flex items-center justify-between text-xs text-gray-400 mb-1.5">
-            <span>VRAM on {runnerHostname}</span>
-            <span>{vramUsed.toFixed(1)} / {vramTotal.toFixed(1)} GB ({vramPct}%)</span>
+      {/* VRAM + Disk bars */}
+      <div className="bg-gray-900 border border-gray-800 rounded-xl p-3 space-y-3">
+        {vramTotal > 0 && (
+          <div>
+            <div className="flex items-center justify-between text-xs text-gray-400 mb-1.5">
+              <span>VRAM on {runnerHostname}</span>
+              <span>{vramUsed.toFixed(1)} / {vramTotal.toFixed(1)} GB ({vramPct}%)</span>
+            </div>
+            <div className="h-2 bg-gray-800 rounded-full overflow-hidden">
+              <div
+                className={`h-full rounded-full transition-all ${
+                  vramPct > 90 ? 'bg-red-500' : vramPct > 70 ? 'bg-yellow-500' : 'bg-brand-500'
+                }`}
+                style={{ width: `${vramPct}%` }}
+              />
+            </div>
           </div>
-          <div className="h-2 bg-gray-800 rounded-full overflow-hidden">
-            <div
-              className={`h-full rounded-full transition-all ${
-                vramPct > 90 ? 'bg-red-500' : vramPct > 70 ? 'bg-yellow-500' : 'bg-brand-500'
-              }`}
-              style={{ width: `${vramPct}%` }}
-            />
+        )}
+        {diskTotal > 0 && (
+          <div>
+            <div className="flex items-center justify-between text-xs text-gray-400 mb-1.5">
+              <span>Model storage</span>
+              <span>
+                {diskFree.toFixed(1)} GB free of {diskTotal.toFixed(1)} GB ({diskPct}% used)
+              </span>
+            </div>
+            <div className="h-2 bg-gray-800 rounded-full overflow-hidden">
+              <div
+                className={`h-full rounded-full transition-all ${
+                  diskPct > 95 ? 'bg-red-500' : diskPct > 85 ? 'bg-yellow-500' : 'bg-emerald-500'
+                }`}
+                style={{ width: `${diskPct}%` }}
+              />
+            </div>
+            {diskFree < 5 && (
+              <p className="text-[10px] text-red-400 mt-1 flex items-center gap-1">
+                <AlertCircle className="w-3 h-3" />
+                Low disk space — model downloads may fail
+              </p>
+            )}
           </div>
-        </div>
-      )}
+        )}
+      </div>
 
       {/* Pull input */}
       <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">

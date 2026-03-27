@@ -839,6 +839,28 @@ class LLMPullRequest(BaseModel):
 async def llm_pull_model(req: LLMPullRequest, runner_id: Optional[int] = None):
     """Pull a model. Runs in background — returns immediately with operation ID."""
     _inc_request("/api/llm/models/pull", "POST", 200)
+
+    # Pre-check: warn if disk is low on the target runner
+    disk_warning = None
+    try:
+        client = await _get_runner_client(app.state.db, runner_id)
+        st = await client.status()
+        disk_free_gb = st.get("disk_free_gb", None)
+        model_vram = vram_for_model(req.model)
+        # Rough heuristic: disk needed ≈ VRAM estimate (quantized weights on disk)
+        if disk_free_gb is not None and model_vram > 0 and disk_free_gb < model_vram:
+            raise HTTPException(
+                507,
+                f"Not enough disk space on {st.get('node', 'runner')}: "
+                f"{disk_free_gb:.1f} GB free, ~{model_vram:.1f} GB needed for {req.model}"
+            )
+        elif disk_free_gb is not None and disk_free_gb < 5:
+            disk_warning = f"Low disk space: {disk_free_gb:.1f} GB free"
+    except HTTPException:
+        raise
+    except Exception:
+        pass  # non-critical, proceed with pull
+
     op_id = f"pull-{req.model}-{id(req)}"
     _ops[op_id] = {"status": "running", "model": req.model, "type": "pull", "progress": ""}
 
@@ -855,7 +877,10 @@ async def llm_pull_model(req: LLMPullRequest, runner_id: Optional[int] = None):
             _ops[op_id]["error"] = str(e)
 
     asyncio.create_task(_do_pull())
-    return {"ok": True, "op_id": op_id, "message": f"Pulling {req.model} in background"}
+    msg = f"Pulling {req.model} in background"
+    if disk_warning:
+        msg += f" (warning: {disk_warning})"
+    return {"ok": True, "op_id": op_id, "message": msg}
 
 
 @app.post("/api/models/{model:path}/update")

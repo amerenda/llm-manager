@@ -9,6 +9,10 @@ export interface RunnerStatus {
   cpu_pct?: number
   mem_used_gb?: number
   mem_total_gb?: number
+  disk_total_gb?: number
+  disk_used_gb?: number
+  disk_free_gb?: number
+  disk_path?: string
   loaded_ollama_models?: { name: string; size_gb: number }[]
   comfyui_running?: boolean
   gpu_vendor?: string

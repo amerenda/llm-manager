@@ -10,6 +10,7 @@ import ipaddress
 import json
 import logging
 import os
+import shutil
 import socket
 import time
 import uuid
@@ -72,6 +73,8 @@ if _GPU_BACKEND == "none":
     logger.warning("No GPU backend detected — VRAM stats will be unavailable")
 
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
+# Ollama model storage — used for disk space reporting
+OLLAMA_MODELS_DIR = os.environ.get("OLLAMA_MODELS", os.path.expanduser("~/.ollama/models"))
 COMFYUI_URL = os.environ.get("COMFYUI_URL", "http://localhost:8188")
 COMFYUI_OUTPUT_DIR = os.environ.get("COMFYUI_OUTPUT_DIR", "/outputs")
 COMFYUI_IMAGE = os.environ.get("COMFYUI_IMAGE", "murderbot-image-comfyui:latest")
@@ -255,6 +258,7 @@ async def lifespan(app: FastAPI):
 
 async def _build_capabilities() -> dict:
     gpu = _gpu_stats()
+    disk = _disk_stats()
     loaded = await _ollama_loaded_models()
     comfyui_ok = await _comfyui_ok()
     caps = {
@@ -262,6 +266,9 @@ async def _build_capabilities() -> dict:
         "gpu_vram_total_bytes": gpu["vram_total_bytes"],
         "gpu_vram_used_bytes": gpu["vram_used_bytes"],
         "gpu_vram_free_bytes": max(0, gpu["vram_total_bytes"] - gpu["vram_used_bytes"]),
+        "disk_total_bytes": disk["disk_total_bytes"],
+        "disk_used_bytes": disk["disk_used_bytes"],
+        "disk_free_bytes": disk["disk_free_bytes"],
         "comfyui_running": comfyui_ok,
         "loaded_models": [m["name"] for m in loaded],
     }
@@ -362,6 +369,35 @@ def _sys_stats() -> dict:
     }
 
 
+def _disk_stats() -> dict:
+    """Disk usage for the Ollama model storage path."""
+    # Walk up to find the actual mount point if the models dir doesn't exist yet
+    path = OLLAMA_MODELS_DIR
+    while not os.path.exists(path):
+        parent = os.path.dirname(path)
+        if parent == path:
+            break
+        path = parent
+    try:
+        usage = shutil.disk_usage(path)
+        return {
+            "disk_total_bytes": usage.total,
+            "disk_used_bytes": usage.used,
+            "disk_free_bytes": usage.free,
+            "disk_total_gb": round(usage.total / 1e9, 2),
+            "disk_used_gb": round(usage.used / 1e9, 2),
+            "disk_free_gb": round(usage.free / 1e9, 2),
+            "disk_path": OLLAMA_MODELS_DIR,
+        }
+    except Exception as exc:
+        logger.warning("Disk stats failed for %s: %s", OLLAMA_MODELS_DIR, exc)
+        return {
+            "disk_total_bytes": 0, "disk_used_bytes": 0, "disk_free_bytes": 0,
+            "disk_total_gb": 0, "disk_used_gb": 0, "disk_free_gb": 0,
+            "disk_path": OLLAMA_MODELS_DIR,
+        }
+
+
 def _update_gauges(gpu: dict, sys: dict, loaded_count: int, comfyui_ok: bool):
     gpu_vram_used.labels(node=NODE).set(gpu["vram_used_bytes"])
     gpu_vram_total.labels(node=NODE).set(gpu["vram_total_bytes"])
@@ -455,6 +491,7 @@ async def status():
     t0 = time.time()
     gpu = _gpu_stats()
     sys = _sys_stats()
+    disk = _disk_stats()
     loaded = await _ollama_loaded_models()
     comfyui_up = await _comfyui_ok()
     checkpoints = await _comfyui_checkpoints()
@@ -472,6 +509,10 @@ async def status():
         "gpu_vram_pct": gpu["vram_pct"],
         "gpu_vram_used_gb": round(gpu["vram_used_bytes"] / 1e9, 2),
         "gpu_vram_total_gb": round(gpu["vram_total_bytes"] / 1e9, 2),
+        "disk_total_gb": disk["disk_total_gb"],
+        "disk_used_gb": disk["disk_used_gb"],
+        "disk_free_gb": disk["disk_free_gb"],
+        "disk_path": disk["disk_path"],
         "cpu_pct": sys["cpu_pct"],
         "mem_used_gb": sys["mem_used_gb"],
         "mem_total_gb": sys["mem_total_gb"],
