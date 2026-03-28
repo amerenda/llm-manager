@@ -65,17 +65,17 @@ jobs:
             ${{ env.IMAGE }}:backend-${{ steps.tag.outputs.tag }}
             ${{ env.IMAGE }}:backend-latest
 
-      - name: Build and push UI
+      - name: Build and push frontend
         uses: docker/build-push-action@v6
         with:
-          context: ui
-          file: ui/Dockerfile
+          context: frontend
+          file: frontend/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
           no-cache: true
           tags: |
-            ${{ env.IMAGE }}:ui-${{ steps.tag.outputs.tag }}
-            ${{ env.IMAGE }}:ui-latest
+            ${{ env.IMAGE }}:frontend-${{ steps.tag.outputs.tag }}
+            ${{ env.IMAGE }}:frontend-latest
 
       - name: Build and push agent
         uses: docker/build-push-action@v6
@@ -136,9 +136,9 @@ jobs:
           sed -i "s|amerenda/llm-manager:backend-[^ ]*|amerenda/llm-manager:backend-${TAG}|g" \
             apps/llm-manager/backend-uat/deployment.yaml \
             apps/llm-manager/backend/deployment.yaml
-          sed -i "s|amerenda/llm-manager:ui-[^ ]*|amerenda/llm-manager:ui-${TAG}|g" \
-            apps/llm-manager/ui-uat/deployment.yaml \
-            apps/llm-manager/ui/deployment.yaml
+          sed -i "s|amerenda/llm-manager:frontend-[^ ]*|amerenda/llm-manager:frontend-${TAG}|g" \
+            apps/llm-manager/frontend-uat/deployment.yaml \
+            apps/llm-manager/frontend/deployment.yaml
 
           git config user.name "amerenda-deploy-bot[bot]"
           git config user.email "3192609+amerenda-deploy-bot[bot]@users.noreply.github.com"
@@ -155,7 +155,7 @@ jobs:
           if [ -n "${COMMIT_BODY}" ]; then
             PR_BODY="${PR_BODY}${NL}${NL}${COMMIT_BODY}"
           fi
-          PR_BODY="${PR_BODY}${NL}${NL}Images: \`amerenda/llm-manager:backend-${TAG}\`, \`amerenda/llm-manager:ui-${TAG}\`${NL}Source: https://github.com/amerenda/llm-manager/commit/${GITHUB_SHA}"
+          PR_BODY="${PR_BODY}${NL}${NL}Images: \`amerenda/llm-manager:backend-${TAG}\`, \`amerenda/llm-manager:frontend-${TAG}\`${NL}Source: https://github.com/amerenda/llm-manager/commit/${GITHUB_SHA}"
 
           PR_RESPONSE=$(curl -s -X POST \
             -H "Authorization: token ${GITOPS_PAT}" \

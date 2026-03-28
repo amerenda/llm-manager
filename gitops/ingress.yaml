@@ -24,6 +24,6 @@ spec:
             pathType: Prefix
             backend:
               service:
-                name: llm-manager-ui
+                name: llm-manager-frontend
                 port:
                   number: 80

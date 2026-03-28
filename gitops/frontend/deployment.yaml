@@ -1,17 +1,17 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: llm-manager-ui
+  name: llm-manager-frontend
   namespace: llm-manager
 spec:
   replicas: 2
   selector:
     matchLabels:
-      app: llm-manager-ui
+      app: llm-manager-frontend
   template:
     metadata:
       labels:
-        app: llm-manager-ui
+        app: llm-manager-frontend
     spec:
       affinity:
         nodeAffinity:
@@ -24,8 +24,8 @@ spec:
                     values:
                       - murderbot
       containers:
-        - name: ui
-          image: amerenda/llm-manager:ui-49511c5461318065ce660b8b55a371c5c8e8d33e
+        - name: frontend
+          image: amerenda/llm-manager:frontend-49511c5461318065ce660b8b55a371c5c8e8d33e
           imagePullPolicy: Always
           ports:
             - containerPort: 80
