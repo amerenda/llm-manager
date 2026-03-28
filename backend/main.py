@@ -717,8 +717,9 @@ def _agent_unavailable(detail: str = "No active llm-runner available") -> HTTPEx
 
 
 @app.get("/api/llm/status")
-async def llm_status(runner_id: Optional[int] = None):
-    """Status from a single runner, or aggregated from all runners."""
+async def llm_status(request: Request, runner_id: Optional[int] = None):
+    """Status from a single runner, or aggregated from all runners.
+    If a Bearer token is provided, filter to runners allowed for that app."""
     _inc_request("/api/llm/status", "GET", 200)
     pool = app.state.db
 
@@ -729,8 +730,17 @@ async def llm_status(runner_id: Optional[int] = None):
         except Exception as e:
             raise _agent_unavailable(f"Runner error: {e}")
 
+    # If caller provides a Bearer token, filter to their allowed runners
+    allowed_runner_ids: list[int] = []
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        api_key = auth_header.removeprefix("Bearer ").strip()
+        allowed_runner_ids = await db.get_app_allowed_runners(pool, api_key)
+
     # Aggregate from all runners
     runners_list = await db.get_active_runners(pool)
+    if allowed_runner_ids:
+        runners_list = [r for r in runners_list if r["id"] in allowed_runner_ids]
     if not runners_list:
         return {"runners": [], "gpu_vram_total_gb": 0, "gpu_vram_used_gb": 0,
                 "loaded_ollama_models": [], "cpu_pct": 0, "mem_total_gb": 0,
