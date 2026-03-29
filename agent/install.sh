@@ -164,6 +164,12 @@ fi
 
 # ── Pull and start ───────────────────────────────────────────────────────────
 
+# Remove any stale llm-agent container (e.g. from a different compose file)
+if docker inspect llm-agent >/dev/null 2>&1; then
+    log "Removing existing llm-agent container..."
+    docker rm -f llm-agent >/dev/null 2>&1
+fi
+
 log "Pulling agent image (profile: $PROFILE)..."
 docker compose -f "$COMPOSE_FILE" --profile "$PROFILE" pull
 

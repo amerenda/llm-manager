@@ -20,6 +20,8 @@ services:
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./tls:/data/tls
+      - /sys:/sys:ro
     environment:
       - OLLAMA_URL=http://localhost:11434
       - HSA_OVERRIDE_GFX_VERSION=11.0.0
+      - MODEL_STORAGE_PATH=/mnt/storage/models
