@@ -28,14 +28,13 @@ jobs:
           cd backend
           .venv/bin/python -m pytest test_backend.py test_queue.py -v
 
-  build:
-    name: Build and Push
-    needs: test
+  set-tag:
     if: github.event_name != 'pull_request'
-    runs-on: [self-hosted, mac-mini]
+    runs-on: arc-runner-set
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      pr_prefix: ${{ steps.tag.outputs.pr_prefix }}
     steps:
-      - uses: actions/checkout@v6
-
       - name: Set image tag
         id: tag
         run: |
@@ -48,63 +47,99 @@ jobs:
             echo "pr_prefix=deploy" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
+  build-amd64:
+    name: Build amd64
+    needs: [test, set-tag]
+    if: github.event_name != 'pull_request'
+    runs-on: arc-runner-set
+    env:
+      TAG: ${{ needs.set-tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v6
 
       - name: Login to Docker Hub
         run: echo "${DOCKERHUB_TOKEN}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin
 
-      - name: Build and push backend
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: backend/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ${{ env.IMAGE }}:backend-${{ steps.tag.outputs.tag }}
-            ${{ env.IMAGE }}:backend-latest
+      - name: Build and push backend (amd64)
+        run: |
+          docker build -t "${IMAGE}:backend-${TAG}-amd64" -f backend/Dockerfile .
+          docker push "${IMAGE}:backend-${TAG}-amd64"
 
-      - name: Build and push frontend
-        uses: docker/build-push-action@v6
-        with:
-          context: frontend
-          file: frontend/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          no-cache: true
-          tags: |
-            ${{ env.IMAGE }}:frontend-${{ steps.tag.outputs.tag }}
-            ${{ env.IMAGE }}:frontend-latest
+      - name: Build and push frontend (amd64)
+        run: |
+          docker build -t "${IMAGE}:frontend-${TAG}-amd64" -f frontend/Dockerfile frontend
+          docker push "${IMAGE}:frontend-${TAG}-amd64"
 
-      - name: Build and push agent
-        uses: docker/build-push-action@v6
-        with:
-          context: agent
-          file: agent/Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: true
-          no-cache: true
-          tags: |
-            ${{ env.IMAGE }}:agent-${{ steps.tag.outputs.tag }}
-            ${{ env.IMAGE }}:agent-latest
+      - name: Build and push agent (amd64)
+        run: |
+          docker build -t "${IMAGE}:agent-${TAG}-amd64" -f agent/Dockerfile agent
+          docker push "${IMAGE}:agent-${TAG}-amd64"
 
-      - name: Build and push agent (AMD)
-        uses: docker/build-push-action@v6
-        with:
-          context: agent
-          file: agent/Dockerfile.amd
-          platforms: linux/amd64
-          push: true
-          no-cache: true
-          tags: |
-            ${{ env.IMAGE }}:agent-amd-${{ steps.tag.outputs.tag }}
-            ${{ env.IMAGE }}:agent-amd-latest
+      - name: Build and push agent-amd (amd64 only)
+        run: |
+          docker build -t "${IMAGE}:agent-amd-${TAG}" -t "${IMAGE}:agent-amd-latest" -f agent/Dockerfile.amd agent
+          docker push "${IMAGE}:agent-amd-${TAG}"
+          docker push "${IMAGE}:agent-amd-latest"
+
+  build-arm64:
+    name: Build arm64
+    needs: [test, set-tag]
+    if: github.event_name != 'pull_request'
+    runs-on: [self-hosted, mac-mini]
+    env:
+      TAG: ${{ needs.set-tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Login to Docker Hub
+        run: echo "${DOCKERHUB_TOKEN}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin
+
+      - name: Build and push backend (arm64)
+        run: |
+          docker build -t "${IMAGE}:backend-${TAG}-arm64" -f backend/Dockerfile .
+          docker push "${IMAGE}:backend-${TAG}-arm64"
+
+      - name: Build and push frontend (arm64)
+        run: |
+          docker build -t "${IMAGE}:frontend-${TAG}-arm64" -f frontend/Dockerfile frontend
+          docker push "${IMAGE}:frontend-${TAG}-arm64"
+
+      - name: Build and push agent (arm64)
+        run: |
+          docker build -t "${IMAGE}:agent-${TAG}-arm64" -f agent/Dockerfile agent
+          docker push "${IMAGE}:agent-${TAG}-arm64"
+
+  manifest:
+    needs: [set-tag, build-amd64, build-arm64]
+    runs-on: arc-runner-set
+    env:
+      TAG: ${{ needs.set-tag.outputs.tag }}
+    steps:
+      - name: Login to Docker Hub
+        run: echo "${DOCKERHUB_TOKEN}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin
+
+      - name: Create multi-arch manifests
+        run: |
+          for COMPONENT in backend frontend agent; do
+            docker buildx imagetools create -t "${IMAGE}:${COMPONENT}-${TAG}" \
+              "${IMAGE}:${COMPONENT}-${TAG}-amd64" \
+              "${IMAGE}:${COMPONENT}-${TAG}-arm64"
+
+            docker buildx imagetools create -t "${IMAGE}:${COMPONENT}-latest" \
+              "${IMAGE}:${COMPONENT}-${TAG}-amd64" \
+              "${IMAGE}:${COMPONENT}-${TAG}-arm64"
+          done
+
+  deploy:
+    needs: [set-tag, manifest]
+    runs-on: arc-runner-set
+    steps:
+      - uses: actions/checkout@v6
 
       - name: Create deploy PR (UAT + prod)
         env:
-          TAG: ${{ steps.tag.outputs.tag }}
-          PREFIX: ${{ steps.tag.outputs.pr_prefix }}
+          TAG: ${{ needs.set-tag.outputs.tag }}
+          PREFIX: ${{ needs.set-tag.outputs.pr_prefix }}
         run: |
           rm -rf /tmp/gitops
           git clone https://x-access-token:${GITOPS_PAT}@github.com/${GITOPS_REPO}.git /tmp/gitops
@@ -155,7 +190,7 @@ jobs:
           if [ -n "${COMMIT_BODY}" ]; then
             PR_BODY="${PR_BODY}${NL}${NL}${COMMIT_BODY}"
           fi
-          PR_BODY="${PR_BODY}${NL}${NL}Images: \`amerenda/llm-manager:backend-${TAG}\`, \`amerenda/llm-manager:frontend-${TAG}\`${NL}Source: https://github.com/amerenda/llm-manager/commit/${GITHUB_SHA}"
+          PR_BODY="${PR_BODY}${NL}${NL}Images: \`amerenda/llm-manager:backend-${TAG}\`, \`amerenda/llm-manager:frontend-${TAG}\`, \`amerenda/llm-manager:agent-${TAG}\` (multi-arch: amd64+arm64)${NL}Source: https://github.com/amerenda/llm-manager/commit/${GITHUB_SHA}"
 
           PR_RESPONSE=$(curl -s -X POST \
             -H "Authorization: token ${GITOPS_PAT}" \
@@ -184,7 +219,7 @@ jobs:
 
   notify-failure:
     if: failure()
-    needs: [test, build]
+    needs: [test, build-amd64, build-arm64, manifest, deploy]
     runs-on: ubuntu-latest
     steps:
       - name: Create GitHub Issue for build failure
