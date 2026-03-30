@@ -176,6 +176,7 @@ function RunnerModelView({ runnerId, runnerHostname }: { runnerId: number; runne
   const activeOps = (ops.data ?? []).filter(op => op.status === 'running')
   const [pullInput, setPullInput] = useState('')
   const [pullMsg, setPullMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
+  const [expandedModel, setExpandedModel] = useState<string | null>(null)
 
   // Filter models to only those on this runner
   const textModels = (models.data ?? [])
@@ -333,80 +334,98 @@ function RunnerModelView({ runnerId, runnerHostname }: { runnerId: number; runne
         )}
       </div>
 
-      {/* Model table */}
-      <div className="bg-gray-900 border border-gray-800 rounded-xl overflow-hidden">
+      {/* Model list */}
+      <div className="space-y-2">
         {models.isLoading ? (
           <div className="py-8 text-center text-gray-600 text-sm">Loading models...</div>
         ) : textModels.length === 0 ? (
-          <div className="py-8 text-center text-gray-600 text-sm">No models on {runnerHostname}</div>
+          <div className="bg-gray-900 border border-gray-800 rounded-xl py-8 text-center text-gray-600 text-sm">No models on {runnerHostname}</div>
         ) : (
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="border-b border-gray-800 text-xs text-gray-500 uppercase tracking-wide">
-                <th className="text-left px-4 py-3 font-medium">Model</th>
-                <th className="text-left px-4 py-3 font-medium">Status</th>
-                <th className="px-4 py-3" />
-              </tr>
-            </thead>
-            <tbody>
-              {textModels.map((m: LlmModel) => {
-                const isLoaded = loadedNames.has(m.id)
-                const loadedInfo = loadedModels.find(lm => lm.name === m.id)
-                return (
-                  <tr key={m.id} className="border-b border-gray-800 last:border-0 hover:bg-gray-800/40 transition-colors">
-                    <td className="px-4 py-3 text-gray-200 font-medium truncate max-w-xs">{m.id}</td>
-                    <td className="px-4 py-3">
-                      {isLoaded ? (
-                        <span className="flex items-center gap-1.5 text-xs text-blue-400">
-                          <Cpu className="w-3 h-3" />
-                          In VRAM{loadedInfo ? ` (${loadedInfo.size_gb} GB)` : ''}
-                        </span>
-                      ) : (
-                        <span className="text-xs text-gray-600">On disk</span>
+          textModels.map((m: LlmModel) => {
+            const isLoaded = loadedNames.has(m.id)
+            const loadedInfo = loadedModels.find(lm => lm.name === m.id)
+            const displayName = m.id.replace(/:latest$/, '')
+            const isDetailOpen = expandedModel === m.id
+            return (
+              <div key={m.id} className={`bg-gray-900 border rounded-xl transition-colors ${isDetailOpen ? 'border-brand-700' : 'border-gray-800'}`}>
+                <div className="px-4 py-3 flex items-center gap-3 cursor-pointer" onClick={() => setExpandedModel(isDetailOpen ? null : m.id)}>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-sm text-gray-200 font-medium">{displayName}</span>
+                      {m.parameter_count && (
+                        <span className="text-[10px] bg-gray-800 text-gray-400 px-1.5 py-0.5 rounded">{m.parameter_count}</span>
                       )}
-                    </td>
-                    <td className="px-4 py-3 text-right">
-                      <div className="flex items-center justify-end gap-2">
-                        {isLoaded ? (
-                          <button
-                            onClick={() => unload.mutate({ model: m.id, runner_id: runnerId })}
-                            disabled={unload.isPending}
-                            title="Unload from VRAM"
-                            className="flex items-center gap-1 text-xs bg-yellow-900/30 hover:bg-yellow-800/40 text-yellow-400 px-2.5 py-1 rounded-lg transition-colors disabled:opacity-40"
-                          >
-                            {unload.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Upload className="w-3 h-3" />}
-                            Unload
-                          </button>
-                        ) : (
-                          <button
-                            onClick={() => load.mutate({ model: m.id, runner_id: runnerId })}
-                            disabled={load.isPending}
-                            title="Load into VRAM"
-                            className="flex items-center gap-1 text-xs bg-brand-900/50 hover:bg-brand-800/50 text-brand-300 px-2.5 py-1 rounded-lg transition-colors disabled:opacity-40"
-                          >
-                            {load.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Cpu className="w-3 h-3" />}
-                            Load
-                          </button>
-                        )}
-                        <button
-                          onClick={() => {
-                            if (window.confirm(`Delete ${m.id} from ${runnerHostname}? This removes it from disk.`)) {
-                              del.mutate(m.id)
-                            }
-                          }}
-                          disabled={del.isPending}
-                          title="Delete model"
-                          className="p-1.5 rounded-lg bg-gray-800 hover:bg-red-900/50 hover:text-red-400 text-gray-500 transition-colors"
-                        >
-                          {del.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
-                        </button>
+                      {m.quantization && (
+                        <span className="text-[10px] bg-gray-800 text-gray-500 px-1.5 py-0.5 rounded">{m.quantization}</span>
+                      )}
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded ${
+                        isLoaded ? 'bg-blue-900/40 text-blue-400' : 'bg-gray-800 text-gray-500'
+                      }`}>
+                        {isLoaded ? 'In VRAM' : 'On disk'}
+                      </span>
+                    </div>
+                    <p className="text-[10px] text-gray-600 mt-0.5">
+                      ~{m.vram_estimate_gb ?? '?'} GB VRAM
+                      {m.size_gb ? ` · ${m.size_gb} GB on disk` : ''}
+                    </p>
+                  </div>
+                  <div className="flex items-center gap-1.5 flex-shrink-0" onClick={e => e.stopPropagation()}>
+                    {isLoaded ? (
+                      <button onClick={() => unload.mutate({ model: m.id, runner_id: runnerId })} disabled={unload.isPending}
+                        title="Unload from VRAM"
+                        className="flex items-center gap-1 text-xs bg-yellow-900/30 hover:bg-yellow-800/40 text-yellow-400 px-2.5 py-1 rounded-lg transition-colors disabled:opacity-40">
+                        {unload.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Upload className="w-3 h-3" />}
+                        Unload
+                      </button>
+                    ) : (
+                      <button onClick={() => load.mutate({ model: m.id, runner_id: runnerId })} disabled={load.isPending}
+                        title="Load into VRAM"
+                        className="flex items-center gap-1 text-xs bg-brand-900/50 hover:bg-brand-800/50 text-brand-300 px-2.5 py-1 rounded-lg transition-colors disabled:opacity-40">
+                        {load.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Cpu className="w-3 h-3" />}
+                        Load
+                      </button>
+                    )}
+                    <button
+                      onClick={() => { if (window.confirm(`Delete ${m.id} from ${runnerHostname}?`)) del.mutate(m.id) }}
+                      disabled={del.isPending} title="Delete model"
+                      className="p-1.5 rounded-lg bg-gray-800 hover:bg-red-900/50 hover:text-red-400 text-gray-500 transition-colors">
+                      {del.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
+                    </button>
+                  </div>
+                </div>
+                {isDetailOpen && (
+                  <div className="border-t border-gray-800 px-4 py-3 grid grid-cols-2 sm:grid-cols-4 gap-3">
+                    <div>
+                      <p className="text-[10px] text-gray-500 uppercase tracking-wide">Full name</p>
+                      <p className="text-xs text-gray-300 mt-0.5 font-mono">{m.id}</p>
+                    </div>
+                    <div>
+                      <p className="text-[10px] text-gray-500 uppercase tracking-wide">VRAM estimate</p>
+                      <p className="text-xs text-gray-300 mt-0.5">~{m.vram_estimate_gb ?? '?'} GB</p>
+                    </div>
+                    <div>
+                      <p className="text-[10px] text-gray-500 uppercase tracking-wide">Parameters</p>
+                      <p className="text-xs text-gray-300 mt-0.5">{m.parameter_count || 'Unknown'}</p>
+                    </div>
+                    <div>
+                      <p className="text-[10px] text-gray-500 uppercase tracking-wide">Quantization</p>
+                      <p className="text-xs text-gray-300 mt-0.5">{m.quantization || 'Default'}</p>
+                    </div>
+                    {m.runners && m.runners.length > 0 && (
+                      <div className="col-span-2 sm:col-span-4">
+                        <p className="text-[10px] text-gray-500 uppercase tracking-wide">Available on</p>
+                        <div className="flex gap-1.5 mt-1">
+                          {m.runners.map(r => (
+                            <span key={r.runner_id} className="text-[10px] bg-gray-800 text-gray-400 px-1.5 py-0.5 rounded">{r.hostname}</span>
+                          ))}
+                        </div>
                       </div>
-                    </td>
-                  </tr>
-                )
-              })}
-            </tbody>
-          </table>
+                    )}
+                  </div>
+                )}
+              </div>
+            )
+          })
         )}
       </div>
     </section>
@@ -420,6 +439,9 @@ function LibraryBrowserSection({ selectedRunner, selectedRunnerHostname, allRunn
   selectedRunnerHostname?: string
   allRunners: Runner[]
 }) {
+  const modelList = useModelList()
+  const downloadedNames = new Set((modelList.data ?? []).map(m => m.name))
+  const fitsMap = new Map((modelList.data ?? []).map(m => [m.name, m.fits]))
   const [search, setSearch] = useState('')
   const [safety, setSafety] = useState<string>('safe')
   const [fitsOnly, setFitsOnly] = useState(true)
@@ -499,6 +521,14 @@ function LibraryBrowserSection({ selectedRunner, selectedRunnerHostname, allRunn
           {refresh.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
           Refresh
         </button>
+      </div>
+
+      {/* Legend */}
+      <div className="flex gap-3 flex-wrap text-[10px] text-gray-600">
+        <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-blue-500" /> Available</span>
+        <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-green-500" /> Downloaded</span>
+        <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-yellow-500" /> Downloaded, won't fit</span>
+        <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-red-500" /> Won't fit</span>
       </div>
 
       {/* Filters */}
@@ -600,11 +630,22 @@ function LibraryBrowserSection({ selectedRunner, selectedRunnerHostname, allRunn
                       <div className="flex items-center gap-3 mt-2 flex-wrap">
                         {m.parameter_sizes.length > 0 && (
                           <div className="flex gap-1 flex-wrap">
-                            {m.parameter_sizes.slice(0, 4).map(s => (
-                              <span key={s} className="text-[10px] bg-blue-900/30 text-blue-400 px-1.5 py-0.5 rounded">{s}</span>
-                            ))}
-                            {m.parameter_sizes.length > 4 && (
-                              <span className="text-[10px] text-gray-600">+{m.parameter_sizes.length - 4} more</span>
+                            {m.parameter_sizes.slice(0, 6).map(s => {
+                              const sizeModel = `${m.name}:${s}`
+                              const isDownloaded = downloadedNames.has(sizeModel) || downloadedNames.has(`${m.name}:latest`)
+                              const sizeFits = fitsMap.get(sizeModel) ?? m.fits
+                              // Green: downloaded. Yellow: downloaded but doesn't fit. Blue: available, fits. Red: won't fit.
+                              const badgeClass = isDownloaded && sizeFits
+                                ? 'bg-green-900/30 text-green-400'
+                                : isDownloaded && !sizeFits
+                                ? 'bg-yellow-900/30 text-yellow-400'
+                                : !isDownloaded && sizeFits
+                                ? 'bg-blue-900/30 text-blue-400'
+                                : 'bg-red-900/30 text-red-400'
+                              return <span key={s} className={`text-[10px] px-1.5 py-0.5 rounded ${badgeClass}`}>{s}</span>
+                            })}
+                            {m.parameter_sizes.length > 6 && (
+                              <span className="text-[10px] text-gray-600">+{m.parameter_sizes.length - 6} more</span>
                             )}
                           </div>
                         )}
@@ -687,11 +728,20 @@ function LibraryBrowserSection({ selectedRunner, selectedRunnerHostname, allRunn
                           const sizeModel = `${m.name}:${s}`
                           const pulling = isModelPulling(sizeModel)
                           const opStatus = getModelOpStatus(sizeModel)
+                          const isDownloaded = downloadedNames.has(sizeModel) || downloadedNames.has(`${m.name}:latest`)
+                          const sizeFits = fitsMap.get(sizeModel) ?? m.fits
+                          const baseClass = isDownloaded && sizeFits
+                            ? 'bg-green-900/30 text-green-400'
+                            : isDownloaded && !sizeFits
+                            ? 'bg-yellow-900/30 text-yellow-400'
+                            : !isDownloaded && sizeFits
+                            ? 'bg-blue-900/20 hover:bg-blue-900/40 text-blue-400'
+                            : 'bg-red-900/30 text-red-400'
                           return (
                           <button
                             key={s}
                             onClick={e => { e.stopPropagation(); handlePull(sizeModel, selectedRunner) }}
-                            disabled={pulling || (pull.isPending && pullMsg?.model === sizeModel)}
+                            disabled={pulling || isDownloaded || (pull.isPending && pullMsg?.model === sizeModel)}
                             className={`flex items-center gap-1 text-xs px-2 py-1 rounded transition-colors ${
                               pulling
                                 ? 'bg-amber-900/30 text-amber-400'
@@ -699,7 +749,7 @@ function LibraryBrowserSection({ selectedRunner, selectedRunnerHostname, allRunn
                                 ? 'bg-red-900/30 text-red-400'
                                 : opStatus?.status === 'completed'
                                 ? 'bg-green-900/30 text-green-400'
-                                : 'bg-blue-900/20 hover:bg-blue-900/40 text-blue-400'
+                                : baseClass
                             }`}
                           >
                             {pulling
