@@ -94,6 +94,9 @@ except Exception:
 # PSK auth + self-registration
 AGENT_PSK = os.environ.get("LLM_MANAGER_AGENT_PSK", "")
 BACKEND_URL = os.environ.get("BACKEND_URL", "")
+AGENT_VERSION = os.environ.get("AGENT_VERSION", "unknown")
+COMPOSE_DIR = os.environ.get("COMPOSE_DIR", "")  # path to agent compose dir on host
+COMPOSE_PROFILE = os.environ.get("COMPOSE_PROFILE", "")  # nvidia or amd
 
 
 def _detect_host_ip() -> str:
@@ -272,6 +275,7 @@ async def _build_capabilities() -> dict:
         "disk_free_bytes": disk["disk_free_bytes"],
         "comfyui_running": comfyui_ok,
         "loaded_models": [m["name"] for m in loaded],
+        "agent_version": AGENT_VERSION,
     }
     # Always include TLS cert so heartbeats don't wipe it
     try:
@@ -295,13 +299,63 @@ async def _heartbeat_loop():
         try:
             caps = await _build_capabilities()
             async with httpx.AsyncClient(timeout=5) as c:
-                await c.post(
+                resp = await c.post(
                     f"{BACKEND_URL}/api/runners/heartbeat",
                     json={"runner_id": _RUNNER_ID, "capabilities": caps},
                     headers={"X-Agent-PSK": AGENT_PSK} if AGENT_PSK else {},
                 )
+                # Check for update signal
+                try:
+                    data = resp.json()
+                    if data.get("update_to") and data["update_to"] != AGENT_VERSION:
+                        logger.info("Update available: %s -> %s", AGENT_VERSION, data["update_to"])
+                        asyncio.create_task(_self_update(data["update_to"]))
+                except Exception:
+                    pass
         except Exception as e:
             logger.debug("Heartbeat failed: %s", e)
+
+
+_updating = False
+
+async def _self_update(target_version: str):
+    """Pull new image and restart via docker compose."""
+    global _updating
+    if _updating:
+        return
+    if not COMPOSE_DIR or not COMPOSE_PROFILE:
+        logger.warning("Cannot self-update: COMPOSE_DIR or COMPOSE_PROFILE not set")
+        return
+    if not _DOCKER_OK:
+        logger.warning("Cannot self-update: Docker client not available")
+        return
+    _updating = True
+    try:
+        logger.info("Self-updating to %s ...", target_version)
+        compose_file = os.path.join(COMPOSE_DIR, "compose.yaml")
+        if not os.path.isfile(compose_file):
+            logger.error("Compose file not found: %s", compose_file)
+            return
+        # Pull and recreate in background — this will kill the current container
+        import subprocess
+        cmd = (
+            f"docker compose -f {compose_file} --profile {COMPOSE_PROFILE} pull && "
+            f"docker compose -f {compose_file} --profile {COMPOSE_PROFILE} up -d --force-recreate"
+        )
+        subprocess.Popen(
+            cmd,
+            shell=True,
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        # Give it a moment then exit — docker compose will restart us with new image
+        await asyncio.sleep(5)
+        logger.info("Update pull started, exiting for restart...")
+        os._exit(0)
+    except Exception as e:
+        logger.error("Self-update failed: %s", e)
+        _updating = False
 
 
 app = FastAPI(title="LLM Agent", version="1.0.0", lifespan=lifespan)

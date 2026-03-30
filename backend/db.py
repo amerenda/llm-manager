@@ -742,6 +742,26 @@ async def add_profile_image_entry(
     return row["id"]
 
 
+async def get_global_setting(pool: asyncpg.Pool, key: str) -> Optional[str]:
+    """Get a global setting from library_cache_meta."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT value FROM library_cache_meta WHERE key = $1", key,
+        )
+    return row["value"] if row else None
+
+
+async def set_global_setting(pool: asyncpg.Pool, key: str, value: str) -> None:
+    """Set a global setting in library_cache_meta."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO library_cache_meta (key, value, updated_at)
+               VALUES ($1, $2, NOW())
+               ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()""",
+            key, value,
+        )
+
+
 async def update_profile_image_entry(pool: asyncpg.Pool, entry_id: int, **kwargs) -> bool:
     """Update an image entry."""
     if not kwargs:

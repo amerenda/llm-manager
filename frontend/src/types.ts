@@ -61,6 +61,7 @@ export interface Runner {
     gpu_vram_free_bytes?: number
     loaded_models?: string[]
     comfyui_running?: boolean
+    agent_version?: string
     // TTS runner fields
     tts?: boolean
     stt?: boolean

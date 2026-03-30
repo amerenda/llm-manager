@@ -70,6 +70,9 @@ export function Runners() {
                     <StatusDot online={online && enabled} />
                     <span className="text-sm font-medium text-gray-200">{runner.hostname}</span>
                     <span className="text-xs text-gray-600 font-mono">#{runner.id}</span>
+                    {caps.agent_version && (
+                      <span className="text-[10px] text-gray-500 font-mono">{caps.agent_version}</span>
+                    )}
                     <div className="flex gap-1">
                       {isGpu && (
                         <span className="text-[10px] bg-purple-900/50 text-purple-400 border border-purple-800 px-1.5 py-0.5 rounded-full">GPU</span>

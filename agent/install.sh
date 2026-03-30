@@ -76,6 +76,11 @@ if [[ -n "$NEW_PSK" ]] && [[ -f "$SCRIPT_DIR/.env" ]]; then
     log "Updated PSK in existing .env"
 elif "$UPDATE_ONLY" && [[ -f "$SCRIPT_DIR/.env" ]]; then
     log "Update mode — using existing .env"
+    # Ensure COMPOSE_DIR is set for self-update support
+    if ! grep -q '^COMPOSE_DIR=' "$SCRIPT_DIR/.env" 2>/dev/null; then
+        echo "COMPOSE_DIR=${SCRIPT_DIR}" >> "$SCRIPT_DIR/.env"
+        log "Added COMPOSE_DIR to .env for self-update support"
+    fi
 elif [[ ! -f "$SCRIPT_DIR/.env" ]]; then
     log "No .env found — creating one."
 
@@ -124,6 +129,7 @@ elif [[ ! -f "$SCRIPT_DIR/.env" ]]; then
 LLM_MANAGER_AGENT_PSK=${PSK}
 BACKEND_URL=${BACKEND}
 OLLAMA_MODELS_PATH=${OLLAMA_MODELS_PATH}
+COMPOSE_DIR=${SCRIPT_DIR}
 EOF
 
     # AMD-specific: auto-detect GFX version and set override for ROCm compatibility

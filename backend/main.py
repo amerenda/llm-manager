@@ -713,7 +713,29 @@ async def runner_heartbeat(
     found = await db.heartbeat_runner(app.state.db, req.runner_id, req.capabilities)
     if not found:
         raise HTTPException(404, "Runner not found")
-    return {"ok": True}
+    # Check if there's a target version for this runner
+    response: dict = {"ok": True}
+    target = await db.get_global_setting(app.state.db, "agent_target_version")
+    agent_version = req.capabilities.get("agent_version", "")
+    if target and agent_version and target != agent_version:
+        response["update_to"] = target
+    return response
+
+
+@app.get("/api/runners/target-version")
+async def get_target_version():
+    target = await db.get_global_setting(app.state.db, "agent_target_version")
+    return {"target_version": target or ""}
+
+
+class SetTargetVersionRequest(BaseModel):
+    target_version: str
+
+
+@app.put("/api/runners/target-version")
+async def set_target_version(req: SetTargetVersionRequest):
+    await db.set_global_setting(app.state.db, "agent_target_version", req.target_version)
+    return {"ok": True, "target_version": req.target_version}
 
 
 @app.get("/api/runners")

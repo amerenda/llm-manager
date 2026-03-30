@@ -288,9 +288,31 @@ jobs:
             -d '{"assignees":["amerenda"]}'
 
 
+  notify-agents:
+    name: Signal agent update
+    needs: [changes, set-tag, manifest]
+    if: |
+      always() &&
+      needs.manifest.result == 'success' &&
+      needs.changes.outputs.agent == 'true'
+    runs-on: arc-runner-set
+    steps:
+      - name: Set target version on llm-manager
+        env:
+          TAG: ${{ needs.set-tag.outputs.tag }}
+        run: |
+          # Tell llm-manager backend about the new agent version
+          # Agents will pick this up on their next heartbeat and self-update
+          curl -sf -X PUT \
+            "https://llm-manager-backend.amer.dev/api/runners/target-version" \
+            -H "Content-Type: application/json" \
+            -d "{\"target_version\": \"${TAG}\"}" \
+            && echo "Agent target version set to ${TAG}" \
+            || echo "Warning: could not set agent target version"
+
   notify-failure:
     if: failure()
-    needs: [changes, test, build-amd64, build-arm64, manifest, deploy]
+    needs: [changes, test, build-amd64, build-arm64, manifest, deploy, notify-agents]
     runs-on: ubuntu-latest
     steps:
       - name: Create GitHub Issue for build failure
