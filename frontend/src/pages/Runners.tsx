@@ -1,5 +1,6 @@
-import { Server, Cpu, MemoryStick, Volume2, RefreshCw, Power } from 'lucide-react'
-import { useRunners, useUpdateRunner } from '../hooks/useBackend'
+import { useState } from 'react'
+import { Server, Cpu, MemoryStick, Volume2, RefreshCw, Power, Upload, AlertCircle } from 'lucide-react'
+import { useRunners, useUpdateRunner, useAgentTargetVersion, useSetAgentTargetVersion } from '../hooks/useBackend'
 import { StatusDot } from '../components/StatusDot'
 import type { Runner } from '../types'
 
@@ -25,10 +26,18 @@ function bytes(n: number): string {
 export function Runners() {
   const runners = useRunners()
   const update = useUpdateRunner()
+  const targetVersion = useAgentTargetVersion()
+  const setTarget = useSetAgentTargetVersion()
+  const [versionInput, setVersionInput] = useState('')
   const list = runners.data ?? []
+  const target = targetVersion.data?.target_version || ''
 
   const gpuRunners = list.filter((r: Runner) => r.capabilities.gpu_vram_total_bytes)
   const ttsRunners = list.filter((r: Runner) => r.capabilities.tts)
+
+  const outdatedRunners = list.filter((r: Runner) =>
+    target && r.capabilities.agent_version && r.capabilities.agent_version !== target
+  )
 
   return (
     <div className="space-y-6">
@@ -39,6 +48,41 @@ export function Runners() {
           <span className="text-xs text-gray-500">{list.length} active</span>
         </div>
         {runners.isFetching && <RefreshCw className="w-3 h-3 text-gray-600 animate-spin" />}
+      </div>
+
+      {/* Agent version control */}
+      <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 space-y-3">
+        <p className="text-xs text-gray-500 font-medium uppercase tracking-wide">Agent Version</p>
+        <div className="flex items-center gap-3">
+          <div className="flex-1">
+            <p className="text-xs text-gray-400">
+              Target: <span className="text-gray-200 font-mono">{target || 'not set'}</span>
+            </p>
+          </div>
+          <div className="flex gap-2">
+            <input
+              type="text"
+              value={versionInput}
+              onChange={e => setVersionInput(e.target.value)}
+              placeholder="e.g. sha-abc1234"
+              className="bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-brand-600 w-40"
+            />
+            <button
+              onClick={() => { setTarget.mutate(versionInput.trim()); setVersionInput('') }}
+              disabled={!versionInput.trim() || setTarget.isPending}
+              className="flex items-center gap-1 text-xs bg-brand-600 hover:bg-brand-500 disabled:opacity-40 text-white px-3 py-1.5 rounded-lg transition-colors"
+            >
+              <Upload className="w-3 h-3" />
+              Set
+            </button>
+          </div>
+        </div>
+        {outdatedRunners.length > 0 && (
+          <div className="flex items-center gap-1.5 text-xs text-amber-400">
+            <AlertCircle className="w-3 h-3" />
+            {outdatedRunners.length} runner{outdatedRunners.length > 1 ? 's' : ''} outdated — will update on next heartbeat
+          </div>
+        )}
       </div>
 
       {runners.isLoading ? (
@@ -72,6 +116,12 @@ export function Runners() {
                     <span className="text-xs text-gray-600 font-mono">#{runner.id}</span>
                     {caps.agent_version && (
                       <span className="text-[10px] text-gray-500 font-mono">{caps.agent_version}</span>
+                    )}
+                    {target && caps.agent_version && caps.agent_version !== target && (
+                      <span className="text-[10px] bg-amber-900/40 text-amber-400 px-1.5 py-0.5 rounded">Update pending</span>
+                    )}
+                    {!caps.agent_version && (
+                      <span className="text-[10px] bg-gray-800 text-gray-600 px-1.5 py-0.5 rounded">No version</span>
                     )}
                     <div className="flex gap-1">
                       {isGpu && (

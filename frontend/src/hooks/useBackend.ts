@@ -68,6 +68,25 @@ export function usePublicStats() {
   })
 }
 
+// ── Agent target version ─────────────────────────────────────────────────────
+
+export function useAgentTargetVersion() {
+  return useQuery<{ target_version: string }>({
+    queryKey: ['agent-target-version'],
+    queryFn: () => get('/api/runners/target-version'),
+    refetchInterval: 30_000,
+  })
+}
+
+export function useSetAgentTargetVersion() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (target_version: string) =>
+      put<{ ok: boolean }>('/api/runners/target-version', { target_version }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['agent-target-version'] }),
+  })
+}
+
 // ── Models with safety info (from /api/models) ──────────────────────────────
 
 export interface ModelInfo {
