@@ -669,38 +669,14 @@ function LibraryBrowserSection({ selectedRunner, selectedRunnerHostname, allRunn
                         Downloading...
                       </span>
                     )}
-                    {!isModelPulling(m.name) && !m.downloaded && m.fits && selectedRunner !== undefined && (
+                    {!isModelPulling(m.name) && !m.downloaded && m.fits && !isExpanded && (
                       <button
-                        onClick={() => handlePull(m.name, selectedRunner)}
-                        disabled={pull.isPending && pullMsg?.model === m.name}
-                        title={`Pull to ${selectedRunnerHostname}`}
-                        className="flex items-center gap-1 text-xs bg-brand-900/50 hover:bg-brand-800/50 text-brand-300 px-3 py-1.5 rounded-lg transition-colors disabled:opacity-40"
+                        onClick={e => { e.stopPropagation(); setExpanded(m.name) }}
+                        className="flex items-center gap-1 text-xs bg-brand-900/50 hover:bg-brand-800/50 text-brand-300 px-3 py-1.5 rounded-lg transition-colors"
                       >
-                        {pull.isPending && pullMsg?.model === m.name
-                          ? <Loader2 className="w-3 h-3 animate-spin" />
-                          : <Download className="w-3 h-3" />}
-                        Pull to {selectedRunnerHostname}
+                        <Download className="w-3 h-3" />
+                        Select version
                       </button>
-                    )}
-                    {!isModelPulling(m.name) && !m.downloaded && m.fits && selectedRunner === undefined && allRunners.length > 0 && (
-                      <div className="flex gap-1">
-                        {allRunners.map(r => {
-                          const fitsOnThis = m.fits_on.some(f => f.runner === r.hostname)
-                          if (!fitsOnThis) return null
-                          return (
-                            <button
-                              key={r.id}
-                              onClick={() => handlePull(m.name, r.id)}
-                              disabled={pull.isPending && pullMsg?.model === m.name}
-                              title={`Pull to ${r.hostname}`}
-                              className="flex items-center gap-1 text-[10px] bg-brand-900/50 hover:bg-brand-800/50 text-brand-300 px-2 py-1 rounded-lg transition-colors disabled:opacity-40"
-                            >
-                              <Download className="w-2.5 h-2.5" />
-                              {r.hostname}
-                            </button>
-                          )
-                        })}
-                      </div>
                     )}
                     {!m.fits && !m.downloaded && !isModelPulling(m.name) && (
                       <span className="text-[10px] text-gray-600">Too large</span>
@@ -746,36 +722,51 @@ function LibraryBrowserSection({ selectedRunner, selectedRunnerHostname, allRunn
                             ? 'bg-blue-900/20 hover:bg-blue-900/40 text-blue-400'
                             : 'bg-red-900/30 text-red-400'
                           return (
-                          <button
-                            key={s}
-                            onClick={e => { e.stopPropagation(); handlePull(sizeModel, selectedRunner) }}
-                            disabled={pulling || isDownloaded || (pull.isPending && pullMsg?.model === sizeModel)}
-                            className={`flex items-center gap-1 text-xs px-2 py-1 rounded transition-colors ${
-                              pulling
-                                ? 'bg-amber-900/30 text-amber-400'
-                                : opStatus?.status === 'failed'
-                                ? 'bg-red-900/30 text-red-400'
-                                : opStatus?.status === 'completed'
-                                ? 'bg-green-900/30 text-green-400'
-                                : baseClass
-                            }`}
-                          >
-                            {pulling
-                              ? <Loader2 className="w-2.5 h-2.5 animate-spin" />
-                              : opStatus?.status === 'completed'
-                              ? <CheckCircle2 className="w-2.5 h-2.5" />
-                              : opStatus?.status === 'failed'
-                              ? <AlertCircle className="w-2.5 h-2.5" />
-                              : <Download className="w-2.5 h-2.5" />}
-                            {s}
-                            {pulling
-                              ? <span className="text-amber-500 ml-0.5">downloading...</span>
-                              : opStatus?.status === 'completed'
-                              ? <span className="text-green-500 ml-0.5">done</span>
-                              : opStatus?.status === 'failed'
-                              ? <span className="text-red-500 ml-0.5">failed</span>
-                              : selectedRunnerHostname && <span className="text-gray-600 ml-0.5">→ {selectedRunnerHostname}</span>}
-                          </button>
+                          <div key={s} className="flex items-center gap-1">
+                            <span className={`text-xs px-2 py-1 rounded ${baseClass}`}>
+                              {s}
+                            </span>
+                            {pulling ? (
+                              <span className="flex items-center gap-1 text-[10px] text-amber-400">
+                                <Loader2 className="w-2.5 h-2.5 animate-spin" /> downloading...
+                              </span>
+                            ) : opStatus?.status === 'completed' ? (
+                              <span className="flex items-center gap-1 text-[10px] text-green-400">
+                                <CheckCircle2 className="w-2.5 h-2.5" /> done
+                              </span>
+                            ) : opStatus?.status === 'failed' ? (
+                              <span className="flex items-center gap-1 text-[10px] text-red-400">
+                                <AlertCircle className="w-2.5 h-2.5" /> failed
+                              </span>
+                            ) : !isDownloaded && sizeFits ? (
+                              selectedRunner !== undefined ? (
+                                <button
+                                  onClick={e => { e.stopPropagation(); handlePull(sizeModel, selectedRunner) }}
+                                  disabled={pull.isPending && pullMsg?.model === sizeModel}
+                                  className="flex items-center gap-1 text-[10px] bg-brand-900/50 hover:bg-brand-800/50 text-brand-300 px-2 py-0.5 rounded transition-colors disabled:opacity-40"
+                                >
+                                  <Download className="w-2.5 h-2.5" /> {selectedRunnerHostname}
+                                </button>
+                              ) : (
+                                <div className="flex gap-1">
+                                  {allRunners.map(r => {
+                                    const fitsOnThis = m.fits_on.some(f => f.runner === r.hostname)
+                                    if (!fitsOnThis) return null
+                                    return (
+                                      <button
+                                        key={r.id}
+                                        onClick={e => { e.stopPropagation(); handlePull(sizeModel, r.id) }}
+                                        disabled={pull.isPending && pullMsg?.model === sizeModel}
+                                        className="flex items-center gap-1 text-[10px] bg-brand-900/50 hover:bg-brand-800/50 text-brand-300 px-2 py-0.5 rounded transition-colors disabled:opacity-40"
+                                      >
+                                        <Download className="w-2.5 h-2.5" /> {r.hostname}
+                                      </button>
+                                    )
+                                  })}
+                                </div>
+                              )
+                            ) : null}
+                          </div>
                           )
                         })}
                       </div>
