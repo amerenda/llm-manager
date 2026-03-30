@@ -479,6 +479,16 @@ async def models_for_agents():
         model_names = list(all_models_map.keys())
         safety_map = await classify_models_batch(pool, model_names)
 
+        # Load library cache for enrichment (fallback for :latest tags)
+        library_cache = {}
+        try:
+            async with pool.acquire() as conn:
+                rows = await conn.fetch("SELECT name, parameter_sizes FROM ollama_library_cache")
+                for row in rows:
+                    library_cache[row["name"]] = row["parameter_sizes"]
+        except Exception:
+            pass
+
         models = []
         for name, m in all_models_map.items():
             # Agent API returns OpenAI format (no size), fall back to VRAM estimate
@@ -491,12 +501,26 @@ async def models_for_agents():
                 for hostname, vram in runner_vram.items()
                 if vram >= vram_est
             ]
+            param_count = parse_param_count(name)
+            quant = parse_quantization(name)
+            # For :latest tags, try to infer from library cache
+            if not param_count:
+                base = name.split(":")[0]
+                sizes = library_cache.get(base, [])
+                if isinstance(sizes, str):
+                    import json
+                    sizes = json.loads(sizes)
+                if len(sizes) == 1:
+                    param_count = sizes[0]
+                elif sizes:
+                    # :latest is typically the smallest or default size
+                    param_count = f"{sizes[0]} (default)"
             models.append({
                 "name": name,
                 "size_gb": size_gb,
                 "vram_estimate_gb": vram_est,
-                "parameter_count": parse_param_count(name),
-                "quantization": parse_quantization(name),
+                "parameter_count": param_count,
+                "quantization": quant,
                 "safety": safety_map.get(name, "safe"),
                 "downloaded": True,
                 "loaded": name in loaded_names,

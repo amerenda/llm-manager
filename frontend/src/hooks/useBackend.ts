@@ -74,6 +74,8 @@ export interface ModelInfo {
   name: string
   size_gb: number
   vram_estimate_gb: number
+  parameter_count: string | null
+  quantization: string | null
   safety: string
   downloaded: boolean
   loaded: boolean

@@ -166,7 +166,7 @@ function AllRunnersModelView({ runners }: { runners: Runner[] }) {
 // ── Per-Runner Model View ───────────────────────────────────────────────────
 
 function RunnerModelView({ runnerId, runnerHostname }: { runnerId: number; runnerHostname: string }) {
-  const models = useLlmModels()
+  const modelList = useModelList()
   const status = useLlmStatus()
   const pull = usePullModel()
   const del = useDeleteModel()
@@ -178,11 +178,10 @@ function RunnerModelView({ runnerId, runnerHostname }: { runnerId: number; runne
   const [pullMsg, setPullMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
   const [expandedModel, setExpandedModel] = useState<string | null>(null)
 
-  // Filter models to only those on this runner
-  const textModels = (models.data ?? [])
-    .filter((m: LlmModel) => m.type === 'text')
-    .filter((m: LlmModel) => m.runners?.some(r => r.runner_id === runnerId))
-    .sort((a, b) => a.id.localeCompare(b.id))
+  // Filter models to only those on this runner (using fits_on from /api/models)
+  const enrichedModels = (modelList.data ?? [])
+    .filter(m => m.fits_on?.some(f => f.runner === runnerHostname) || m.loaded)
+    .sort((a, b) => a.name.localeCompare(b.name))
 
   const allLoadedModels = status.data?.loaded_ollama_models ?? []
   const loadedModels = allLoadedModels.filter(m => m.runner === runnerHostname)
@@ -336,19 +335,19 @@ function RunnerModelView({ runnerId, runnerHostname }: { runnerId: number; runne
 
       {/* Model list */}
       <div className="space-y-2">
-        {models.isLoading ? (
+        {modelList.isLoading ? (
           <div className="py-8 text-center text-gray-600 text-sm">Loading models...</div>
-        ) : textModels.length === 0 ? (
+        ) : enrichedModels.length === 0 ? (
           <div className="bg-gray-900 border border-gray-800 rounded-xl py-8 text-center text-gray-600 text-sm">No models on {runnerHostname}</div>
         ) : (
-          textModels.map((m: LlmModel) => {
-            const isLoaded = loadedNames.has(m.id)
-            const loadedInfo = loadedModels.find(lm => lm.name === m.id)
-            const displayName = m.id.replace(/:latest$/, '')
-            const isDetailOpen = expandedModel === m.id
+          enrichedModels.map(m => {
+            const isLoaded = loadedNames.has(m.name)
+            const loadedInfo = loadedModels.find(lm => lm.name === m.name)
+            const displayName = m.name.replace(/:latest$/, '')
+            const isDetailOpen = expandedModel === m.name
             return (
-              <div key={m.id} className={`bg-gray-900 border rounded-xl transition-colors ${isDetailOpen ? 'border-brand-700' : 'border-gray-800'}`}>
-                <div className="px-4 py-3 flex items-center gap-3 cursor-pointer" onClick={() => setExpandedModel(isDetailOpen ? null : m.id)}>
+              <div key={m.name} className={`bg-gray-900 border rounded-xl transition-colors ${isDetailOpen ? 'border-brand-700' : 'border-gray-800'}`}>
+                <div className="px-4 py-3 flex items-center gap-3 cursor-pointer" onClick={() => setExpandedModel(isDetailOpen ? null : m.name)}>
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="text-sm text-gray-200 font-medium">{displayName}</span>
@@ -365,20 +364,20 @@ function RunnerModelView({ runnerId, runnerHostname }: { runnerId: number; runne
                       </span>
                     </div>
                     <p className="text-[10px] text-gray-600 mt-0.5">
-                      ~{m.vram_estimate_gb ?? '?'} GB VRAM
+                      ~{m.vram_estimate_gb} GB VRAM
                       {m.size_gb ? ` · ${m.size_gb} GB on disk` : ''}
                     </p>
                   </div>
                   <div className="flex items-center gap-1.5 flex-shrink-0" onClick={e => e.stopPropagation()}>
                     {isLoaded ? (
-                      <button onClick={() => unload.mutate({ model: m.id, runner_id: runnerId })} disabled={unload.isPending}
+                      <button onClick={() => unload.mutate({ model: m.name, runner_id: runnerId })} disabled={unload.isPending}
                         title="Unload from VRAM"
                         className="flex items-center gap-1 text-xs bg-yellow-900/30 hover:bg-yellow-800/40 text-yellow-400 px-2.5 py-1 rounded-lg transition-colors disabled:opacity-40">
                         {unload.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Upload className="w-3 h-3" />}
                         Unload
                       </button>
                     ) : (
-                      <button onClick={() => load.mutate({ model: m.id, runner_id: runnerId })} disabled={load.isPending}
+                      <button onClick={() => load.mutate({ model: m.name, runner_id: runnerId })} disabled={load.isPending}
                         title="Load into VRAM"
                         className="flex items-center gap-1 text-xs bg-brand-900/50 hover:bg-brand-800/50 text-brand-300 px-2.5 py-1 rounded-lg transition-colors disabled:opacity-40">
                         {load.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Cpu className="w-3 h-3" />}
@@ -386,7 +385,7 @@ function RunnerModelView({ runnerId, runnerHostname }: { runnerId: number; runne
                       </button>
                     )}
                     <button
-                      onClick={() => { if (window.confirm(`Delete ${m.id} from ${runnerHostname}?`)) del.mutate(m.id) }}
+                      onClick={() => { if (window.confirm(`Delete ${m.name} from ${runnerHostname}?`)) del.mutate(m.name) }}
                       disabled={del.isPending} title="Delete model"
                       className="p-1.5 rounded-lg bg-gray-800 hover:bg-red-900/50 hover:text-red-400 text-gray-500 transition-colors">
                       {del.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
@@ -397,11 +396,11 @@ function RunnerModelView({ runnerId, runnerHostname }: { runnerId: number; runne
                   <div className="border-t border-gray-800 px-4 py-3 grid grid-cols-2 sm:grid-cols-4 gap-3">
                     <div>
                       <p className="text-[10px] text-gray-500 uppercase tracking-wide">Full name</p>
-                      <p className="text-xs text-gray-300 mt-0.5 font-mono">{m.id}</p>
+                      <p className="text-xs text-gray-300 mt-0.5 font-mono">{m.name}</p>
                     </div>
                     <div>
                       <p className="text-[10px] text-gray-500 uppercase tracking-wide">VRAM estimate</p>
-                      <p className="text-xs text-gray-300 mt-0.5">~{m.vram_estimate_gb ?? '?'} GB</p>
+                      <p className="text-xs text-gray-300 mt-0.5">~{m.vram_estimate_gb} GB</p>
                     </div>
                     <div>
                       <p className="text-[10px] text-gray-500 uppercase tracking-wide">Parameters</p>
@@ -411,16 +410,14 @@ function RunnerModelView({ runnerId, runnerHostname }: { runnerId: number; runne
                       <p className="text-[10px] text-gray-500 uppercase tracking-wide">Quantization</p>
                       <p className="text-xs text-gray-300 mt-0.5">{m.quantization || 'Default'}</p>
                     </div>
-                    {m.runners && m.runners.length > 0 && (
-                      <div className="col-span-2 sm:col-span-4">
-                        <p className="text-[10px] text-gray-500 uppercase tracking-wide">Available on</p>
-                        <div className="flex gap-1.5 mt-1">
-                          {m.runners.map(r => (
-                            <span key={r.runner_id} className="text-[10px] bg-gray-800 text-gray-400 px-1.5 py-0.5 rounded">{r.hostname}</span>
-                          ))}
-                        </div>
+                    <div className="col-span-2 sm:col-span-4">
+                      <p className="text-[10px] text-gray-500 uppercase tracking-wide">Available on</p>
+                      <div className="flex gap-1.5 mt-1">
+                        {m.fits_on.map(f => (
+                          <span key={f.runner} className="text-[10px] bg-gray-800 text-gray-400 px-1.5 py-0.5 rounded">{f.runner}</span>
+                        ))}
                       </div>
-                    )}
+                    </div>
                   </div>
                 )}
               </div>
