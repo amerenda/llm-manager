@@ -455,6 +455,7 @@ function LibraryBrowserSection({ selectedRunner, selectedRunnerHostname, allRunn
   const [fitsOnly, setFitsOnly] = useState(true)
   const [hideDownloaded, setHideDownloaded] = useState(true)
   const [sort, setSort] = useState<string>('pulls')
+  const [capFilter, setCapFilter] = useState<string>('')
   const [expanded, setExpanded] = useState<string | null>(null)
   const pull = usePullModel()
   const refresh = useRefreshLibrary()
@@ -472,7 +473,9 @@ function LibraryBrowserSection({ selectedRunner, selectedRunnerHostname, allRunn
     hasPulling: pullingOps.length > 0,
   })
 
-  const rawModels = library.data?.models ?? []
+  const rawModels = (library.data?.models ?? []).filter(
+    m => !capFilter || m.categories.includes(capFilter)
+  )
   const models = [...rawModels].sort((a, b) => {
     if (sort === 'pulls') {
       const pa = parseFloat(a.pulls?.replace(/[KMB]/i, '') || '0')
@@ -587,6 +590,17 @@ function LibraryBrowserSection({ selectedRunner, selectedRunnerHostname, allRunn
           {safety === 'safe' ? 'Safe only' : safety === 'all' ? 'All models' : 'Unsafe only'}
         </button>
         <select
+          value={capFilter}
+          onChange={e => setCapFilter(e.target.value)}
+          className="text-xs bg-gray-900 border border-gray-800 rounded-lg px-2.5 py-2 text-gray-400 focus:outline-none focus:border-brand-600"
+        >
+          <option value="">Any capability</option>
+          <option value="tools">Tools</option>
+          <option value="vision">Vision</option>
+          <option value="thinking">Thinking</option>
+          <option value="embedding">Embedding</option>
+        </select>
+        <select
           value={sort}
           onChange={e => setSort(e.target.value)}
           className="text-xs bg-gray-900 border border-gray-800 rounded-lg px-2.5 py-2 text-gray-400 focus:outline-none focus:border-brand-600"
@@ -659,6 +673,18 @@ function LibraryBrowserSection({ selectedRunner, selectedRunnerHostname, allRunn
                         )}
                         <span className="text-[10px] text-gray-600">~{m.vram_estimate_gb}GB VRAM</span>
                         {m.pulls && <span className="text-[10px] text-gray-600">{m.pulls} pulls</span>}
+                        {m.categories.includes('tools') && (
+                          <span className="text-[10px] bg-emerald-900/30 text-emerald-400 px-1.5 py-0.5 rounded">tools</span>
+                        )}
+                        {m.categories.includes('vision') && (
+                          <span className="text-[10px] bg-violet-900/30 text-violet-400 px-1.5 py-0.5 rounded">vision</span>
+                        )}
+                        {m.categories.includes('thinking') && (
+                          <span className="text-[10px] bg-cyan-900/30 text-cyan-400 px-1.5 py-0.5 rounded">thinking</span>
+                        )}
+                        {m.categories.includes('embedding') && (
+                          <span className="text-[10px] bg-gray-800 text-gray-400 px-1.5 py-0.5 rounded">embedding</span>
+                        )}
                       </div>
                     )}
                   </div>
