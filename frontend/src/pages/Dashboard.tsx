@@ -1,5 +1,5 @@
 import { Cpu, MemoryStick, Layers, AppWindow, Trash2, RefreshCw, Server } from 'lucide-react'
-import { useLlmStatus, useApps, useDeleteModel } from '../hooks/useBackend'
+import { useLlmStatus, useApps, useUnloadFromVram } from '../hooks/useBackend'
 import { StatCard } from '../components/StatCard'
 import { StatusDot } from '../components/StatusDot'
 import type { RegisteredApp, RunnerStatus } from '../types'
@@ -111,7 +111,7 @@ function RunnerCard({ r }: { r: RunnerStatus }) {
 export function Dashboard() {
   const status = useLlmStatus()
   const apps = useApps()
-  const deleteModel = useDeleteModel()
+  const unloadModel = useUnloadFromVram()
 
   const s = status.data
   const appList = apps.data ?? []
@@ -205,9 +205,9 @@ export function Dashboard() {
                     </p>
                   </div>
                   <button
-                    onClick={() => deleteModel.mutate(m.name)}
-                    disabled={deleteModel.isPending}
-                    title="Unload model"
+                    onClick={() => unloadModel.mutate({ model: m.name })}
+                    disabled={unloadModel.isPending}
+                    title="Unload from VRAM — reloads on next request"
                     className="ml-2 p-1.5 rounded-lg bg-gray-800 hover:bg-red-900/50 hover:text-red-400 text-gray-500 transition-colors flex-shrink-0"
                   >
                     <Trash2 className="w-3.5 h-3.5" />
