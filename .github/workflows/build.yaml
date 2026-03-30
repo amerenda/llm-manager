@@ -113,13 +113,13 @@ jobs:
       - name: Build and push agent (amd64)
         if: needs.changes.outputs.agent == 'true'
         run: |
-          docker build -t "${IMAGE}:agent-${TAG}-amd64" -f agent/Dockerfile agent
+          docker build --build-arg AGENT_VERSION="${TAG}" -t "${IMAGE}:agent-${TAG}-amd64" -f agent/Dockerfile agent
           docker push "${IMAGE}:agent-${TAG}-amd64"
 
       - name: Build and push agent-amd (amd64 only)
         if: needs.changes.outputs.agent == 'true'
         run: |
-          docker build -t "${IMAGE}:agent-amd-${TAG}" -t "${IMAGE}:agent-amd-latest" -f agent/Dockerfile.amd agent
+          docker build --build-arg AGENT_VERSION="${TAG}" -t "${IMAGE}:agent-amd-${TAG}" -t "${IMAGE}:agent-amd-latest" -f agent/Dockerfile.amd agent
           docker push "${IMAGE}:agent-amd-${TAG}"
           docker push "${IMAGE}:agent-amd-latest"
 
@@ -156,7 +156,7 @@ jobs:
       - name: Build and push agent (arm64)
         if: needs.changes.outputs.agent == 'true'
         run: |
-          docker build -t "${IMAGE}:agent-${TAG}-arm64" -f agent/Dockerfile agent
+          docker build --build-arg AGENT_VERSION="${TAG}" -t "${IMAGE}:agent-${TAG}-arm64" -f agent/Dockerfile agent
           docker push "${IMAGE}:agent-${TAG}-arm64"
 
   manifest:
@@ -303,12 +303,18 @@ jobs:
         run: |
           # Tell llm-manager backend about the new agent version
           # Agents will pick this up on their next heartbeat and self-update
+          # Try internal k8s service first, fall back to external URL
           curl -sf -X PUT \
-            "https://llm-manager-backend.amer.dev/api/runners/target-version" \
+            "http://llm-manager-backend.llm-manager.svc.cluster.local:8081/api/runners/target-version" \
             -H "Content-Type: application/json" \
             -d "{\"target_version\": \"${TAG}\"}" \
             && echo "Agent target version set to ${TAG}" \
-            || echo "Warning: could not set agent target version"
+            || curl -sf -X PUT \
+              "https://llm-manager-backend.amer.dev/api/runners/target-version" \
+              -H "Content-Type: application/json" \
+              -d "{\"target_version\": \"${TAG}\"}" \
+              && echo "Agent target version set to ${TAG} (via external URL)" \
+              || echo "Warning: could not set agent target version"
 
   notify-failure:
     if: failure()

@@ -1,5 +1,8 @@
 FROM rocm/dev-ubuntu-22.04:6.3
 
+ARG AGENT_VERSION=unknown
+ENV AGENT_VERSION=${AGENT_VERSION}
+
 WORKDIR /app
 
 # Install Python and pip
