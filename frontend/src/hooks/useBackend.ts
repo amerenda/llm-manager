@@ -116,11 +116,13 @@ export function usePullModel() {
     mutationFn: ({ model, runner_id }: { model: string; runner_id?: number }) =>
       post<{ ok: boolean; op_id: string; message: string }>(`/api/llm/models/pull${runner_id ? `?runner_id=${runner_id}` : ''}`, { model }),
     onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['ops'] })
       qc.invalidateQueries({ queryKey: ['llm-models'] })
       qc.invalidateQueries({ queryKey: ['llm-status'] })
       setTimeout(() => {
         qc.invalidateQueries({ queryKey: ['llm-models'] })
         qc.invalidateQueries({ queryKey: ['llm-status'] })
+        qc.invalidateQueries({ queryKey: ['library'] })
       }, 5000)
     },
   })
@@ -445,9 +447,27 @@ export function useProfileActivations() {
   })
 }
 
+// ── Operations (background pull/sync tracking) ─────────────────────────────
+
+export interface Op {
+  status: 'running' | 'completed' | 'failed'
+  model: string
+  type: string
+  progress?: string
+  error?: string
+}
+
+export function useOps(enabled = true) {
+  return useQuery<Op[]>({
+    queryKey: ['ops'],
+    queryFn: () => get<Op[]>('/api/ops'),
+    refetchInterval: enabled ? 2_000 : false,
+  })
+}
+
 // ── Library ──────────────────────────────────────────────────────────────────
 
-export function useLibrary(params: { search?: string; safety?: string; fits?: boolean; downloaded?: boolean } = {}) {
+export function useLibrary(params: { search?: string; safety?: string; fits?: boolean; downloaded?: boolean; hasPulling?: boolean } = {}) {
   const qs = new URLSearchParams()
   if (params.search) qs.set('search', params.search)
   if (params.safety) qs.set('safety', params.safety)
@@ -457,6 +477,7 @@ export function useLibrary(params: { search?: string; safety?: string; fits?: bo
   return useQuery<{ models: LibraryModel[]; total: number; cache_age_hours: number; runners: string[] }>({
     queryKey: ['library', query],
     queryFn: () => get(`/api/library${query ? `?${query}` : ''}`),
+    refetchInterval: params.hasPulling ? 5_000 : false,
   })
 }
 

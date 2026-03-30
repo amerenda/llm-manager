@@ -13,8 +13,41 @@ env:
   GITOPS_REPO: amerenda/k3s-dean-gitops
 
 jobs:
+  changes:
+    name: Detect changes
+    runs-on: arc-runner-set
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+      agent: ${{ steps.filter.outputs.agent }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 2
+      - name: Detect changed components
+        id: filter
+        run: |
+          # On workflow_dispatch or tags, build everything
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]] || [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            echo "backend=true" >> "$GITHUB_OUTPUT"
+            echo "frontend=true" >> "$GITHUB_OUTPUT"
+            echo "agent=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          CHANGED=$(git diff --name-only HEAD~1 HEAD 2>/dev/null || echo "")
+          check() {
+            echo "$CHANGED" | grep -qE "$1" && echo "true" || echo "false"
+          }
+          echo "backend=$(check '^backend/')" >> "$GITHUB_OUTPUT"
+          echo "frontend=$(check '^frontend/')" >> "$GITHUB_OUTPUT"
+          # Agent builds only when code/deps change, not for config files like compose.yaml or install.sh
+          echo "agent=$(check '^agent/(Dockerfile|main\.py|requirements)')" >> "$GITHUB_OUTPUT"
+          cat "$GITHUB_OUTPUT"
+
   test:
     name: Run Tests
+    needs: [changes]
+    if: needs.changes.outputs.backend == 'true'
     runs-on: [self-hosted, mac-mini]
     steps:
       - uses: actions/checkout@v6
@@ -49,8 +82,13 @@ jobs:
 
   build-amd64:
     name: Build amd64
-    needs: [test, set-tag]
-    if: github.event_name != 'pull_request'
+    needs: [changes, test, set-tag]
+    if: |
+      always() &&
+      github.event_name != 'pull_request' &&
+      needs.set-tag.result == 'success' &&
+      (needs.test.result == 'success' || needs.test.result == 'skipped') &&
+      (needs.changes.outputs.backend == 'true' || needs.changes.outputs.frontend == 'true' || needs.changes.outputs.agent == 'true')
     runs-on: arc-runner-set
     env:
       TAG: ${{ needs.set-tag.outputs.tag }}
@@ -61,21 +99,25 @@ jobs:
         run: echo "${DOCKERHUB_TOKEN}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin
 
       - name: Build and push backend (amd64)
+        if: needs.changes.outputs.backend == 'true'
         run: |
           docker build -t "${IMAGE}:backend-${TAG}-amd64" -f backend/Dockerfile .
           docker push "${IMAGE}:backend-${TAG}-amd64"
 
       - name: Build and push frontend (amd64)
+        if: needs.changes.outputs.frontend == 'true'
         run: |
           docker build -t "${IMAGE}:frontend-${TAG}-amd64" -f frontend/Dockerfile frontend
           docker push "${IMAGE}:frontend-${TAG}-amd64"
 
       - name: Build and push agent (amd64)
+        if: needs.changes.outputs.agent == 'true'
         run: |
           docker build -t "${IMAGE}:agent-${TAG}-amd64" -f agent/Dockerfile agent
           docker push "${IMAGE}:agent-${TAG}-amd64"
 
       - name: Build and push agent-amd (amd64 only)
+        if: needs.changes.outputs.agent == 'true'
         run: |
           docker build -t "${IMAGE}:agent-amd-${TAG}" -t "${IMAGE}:agent-amd-latest" -f agent/Dockerfile.amd agent
           docker push "${IMAGE}:agent-amd-${TAG}"
@@ -83,8 +125,13 @@ jobs:
 
   build-arm64:
     name: Build arm64
-    needs: [test, set-tag]
-    if: github.event_name != 'pull_request'
+    needs: [changes, test, set-tag]
+    if: |
+      always() &&
+      github.event_name != 'pull_request' &&
+      needs.set-tag.result == 'success' &&
+      (needs.test.result == 'success' || needs.test.result == 'skipped') &&
+      (needs.changes.outputs.backend == 'true' || needs.changes.outputs.frontend == 'true' || needs.changes.outputs.agent == 'true')
     runs-on: [self-hosted, mac-mini]
     env:
       TAG: ${{ needs.set-tag.outputs.tag }}
@@ -95,22 +142,29 @@ jobs:
         run: echo "${DOCKERHUB_TOKEN}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin
 
       - name: Build and push backend (arm64)
+        if: needs.changes.outputs.backend == 'true'
         run: |
           docker build -t "${IMAGE}:backend-${TAG}-arm64" -f backend/Dockerfile .
           docker push "${IMAGE}:backend-${TAG}-arm64"
 
       - name: Build and push frontend (arm64)
+        if: needs.changes.outputs.frontend == 'true'
         run: |
           docker build -t "${IMAGE}:frontend-${TAG}-arm64" -f frontend/Dockerfile frontend
           docker push "${IMAGE}:frontend-${TAG}-arm64"
 
       - name: Build and push agent (arm64)
+        if: needs.changes.outputs.agent == 'true'
         run: |
           docker build -t "${IMAGE}:agent-${TAG}-arm64" -f agent/Dockerfile agent
           docker push "${IMAGE}:agent-${TAG}-arm64"
 
   manifest:
-    needs: [set-tag, build-amd64, build-arm64]
+    needs: [changes, set-tag, build-amd64, build-arm64]
+    if: |
+      always() &&
+      needs.build-amd64.result == 'success' &&
+      needs.build-arm64.result == 'success'
     runs-on: arc-runner-set
     env:
       TAG: ${{ needs.set-tag.outputs.tag }}
@@ -121,6 +175,13 @@ jobs:
       - name: Create multi-arch manifests
         run: |
           for COMPONENT in backend frontend agent; do
+            # Only create manifest if this component was built
+            case "$COMPONENT" in
+              backend)  [[ "${{ needs.changes.outputs.backend }}" != "true" ]] && continue ;;
+              frontend) [[ "${{ needs.changes.outputs.frontend }}" != "true" ]] && continue ;;
+              agent)    [[ "${{ needs.changes.outputs.agent }}" != "true" ]] && continue ;;
+            esac
+
             docker buildx imagetools create -t "${IMAGE}:${COMPONENT}-${TAG}" \
               "${IMAGE}:${COMPONENT}-${TAG}-amd64" \
               "${IMAGE}:${COMPONENT}-${TAG}-arm64"
@@ -131,7 +192,11 @@ jobs:
           done
 
   deploy:
-    needs: [set-tag, manifest]
+    needs: [changes, set-tag, manifest]
+    if: |
+      always() &&
+      needs.manifest.result == 'success' &&
+      (needs.changes.outputs.backend == 'true' || needs.changes.outputs.frontend == 'true')
     runs-on: arc-runner-set
     steps:
       - uses: actions/checkout@v6
@@ -140,6 +205,8 @@ jobs:
         env:
           TAG: ${{ needs.set-tag.outputs.tag }}
           PREFIX: ${{ needs.set-tag.outputs.pr_prefix }}
+          BACKEND_CHANGED: ${{ needs.changes.outputs.backend }}
+          FRONTEND_CHANGED: ${{ needs.changes.outputs.frontend }}
         run: |
           rm -rf /tmp/gitops
           git clone https://x-access-token:${GITOPS_PAT}@github.com/${GITOPS_REPO}.git /tmp/gitops
@@ -167,13 +234,17 @@ jobs:
           BRANCH="${PREFIX}/llm-manager-${TAG}"
           git checkout -b "${BRANCH}"
 
-          # Update both UAT and prod manifests on the same branch
-          sed -i "s|amerenda/llm-manager:backend-[^ ]*|amerenda/llm-manager:backend-${TAG}|g" \
-            apps/llm-manager/backend-uat/deployment.yaml \
-            apps/llm-manager/backend/deployment.yaml
-          sed -i "s|amerenda/llm-manager:frontend-[^ ]*|amerenda/llm-manager:frontend-${TAG}|g" \
-            apps/llm-manager/frontend-uat/deployment.yaml \
-            apps/llm-manager/frontend/deployment.yaml
+          # Only update manifests for components that were rebuilt
+          if [[ "$BACKEND_CHANGED" == "true" ]]; then
+            sed -i "s|amerenda/llm-manager:backend-[^ ]*|amerenda/llm-manager:backend-${TAG}|g" \
+              apps/llm-manager/backend-uat/deployment.yaml \
+              apps/llm-manager/backend/deployment.yaml
+          fi
+          if [[ "$FRONTEND_CHANGED" == "true" ]]; then
+            sed -i "s|amerenda/llm-manager:frontend-[^ ]*|amerenda/llm-manager:frontend-${TAG}|g" \
+              apps/llm-manager/frontend-uat/deployment.yaml \
+              apps/llm-manager/frontend/deployment.yaml
+          fi
 
           git config user.name "amerenda-deploy-bot[bot]"
           git config user.email "3192609+amerenda-deploy-bot[bot]@users.noreply.github.com"
@@ -219,7 +290,7 @@ jobs:
 
   notify-failure:
     if: failure()
-    needs: [test, build-amd64, build-arm64, manifest, deploy]
+    needs: [changes, test, build-amd64, build-arm64, manifest, deploy]
     runs-on: ubuntu-latest
     steps:
       - name: Create GitHub Issue for build failure

@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Download, Trash2, Loader2, CheckCircle2, AlertCircle, Image, Layers, Cpu, Upload, Shield, ShieldOff, Play, Square, Search, RefreshCw, BookOpen, Cloud, Settings2, Power, RefreshCcw, Server } from 'lucide-react'
-import { useLlmModels, usePullModel, useDeleteModel, useCheckpoints, useSwitchCheckpoint, useLlmStatus, useLoadModel, useUnloadModel, useStartComfyui, useStopComfyui, useLibrary, useRefreshLibrary, useCloudModels, useCloudStatus, useUpdateCloudModel, useCloudKeys, useStoreCloudKey, useDeleteCloudKey, useRunners, useSyncModels } from '../hooks/useBackend'
+import { useLlmModels, usePullModel, useDeleteModel, useCheckpoints, useSwitchCheckpoint, useLlmStatus, useLoadModel, useUnloadModel, useStartComfyui, useStopComfyui, useLibrary, useRefreshLibrary, useCloudModels, useCloudStatus, useUpdateCloudModel, useCloudKeys, useStoreCloudKey, useDeleteCloudKey, useRunners, useSyncModels, useOps } from '../hooks/useBackend'
 import type { LlmModel, LibraryModel, Runner } from '../types'
 import type { CloudModel, StoredApiKey } from '../hooks/useBackend'
 
@@ -381,6 +381,10 @@ function LibraryBrowserSection({ selectedRunner, selectedRunnerHostname, allRunn
   const [expanded, setExpanded] = useState<string | null>(null)
   const pull = usePullModel()
   const refresh = useRefreshLibrary()
+  const ops = useOps()
+  const pullingOps = (ops.data ?? []).filter(op => op.type === 'pull' && op.status === 'running')
+  const completedOps = (ops.data ?? []).filter(op => op.type === 'pull' && op.status === 'completed')
+  const failedOps = (ops.data ?? []).filter(op => op.type === 'pull' && op.status === 'failed')
   const [pullMsg, setPullMsg] = useState<{ model: string; type: 'ok' | 'err' | 'pulling'; text: string } | null>(null)
 
   const library = useLibrary({
@@ -388,6 +392,7 @@ function LibraryBrowserSection({ selectedRunner, selectedRunnerHostname, allRunn
     safety,
     fits: fitsOnly || undefined,
     downloaded: hideDownloaded ? false : undefined,
+    hasPulling: pullingOps.length > 0,
   })
 
   const rawModels = library.data?.models ?? []
@@ -405,6 +410,18 @@ function LibraryBrowserSection({ selectedRunner, selectedRunnerHostname, allRunn
   })
   const cacheAge = library.data?.cache_age_hours ?? 0
 
+  function isModelPulling(model: string) {
+    return pullingOps.some(op => op.model === model || model.startsWith(op.model + ':') || op.model.startsWith(model + ':'))
+  }
+  function getModelOpStatus(model: string) {
+    const failed = failedOps.find(op => op.model === model || model.startsWith(op.model + ':') || op.model.startsWith(model + ':'))
+    if (failed) return { status: 'failed' as const, error: failed.error }
+    const completed = completedOps.find(op => op.model === model || model.startsWith(op.model + ':') || op.model.startsWith(model + ':'))
+    if (completed) return { status: 'completed' as const }
+    if (isModelPulling(model)) return { status: 'running' as const }
+    return null
+  }
+
   async function handlePull(model: string, runnerId?: number) {
     const target = runnerId
       ? allRunners.find(r => r.id === runnerId)?.hostname ?? ''
@@ -412,8 +429,7 @@ function LibraryBrowserSection({ selectedRunner, selectedRunnerHostname, allRunn
     setPullMsg({ model, type: 'pulling', text: `Pulling to ${target}...` })
     try {
       await pull.mutateAsync({ model, runner_id: runnerId })
-      setPullMsg({ model, type: 'ok', text: `Pulling on ${target}` })
-      setTimeout(() => setPullMsg(null), 5000)
+      setPullMsg({ model, type: 'ok', text: `Downloading on ${target}` })
     } catch (e) {
       setPullMsg({ model, type: 'err', text: (e as Error).message })
     }
@@ -551,20 +567,26 @@ function LibraryBrowserSection({ selectedRunner, selectedRunnerHostname, allRunn
                     )}
                   </div>
                   <div className="flex-shrink-0 flex items-center gap-1.5" onClick={e => e.stopPropagation()}>
-                    {!m.downloaded && m.fits && selectedRunner !== undefined && (
+                    {isModelPulling(m.name) && (
+                      <span className="flex items-center gap-1 text-xs text-amber-400">
+                        <Loader2 className="w-3 h-3 animate-spin" />
+                        Downloading...
+                      </span>
+                    )}
+                    {!isModelPulling(m.name) && !m.downloaded && m.fits && selectedRunner !== undefined && (
                       <button
                         onClick={() => handlePull(m.name, selectedRunner)}
-                        disabled={pullMsg?.model === m.name && pullMsg.type === 'pulling'}
+                        disabled={pull.isPending && pullMsg?.model === m.name}
                         title={`Pull to ${selectedRunnerHostname}`}
                         className="flex items-center gap-1 text-xs bg-brand-900/50 hover:bg-brand-800/50 text-brand-300 px-3 py-1.5 rounded-lg transition-colors disabled:opacity-40"
                       >
-                        {pullMsg?.model === m.name && pullMsg.type === 'pulling'
+                        {pull.isPending && pullMsg?.model === m.name
                           ? <Loader2 className="w-3 h-3 animate-spin" />
                           : <Download className="w-3 h-3" />}
                         Pull to {selectedRunnerHostname}
                       </button>
                     )}
-                    {!m.downloaded && m.fits && selectedRunner === undefined && allRunners.length > 0 && (
+                    {!isModelPulling(m.name) && !m.downloaded && m.fits && selectedRunner === undefined && allRunners.length > 0 && (
                       <div className="flex gap-1">
                         {allRunners.map(r => {
                           const fitsOnThis = m.fits_on.some(f => f.runner === r.hostname)
@@ -573,7 +595,7 @@ function LibraryBrowserSection({ selectedRunner, selectedRunnerHostname, allRunn
                             <button
                               key={r.id}
                               onClick={() => handlePull(m.name, r.id)}
-                              disabled={pullMsg?.model === m.name && pullMsg.type === 'pulling'}
+                              disabled={pull.isPending && pullMsg?.model === m.name}
                               title={`Pull to ${r.hostname}`}
                               className="flex items-center gap-1 text-[10px] bg-brand-900/50 hover:bg-brand-800/50 text-brand-300 px-2 py-1 rounded-lg transition-colors disabled:opacity-40"
                             >
@@ -584,14 +606,25 @@ function LibraryBrowserSection({ selectedRunner, selectedRunnerHostname, allRunn
                         })}
                       </div>
                     )}
-                    {!m.fits && !m.downloaded && (
+                    {!m.fits && !m.downloaded && !isModelPulling(m.name) && (
                       <span className="text-[10px] text-gray-600">Too large</span>
                     )}
-                    {pullMsg?.model === m.name && pullMsg.type !== 'pulling' && (
-                      <span className={`text-[10px] ${pullMsg.type === 'ok' ? 'text-green-400' : 'text-red-400'}`}>
-                        {pullMsg.text}
-                      </span>
-                    )}
+                    {(() => {
+                      const opStatus = getModelOpStatus(m.name)
+                      if (opStatus?.status === 'failed') return (
+                        <span className="flex items-center gap-1 text-[10px] text-red-400">
+                          <AlertCircle className="w-2.5 h-2.5" />
+                          {opStatus.error || 'Pull failed'}
+                        </span>
+                      )
+                      if (opStatus?.status === 'completed') return (
+                        <span className="flex items-center gap-1 text-[10px] text-green-400">
+                          <CheckCircle2 className="w-2.5 h-2.5" />
+                          Done
+                        </span>
+                      )
+                      return null
+                    })()}
                   </div>
                 </div>
               </div>
@@ -603,18 +636,43 @@ function LibraryBrowserSection({ selectedRunner, selectedRunnerHostname, allRunn
                     <div>
                       <p className="text-[10px] text-gray-500 uppercase tracking-wide mb-1.5">Available sizes</p>
                       <div className="flex gap-1.5 flex-wrap">
-                        {m.parameter_sizes.map(s => (
+                        {m.parameter_sizes.map(s => {
+                          const sizeModel = `${m.name}:${s}`
+                          const pulling = isModelPulling(sizeModel)
+                          const opStatus = getModelOpStatus(sizeModel)
+                          return (
                           <button
                             key={s}
-                            onClick={e => { e.stopPropagation(); handlePull(`${m.name}:${s}`, selectedRunner) }}
-                            disabled={pullMsg?.model === `${m.name}:${s}` && pullMsg.type === 'pulling'}
-                            className="flex items-center gap-1 text-xs bg-blue-900/20 hover:bg-blue-900/40 text-blue-400 px-2 py-1 rounded transition-colors"
+                            onClick={e => { e.stopPropagation(); handlePull(sizeModel, selectedRunner) }}
+                            disabled={pulling || (pull.isPending && pullMsg?.model === sizeModel)}
+                            className={`flex items-center gap-1 text-xs px-2 py-1 rounded transition-colors ${
+                              pulling
+                                ? 'bg-amber-900/30 text-amber-400'
+                                : opStatus?.status === 'failed'
+                                ? 'bg-red-900/30 text-red-400'
+                                : opStatus?.status === 'completed'
+                                ? 'bg-green-900/30 text-green-400'
+                                : 'bg-blue-900/20 hover:bg-blue-900/40 text-blue-400'
+                            }`}
                           >
-                            <Download className="w-2.5 h-2.5" />
+                            {pulling
+                              ? <Loader2 className="w-2.5 h-2.5 animate-spin" />
+                              : opStatus?.status === 'completed'
+                              ? <CheckCircle2 className="w-2.5 h-2.5" />
+                              : opStatus?.status === 'failed'
+                              ? <AlertCircle className="w-2.5 h-2.5" />
+                              : <Download className="w-2.5 h-2.5" />}
                             {s}
-                            {selectedRunnerHostname && <span className="text-gray-600 ml-0.5">→ {selectedRunnerHostname}</span>}
+                            {pulling
+                              ? <span className="text-amber-500 ml-0.5">downloading...</span>
+                              : opStatus?.status === 'completed'
+                              ? <span className="text-green-500 ml-0.5">done</span>
+                              : opStatus?.status === 'failed'
+                              ? <span className="text-red-500 ml-0.5">failed</span>
+                              : selectedRunnerHostname && <span className="text-gray-600 ml-0.5">→ {selectedRunnerHostname}</span>}
                           </button>
-                        ))}
+                          )
+                        })}
                       </div>
                     </div>
                   )}
