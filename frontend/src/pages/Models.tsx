@@ -172,6 +172,8 @@ function RunnerModelView({ runnerId, runnerHostname }: { runnerId: number; runne
   const del = useDeleteModel()
   const load = useLoadModel()
   const unload = useUnloadModel()
+  const ops = useOps()
+  const activeOps = (ops.data ?? []).filter(op => op.status === 'running')
   const [pullInput, setPullInput] = useState('')
   const [pullMsg, setPullMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
 
@@ -256,6 +258,51 @@ function RunnerModelView({ runnerId, runnerHostname }: { runnerId: number; runne
           </div>
         )}
       </div>
+
+      {/* Active downloads */}
+      {activeOps.length > 0 && (
+        <div className="bg-gray-900 border border-gray-800 rounded-xl p-4 space-y-3">
+          <p className="text-xs text-gray-500 font-medium uppercase tracking-wide">
+            Downloads in progress ({activeOps.length})
+          </p>
+          {activeOps.map((op, i) => {
+            // Parse Ollama progress — usually JSON with "status", "completed", "total"
+            let pct = 0
+            let statusText = op.progress || 'starting...'
+            try {
+              const p = JSON.parse(op.progress || '{}')
+              if (p.completed && p.total) {
+                pct = Math.round((p.completed / p.total) * 100)
+                const completedMB = (p.completed / 1e9).toFixed(1)
+                const totalMB = (p.total / 1e9).toFixed(1)
+                statusText = `${p.status || 'downloading'} ${completedMB}/${totalMB} GB`
+              } else if (p.status) {
+                statusText = p.status
+              }
+            } catch {
+              // progress is plain text
+              statusText = op.progress || 'starting...'
+            }
+            return (
+              <div key={`${op.model}-${i}`}>
+                <div className="flex items-center justify-between text-xs mb-1">
+                  <span className="text-gray-300 font-medium">{op.model}</span>
+                  <span className="text-gray-500">{pct > 0 ? `${pct}%` : statusText.slice(0, 40)}</span>
+                </div>
+                <div className="h-2 bg-gray-800 rounded-full overflow-hidden">
+                  <div
+                    className="h-full rounded-full bg-brand-500 transition-all"
+                    style={{ width: `${pct}%` }}
+                  />
+                </div>
+                {pct > 0 && (
+                  <p className="text-[10px] text-gray-500 mt-0.5">{statusText}</p>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      )}
 
       {/* Pull input */}
       <div className="bg-gray-900 border border-gray-800 rounded-xl p-4">
