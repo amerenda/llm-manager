@@ -197,6 +197,7 @@ export interface LibraryModel {
   fits: boolean
   fits_on: { runner: string; vram_total_gb: number }[]
   vram_estimate_gb: number
+  size_info?: Record<string, { vram_gb: number; fits: boolean }>
 }
 
 export interface SafetyTag {

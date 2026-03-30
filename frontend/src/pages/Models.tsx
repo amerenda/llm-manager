@@ -655,7 +655,7 @@ function LibraryBrowserSection({ selectedRunner, selectedRunnerHostname, allRunn
                             {m.parameter_sizes.slice(0, 6).map(s => {
                               const sizeModel = `${m.name}:${s}`
                               const isDownloaded = downloadedNames.has(sizeModel) || downloadedNames.has(`${m.name}:latest`)
-                              const sizeFits = fitsMap.get(sizeModel) ?? m.fits
+                              const sizeFits = m.size_info?.[s]?.fits ?? fitsMap.get(sizeModel) ?? m.fits
                               // Green: downloaded. Yellow: downloaded but doesn't fit. Blue: available, fits. Red: won't fit.
                               const badgeClass = isDownloaded && sizeFits
                                 ? 'bg-green-900/30 text-green-400'
@@ -739,7 +739,7 @@ function LibraryBrowserSection({ selectedRunner, selectedRunnerHostname, allRunn
                           const pulling = isModelPulling(sizeModel)
                           const opStatus = getModelOpStatus(sizeModel)
                           const isDownloaded = downloadedNames.has(sizeModel) || downloadedNames.has(`${m.name}:latest`)
-                          const sizeFits = fitsMap.get(sizeModel) ?? m.fits
+                          const sizeFits = m.size_info?.[s]?.fits ?? fitsMap.get(sizeModel) ?? m.fits
                           const baseClass = isDownloaded && sizeFits
                             ? 'bg-green-900/30 text-green-400'
                             : isDownloaded && !sizeFits

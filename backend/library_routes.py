@@ -142,6 +142,13 @@ async def browse_library(
             if any(d.startswith(name) for d in models)
         ]
 
+        # Per-size fit info for the UI badges
+        size_info = {}
+        for ps in param_sizes:
+            sv = round(vram_for_model(f"{name}:{ps}"), 1)
+            sf = [h for h, v in runner_vram.items() if v >= sv]
+            size_info[ps] = {"vram_gb": sv, "fits": len(sf) > 0 or not runner_vram}
+
         results.append({
             "name": name,
             "description": m.get("description", ""),
@@ -155,6 +162,7 @@ async def browse_library(
             "fits": model_fits,
             "fits_on": fits_on,
             "vram_estimate_gb": round(vram_est, 1),
+            "size_info": size_info,
         })
 
     # Sort results
