@@ -630,6 +630,8 @@ async def chat_completions(request: Request):
         "messages": body.get("messages", []),
         "stream": stream,
     }
+    if "tools" in body:
+        ollama_body["tools"] = body["tools"]
     if "temperature" in body:
         ollama_body.setdefault("options", {})["temperature"] = body["temperature"]
     if "max_tokens" in body:
@@ -702,6 +704,23 @@ async def chat_completions(request: Request):
         ).observe(time.time() - t0)
 
         msg = data.get("message", {})
+        openai_msg = {
+            "role": msg.get("role", "assistant"),
+            "content": msg.get("content", ""),
+        }
+        # Forward tool calls from Ollama response
+        if msg.get("tool_calls"):
+            openai_msg["tool_calls"] = [
+                {
+                    "id": f"call_{uuid.uuid4().hex[:8]}",
+                    "type": "function",
+                    "function": {
+                        "name": tc["function"]["name"],
+                        "arguments": json.dumps(tc["function"]["arguments"]),
+                    },
+                }
+                for tc in msg["tool_calls"]
+            ]
         return {
             "id": f"chatcmpl-{uuid.uuid4().hex[:8]}",
             "object": "chat.completion",
@@ -709,11 +728,8 @@ async def chat_completions(request: Request):
             "model": model,
             "choices": [{
                 "index": 0,
-                "message": {
-                    "role": msg.get("role", "assistant"),
-                    "content": msg.get("content", ""),
-                },
-                "finish_reason": "stop",
+                "message": openai_msg,
+                "finish_reason": "tool_calls" if msg.get("tool_calls") else "stop",
             }],
             "usage": {
                 "prompt_tokens": data.get("prompt_eval_count", 0),
