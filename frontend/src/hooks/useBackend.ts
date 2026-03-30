@@ -170,8 +170,8 @@ export function useDeleteModel() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: ({ model, runner_id }: { model: string; runner_id?: number }) => {
-      const params = runner_id ? `?runner_id=${runner_id}` : ''
-      return del<{ ok: boolean }>(`/api/llm/models/${encodeURIComponent(model)}${params}`)
+      const params = runner_id ? `&runner_id=${runner_id}` : ''
+      return post<{ ok: boolean }>(`/api/llm/models/delete?model=${encodeURIComponent(model)}${params}`)
     },
     onMutate: async ({ model }) => {
       // Optimistic: remove from model-list cache immediately

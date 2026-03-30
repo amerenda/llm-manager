@@ -1108,10 +1108,10 @@ async def get_operation(op_id: str):
     return _ops[op_id]
 
 
-@app.delete("/api/llm/models/{model:path}")
+@app.post("/api/llm/models/delete")
 async def llm_delete_model(model: str, runner_id: Optional[int] = None):
     """Delete a model from disk on a runner."""
-    _inc_request("/api/llm/models/delete", "DELETE", 200)
+    _inc_request("/api/llm/models/delete", "POST", 200)
     try:
         client = await _get_runner_client(app.state.db, runner_id)
         return await client.delete_model(model)
