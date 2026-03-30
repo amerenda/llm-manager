@@ -179,8 +179,16 @@ function RunnerModelView({ runnerId, runnerHostname }: { runnerId: number; runne
   const [expandedModel, setExpandedModel] = useState<string | null>(null)
 
   // Filter models to only those on this runner (using fits_on from /api/models)
+  // Get models actually on this runner from /api/llm/models (per-runner source of truth)
+  const llmModels = useLlmModels()
+  const modelsOnRunner = new Set(
+    (llmModels.data ?? [])
+      .filter((m: LlmModel) => m.runners?.some(r => r.runner_id === runnerId))
+      .map((m: LlmModel) => m.id)
+  )
+  // Enrich with metadata from /api/models, but filter to only models on this runner
   const enrichedModels = (modelList.data ?? [])
-    .filter(m => m.fits_on?.some(f => f.runner === runnerHostname) || m.loaded)
+    .filter(m => modelsOnRunner.has(m.name))
     .sort((a, b) => a.name.localeCompare(b.name))
 
   const allLoadedModels = status.data?.loaded_ollama_models ?? []

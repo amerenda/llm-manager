@@ -30,6 +30,17 @@ async function patch<T>(path: string, body?: unknown): Promise<T> {
   return r.json()
 }
 
+async function put<T>(path: string, body: unknown): Promise<T> {
+  const r = await fetch(path, {
+    method: 'PUT',
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  })
+  if (!r.ok) throw new Error(`${r.status} ${await r.text()}`)
+  return r.json()
+}
+
 async function del<T>(path: string): Promise<T> {
   const r = await fetch(path, { method: 'DELETE', credentials: 'include' })
   if (!r.ok) throw new Error(`${r.status} ${await r.text()}`)
