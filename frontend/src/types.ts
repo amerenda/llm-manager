@@ -41,6 +41,10 @@ export interface LlmModel {
   owned_by: string
   created: number
   runners?: { runner_id: number; hostname: string }[]
+  parameter_count?: string
+  quantization?: string
+  vram_estimate_gb?: number
+  size_gb?: number
 }
 
 // A registered GPU/TTS runner from GET /api/runners

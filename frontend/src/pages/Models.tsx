@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Download, Trash2, Loader2, CheckCircle2, AlertCircle, Image, Layers, Cpu, Upload, Shield, ShieldOff, Play, Square, Search, RefreshCw, BookOpen, Cloud, Settings2, Power, RefreshCcw, Server } from 'lucide-react'
-import { useLlmModels, usePullModel, useDeleteModel, useCheckpoints, useSwitchCheckpoint, useLlmStatus, useLoadModel, useUnloadModel, useStartComfyui, useStopComfyui, useLibrary, useRefreshLibrary, useCloudModels, useCloudStatus, useUpdateCloudModel, useCloudKeys, useStoreCloudKey, useDeleteCloudKey, useRunners, useSyncModels, useOps } from '../hooks/useBackend'
+import { useLlmModels, usePullModel, useDeleteModel, useCheckpoints, useSwitchCheckpoint, useLlmStatus, useLoadModel, useUnloadModel, useStartComfyui, useStopComfyui, useLibrary, useRefreshLibrary, useCloudModels, useCloudStatus, useUpdateCloudModel, useCloudKeys, useStoreCloudKey, useDeleteCloudKey, useRunners, useSyncModels, useOps, useModelList } from '../hooks/useBackend'
 import type { LlmModel, LibraryModel, Runner } from '../types'
 import type { CloudModel, StoredApiKey } from '../hooks/useBackend'
 
@@ -440,8 +440,8 @@ function LibraryBrowserSection({ selectedRunner, selectedRunnerHostname, allRunn
   allRunners: Runner[]
 }) {
   const modelList = useModelList()
-  const downloadedNames = new Set((modelList.data ?? []).map(m => m.name))
-  const fitsMap = new Map((modelList.data ?? []).map(m => [m.name, m.fits]))
+  const downloadedNames = new Set((modelList.data ?? []).map((m: { name: string }) => m.name))
+  const fitsMap = new Map((modelList.data ?? []).map((m: { name: string; fits: boolean }) => [m.name, m.fits]))
   const [search, setSearch] = useState('')
   const [safety, setSafety] = useState<string>('safe')
   const [fitsOnly, setFitsOnly] = useState(true)
