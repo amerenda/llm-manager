@@ -157,7 +157,20 @@ class LLMAgentClient:
             return r.json()
 
     async def unload_model(self, model: str) -> dict:
-        """Unload a model from VRAM."""
+        """Alias for backwards compatibility."""
+        return await self.unload_model_from_vram(model)
+
+    async def _old_unload(self, model: str) -> dict:
+        async with self._client(timeout=self._timeout) as c:
+            r = await c.delete(
+                f"{self.base_url}/v1/models/{model}",
+                headers=self._headers,
+            )
+            r.raise_for_status()
+            return r.json()
+
+    async def unload_model_from_vram(self, model: str) -> dict:
+        """Unload a model from VRAM (keep on disk)."""
         async with self._client(timeout=self._timeout) as c:
             r = await c.delete(
                 f"{self.base_url}/v1/models/{model}",
@@ -167,9 +180,10 @@ class LLMAgentClient:
             return r.json()
 
     async def delete_model(self, model: str) -> dict:
-        async with self._client(timeout=self._timeout) as c:
-            r = await c.delete(
-                f"{self.base_url}/v1/models/{model}",
+        """Delete a model from disk."""
+        async with self._client(timeout=httpx.Timeout(10, read=60)) as c:
+            r = await c.post(
+                f"{self.base_url}/v1/models/{model}/delete-from-disk",
                 headers=self._headers,
             )
             r.raise_for_status()

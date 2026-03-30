@@ -150,10 +150,41 @@ export function useSyncModels() {
 export function useDeleteModel() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: (model: string) => del<{ ok: boolean }>(`/api/llm/models/${encodeURIComponent(model)}`),
-    onSuccess: () => {
+    mutationFn: ({ model, runner_id }: { model: string; runner_id?: number }) => {
+      const params = runner_id ? `?runner_id=${runner_id}` : ''
+      return del<{ ok: boolean }>(`/api/llm/models/${encodeURIComponent(model)}${params}`)
+    },
+    onMutate: async ({ model }) => {
+      // Optimistic: remove from model-list cache immediately
+      await qc.cancelQueries({ queryKey: ['model-list'] })
+      const prev = qc.getQueryData<ModelInfo[]>(['model-list'])
+      if (prev) {
+        qc.setQueryData(['model-list'], prev.filter(m => m.name !== model))
+      }
+      return { prev }
+    },
+    onError: (_err, _vars, ctx) => {
+      // Restore on failure
+      if (ctx?.prev) qc.setQueryData(['model-list'], ctx.prev)
+    },
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: ['model-list'] })
       qc.invalidateQueries({ queryKey: ['llm-models'] })
       qc.invalidateQueries({ queryKey: ['llm-status'] })
+    },
+  })
+}
+
+export function useUnloadFromVram() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ model, runner_id }: { model: string; runner_id?: number }) => {
+      const params = runner_id ? `?runner_id=${runner_id}` : ''
+      return post<{ ok: boolean }>(`/api/llm/models/${encodeURIComponent(model)}/unload${params}`)
+    },
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: ['llm-status'] })
+      qc.invalidateQueries({ queryKey: ['model-list'] })
     },
   })
 }

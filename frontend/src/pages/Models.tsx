@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Download, Trash2, Loader2, CheckCircle2, AlertCircle, Image, Layers, Cpu, Upload, Shield, ShieldOff, Play, Square, Search, RefreshCw, BookOpen, Cloud, Settings2, Power, RefreshCcw, Server } from 'lucide-react'
-import { useLlmModels, usePullModel, useDeleteModel, useCheckpoints, useSwitchCheckpoint, useLlmStatus, useLoadModel, useUnloadModel, useStartComfyui, useStopComfyui, useLibrary, useRefreshLibrary, useCloudModels, useCloudStatus, useUpdateCloudModel, useCloudKeys, useStoreCloudKey, useDeleteCloudKey, useRunners, useSyncModels, useOps, useModelList } from '../hooks/useBackend'
+import { useLlmModels, usePullModel, useDeleteModel, useCheckpoints, useSwitchCheckpoint, useLlmStatus, useLoadModel, useUnloadFromVram, useStartComfyui, useStopComfyui, useLibrary, useRefreshLibrary, useCloudModels, useCloudStatus, useUpdateCloudModel, useCloudKeys, useStoreCloudKey, useDeleteCloudKey, useRunners, useSyncModels, useOps, useModelList } from '../hooks/useBackend'
 import type { LlmModel, LibraryModel, Runner } from '../types'
 import type { CloudModel, StoredApiKey } from '../hooks/useBackend'
 
@@ -171,7 +171,7 @@ function RunnerModelView({ runnerId, runnerHostname }: { runnerId: number; runne
   const pull = usePullModel()
   const del = useDeleteModel()
   const load = useLoadModel()
-  const unload = useUnloadModel()
+  const unloadVram = useUnloadFromVram()
   const ops = useOps()
   const activeOps = (ops.data ?? []).filter(op => op.status === 'running')
   const [pullInput, setPullInput] = useState('')
@@ -370,10 +370,10 @@ function RunnerModelView({ runnerId, runnerHostname }: { runnerId: number; runne
                   </div>
                   <div className="flex items-center gap-1.5 flex-shrink-0" onClick={e => e.stopPropagation()}>
                     {isLoaded ? (
-                      <button onClick={() => unload.mutate({ model: m.name, runner_id: runnerId })} disabled={unload.isPending}
-                        title="Unload from VRAM"
+                      <button onClick={() => unloadVram.mutate({ model: m.name, runner_id: runnerId })} disabled={unloadVram.isPending}
+                        title="Free VRAM — model reloads on next request"
                         className="flex items-center gap-1 text-xs bg-yellow-900/30 hover:bg-yellow-800/40 text-yellow-400 px-2.5 py-1 rounded-lg transition-colors disabled:opacity-40">
-                        {unload.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Upload className="w-3 h-3" />}
+                        {unloadVram.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Upload className="w-3 h-3" />}
                         Unload
                       </button>
                     ) : (
@@ -385,8 +385,11 @@ function RunnerModelView({ runnerId, runnerHostname }: { runnerId: number; runne
                       </button>
                     )}
                     <button
-                      onClick={() => { if (window.confirm(`Delete ${m.name} from ${runnerHostname}?`)) del.mutate(m.name) }}
-                      disabled={del.isPending} title="Delete model"
+                      onClick={() => {
+                        if (window.confirm(`Delete ${m.name} from disk on ${runnerHostname}?\n\nApps using this model will fail until re-downloaded.`))
+                          del.mutate({ model: m.name, runner_id: runnerId })
+                      }}
+                      disabled={del.isPending} title="Delete from disk"
                       className="p-1.5 rounded-lg bg-gray-800 hover:bg-red-900/50 hover:text-red-400 text-gray-500 transition-colors">
                       {del.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
                     </button>

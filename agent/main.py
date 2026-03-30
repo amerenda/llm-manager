@@ -843,6 +843,28 @@ async def unload_model(model: str):
     return {"ok": True, "message": f"Model {model} unloaded from VRAM"}
 
 
+@app.post("/v1/models/{model:path}/delete-from-disk")
+async def delete_model_from_disk(model: str):
+    """Delete a model from disk via Ollama's DELETE /api/delete."""
+    requests_total.labels(node=NODE, endpoint="/v1/models/delete-disk", model=model).inc()
+    try:
+        async with httpx.AsyncClient(timeout=60) as c:
+            r = await c.request(
+                "DELETE",
+                f"{OLLAMA_URL}/api/delete",
+                json={"name": model},
+            )
+            if r.status_code == 404:
+                raise HTTPException(status_code=404, detail=f"Model {model} not found")
+            if r.status_code not in (200,):
+                raise HTTPException(status_code=r.status_code, detail=r.text)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"Ollama unavailable: {e}")
+    return {"ok": True, "message": f"Model {model} deleted from disk"}
+
+
 class LoadRequest(BaseModel):
     model: str
     keep_alive: int = -1  # -1 means forever (seconds), 0 means unload immediately

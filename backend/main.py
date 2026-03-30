@@ -1088,6 +1088,7 @@ async def get_operation(op_id: str):
 
 @app.delete("/api/llm/models/{model:path}")
 async def llm_delete_model(model: str, runner_id: Optional[int] = None):
+    """Delete a model from disk on a runner."""
     _inc_request("/api/llm/models/delete", "DELETE", 200)
     try:
         client = await _get_runner_client(app.state.db, runner_id)
@@ -1481,7 +1482,7 @@ async def llm_unload_model(req: ModelUnloadRequest, runner_id: Optional[int] = N
     async def _do_unload():
         try:
             client = await _get_runner_client(app.state.db, runner_id)
-            await client.unload_model(req.model)
+            await client.unload_model_from_vram(req.model)
             _ops[op_id]["status"] = "completed"
         except Exception as e:
             _ops[op_id]["status"] = "failed"
@@ -1730,7 +1731,7 @@ async def activate_profile_endpoint(
                 status = await client.status()
                 for m in status.get("loaded_ollama_models", []):
                     try:
-                        await client.unload_model(m["name"])
+                        await client.unload_model_from_vram(m["name"])
                     except Exception as e:
                         logger.warning("Failed to unload %s: %s", m["name"], e)
             except Exception as e:
