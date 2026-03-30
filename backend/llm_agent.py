@@ -180,7 +180,7 @@ class LLMAgentClient:
             return r.json()
 
     async def delete_model(self, model: str) -> dict:
-        """Delete a model from disk."""
+        """Delete a model from disk via the agent's delete-from-disk endpoint."""
         async with self._client(timeout=httpx.Timeout(10, read=60)) as c:
             r = await c.post(
                 f"{self.base_url}/v1/models/{model}/delete-from-disk",
