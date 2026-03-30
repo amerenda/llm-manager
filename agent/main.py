@@ -304,12 +304,11 @@ async def _heartbeat_loop():
                     json={"runner_id": _RUNNER_ID, "capabilities": caps},
                     headers={"X-Agent-PSK": AGENT_PSK} if AGENT_PSK else {},
                 )
-                # Check for update signal
+                # Log update availability (auto-update disabled — use API to trigger)
                 try:
                     data = resp.json()
                     if data.get("update_to") and data["update_to"] != AGENT_VERSION:
-                        logger.info("Update available: %s -> %s", AGENT_VERSION, data["update_to"])
-                        asyncio.create_task(_self_update(data["update_to"]))
+                        logger.info("Update available: %s -> %s (manual trigger required)", AGENT_VERSION, data["update_to"])
                 except Exception:
                     pass
         except Exception as e:
@@ -624,7 +623,11 @@ async def chat_completions(request: Request):
 
     requests_total.labels(node=NODE, endpoint="/v1/chat/completions", model=model).inc()
 
-    # Convert OpenAI format to Ollama format
+    # When tools are present, use Ollama's OpenAI-compatible endpoint directly
+    # to avoid format conversion issues with tool_calls
+    use_openai_compat = bool(body.get("tools"))
+
+    # Convert OpenAI format to Ollama format (only for non-tool requests)
     ollama_body = {
         "model": model,
         "messages": body.get("messages", []),
@@ -633,19 +636,29 @@ async def chat_completions(request: Request):
     if "tools" in body:
         ollama_body["tools"] = body["tools"]
     if "temperature" in body:
-        ollama_body.setdefault("options", {})["temperature"] = body["temperature"]
+        if use_openai_compat:
+            ollama_body["temperature"] = body["temperature"]
+        else:
+            ollama_body.setdefault("options", {})["temperature"] = body["temperature"]
     if "max_tokens" in body:
-        ollama_body.setdefault("options", {})["num_predict"] = body["max_tokens"]
+        if use_openai_compat:
+            ollama_body["max_tokens"] = body["max_tokens"]
+        else:
+            ollama_body.setdefault("options", {})["num_predict"] = body["max_tokens"]
     if "top_p" in body:
-        ollama_body.setdefault("options", {})["top_p"] = body["top_p"]
+        if use_openai_compat:
+            ollama_body["top_p"] = body["top_p"]
+        else:
+            ollama_body.setdefault("options", {})["top_p"] = body["top_p"]
 
     if stream:
+        stream_endpoint = f"{OLLAMA_URL}/v1/chat/completions" if use_openai_compat else f"{OLLAMA_URL}/api/chat"
         async def _stream_gen() -> AsyncGenerator[bytes, None]:
             try:
                 async with httpx.AsyncClient(timeout=300) as c:
                     async with c.stream(
                         "POST",
-                        f"{OLLAMA_URL}/api/chat",
+                        stream_endpoint,
                         json=ollama_body,
                         timeout=300,
                     ) as resp:
@@ -688,9 +701,10 @@ async def chat_completions(request: Request):
         return StreamingResponse(_stream_gen(), media_type="text/event-stream")
 
     else:
+        endpoint = f"{OLLAMA_URL}/v1/chat/completions" if use_openai_compat else f"{OLLAMA_URL}/api/chat"
         try:
             async with httpx.AsyncClient(timeout=300) as c:
-                r = await c.post(f"{OLLAMA_URL}/api/chat", json=ollama_body)
+                r = await c.post(endpoint, json=ollama_body)
                 if r.status_code != 200:
                     raise HTTPException(status_code=r.status_code, detail=r.text)
                 data = r.json()
@@ -702,6 +716,10 @@ async def chat_completions(request: Request):
         request_duration.labels(
             node=NODE, endpoint="/v1/chat/completions", model=model
         ).observe(time.time() - t0)
+
+        # If we used the OpenAI-compatible endpoint, pass through directly
+        if use_openai_compat:
+            return data
 
         msg = data.get("message", {})
         openai_msg = {
