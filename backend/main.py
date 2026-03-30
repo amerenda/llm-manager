@@ -458,21 +458,20 @@ async def models_for_agents():
                 total = caps.get("gpu_vram_total_bytes", 0) / (1024**3)
                 runner_vram[r["hostname"]] = round(total, 1)
 
-        # Get models from ALL runners' Ollama instances
+        # Get models from ALL runners via their agent API
         all_models_map: dict = {}  # name -> model dict
         loaded_names = set()
         for runner in runners_list:
             try:
-                ollama_base = await _get_runner_ollama_base(pool, runner["id"])
-                async with httpx.AsyncClient(timeout=10) as c:
-                    r = await c.get(f"{ollama_base}/api/tags")
-                    if r.status_code == 200:
-                        for m in r.json().get("models", []):
-                            all_models_map[m.get("name", "")] = m
-                    ps_resp = await c.get(f"{ollama_base}/api/ps")
-                    if ps_resp.status_code == 200:
-                        for lm in ps_resp.json().get("models", []):
-                            loaded_names.add(lm["name"])
+                client = await _get_runner_client(pool, runner["id"])
+                result = await client.models()
+                for m in result.get("data", []):
+                    name = m.get("id", "")
+                    if name:
+                        all_models_map[name] = m
+                status = await client.status()
+                for lm in status.get("loaded_ollama_models", []):
+                    loaded_names.add(lm["name"])
             except Exception:
                 pass
 
@@ -482,8 +481,11 @@ async def models_for_agents():
 
         models = []
         for name, m in all_models_map.items():
-            size_gb = round(m.get("size", 0) / 1e9, 2)
+            # Agent API returns OpenAI format (no size), fall back to VRAM estimate
+            size_gb = round(m.get("size", 0) / 1e9, 2) if m.get("size") else 0
             vram_est = round(vram_for_model(name), 2)
+            if size_gb == 0:
+                size_gb = vram_est  # approximate
             fits_on = [
                 {"runner": hostname, "vram_total_gb": vram}
                 for hostname, vram in runner_vram.items()
