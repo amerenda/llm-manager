@@ -95,7 +95,8 @@ except Exception:
 AGENT_PSK = os.environ.get("LLM_MANAGER_AGENT_PSK", "")
 BACKEND_URL = os.environ.get("BACKEND_URL", "")
 AGENT_VERSION = os.environ.get("AGENT_VERSION", "unknown")
-COMPOSE_DIR = os.environ.get("COMPOSE_DIR", "")  # path to agent compose dir on host
+COMPOSE_DIR = os.environ.get("COMPOSE_DIR", "")  # host path — used in docker compose -f
+COMPOSE_DIR_LOCAL = os.environ.get("COMPOSE_DIR_LOCAL", "")  # container-mounted path — used for file I/O
 COMPOSE_PROFILE = os.environ.get("COMPOSE_PROFILE", "")  # nvidia or amd
 
 
@@ -304,11 +305,14 @@ async def _heartbeat_loop():
                     json={"runner_id": _RUNNER_ID, "capabilities": caps},
                     headers={"X-Agent-PSK": AGENT_PSK} if AGENT_PSK else {},
                 )
-                # Log update availability (auto-update disabled — use API to trigger)
                 try:
                     data = resp.json()
                     if data.get("update_to") and data["update_to"] != AGENT_VERSION:
-                        logger.info("Update available: %s -> %s (manual trigger required)", AGENT_VERSION, data["update_to"])
+                        if data.get("auto_update"):
+                            logger.info("Auto-updating: %s -> %s", AGENT_VERSION, data["update_to"])
+                            asyncio.create_task(_self_update(data["update_to"]))
+                        else:
+                            logger.info("Update available: %s -> %s (manual trigger required)", AGENT_VERSION, data["update_to"])
                 except Exception:
                     pass
         except Exception as e:
@@ -317,8 +321,27 @@ async def _heartbeat_loop():
 
 _updating = False
 
+
+def _write_env_tag(env_path: str, tag: str):
+    """Set AGENT_IMAGE_TAG in the .env file so compose uses the pinned tag."""
+    lines = []
+    found = False
+    if os.path.isfile(env_path):
+        with open(env_path) as f:
+            for line in f:
+                if line.startswith("AGENT_IMAGE_TAG="):
+                    lines.append(f"AGENT_IMAGE_TAG={tag}\n")
+                    found = True
+                else:
+                    lines.append(line)
+    if not found:
+        lines.append(f"AGENT_IMAGE_TAG={tag}\n")
+    with open(env_path, "w") as f:
+        f.writelines(lines)
+
+
 async def _self_update(target_version: str):
-    """Pull new image and restart via docker compose."""
+    """Pin image tag in .env, pull new image, and restart via docker compose."""
     global _updating
     if _updating:
         return
@@ -331,15 +354,25 @@ async def _self_update(target_version: str):
     _updating = True
     try:
         logger.info("Self-updating to %s ...", target_version)
-        compose_file = os.path.join(COMPOSE_DIR, "compose.yaml")
-        if not os.path.isfile(compose_file):
-            logger.error("Compose file not found: %s", compose_file)
+        # COMPOSE_DIR is the host path (for docker compose -f via Docker socket)
+        # COMPOSE_DIR_LOCAL is the container-mounted path (for file I/O)
+        local_dir = COMPOSE_DIR_LOCAL or COMPOSE_DIR
+        compose_file_local = os.path.join(local_dir, "compose.yaml")
+        compose_file_host = os.path.join(COMPOSE_DIR, "compose.yaml")
+        if not os.path.isfile(compose_file_local):
+            logger.error("Compose file not found: %s", compose_file_local)
+            _updating = False
             return
+        # Pin the target version in .env so compose pulls the exact tag
+        env_file = os.path.join(local_dir, ".env")
+        _write_env_tag(env_file, target_version)
+        logger.info("Pinned AGENT_IMAGE_TAG=%s in %s", target_version, env_file)
         # Pull and recreate in background — this will kill the current container
+        # Use host path for docker compose since it runs via the Docker socket
         import subprocess
         cmd = (
-            f"docker compose -f {compose_file} --profile {COMPOSE_PROFILE} pull && "
-            f"docker compose -f {compose_file} --profile {COMPOSE_PROFILE} up -d --force-recreate"
+            f"docker compose -f {compose_file_host} --profile {COMPOSE_PROFILE} pull && "
+            f"docker compose -f {compose_file_host} --profile {COMPOSE_PROFILE} up -d --force-recreate"
         )
         subprocess.Popen(
             cmd,
@@ -984,6 +1017,25 @@ async def load_model(req: LoadRequest):
         request_duration.labels(node=NODE, endpoint="/v1/models/load", model=req.model).observe(time.time() - t0)
     return {"ok": True, "message": f"Model {req.model} loaded into VRAM"}
 
+
+# ── Agent update ──────────────────────────────────────────────────────────────
+
+class UpdateRequest(BaseModel):
+    target_version: str
+
+
+@app.post("/v1/update")
+async def trigger_update(req: UpdateRequest):
+    """Trigger a self-update to the given version (called by backend)."""
+    if req.target_version == AGENT_VERSION:
+        return {"ok": True, "message": "Already at target version"}
+    if _updating:
+        return {"ok": True, "message": "Update already in progress"}
+    asyncio.create_task(_self_update(req.target_version))
+    return {"ok": True, "message": f"Updating to {req.target_version}"}
+
+
+# ── ComfyUI ───────────────────────────────────────────────────────────────────
 
 class CheckpointRequest(BaseModel):
     name: str

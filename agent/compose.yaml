@@ -8,7 +8,7 @@
 services:
   llm-agent:
     profiles: ["nvidia"]
-    image: amerenda/llm-manager:agent-latest
+    image: amerenda/llm-manager:agent-${AGENT_IMAGE_TAG:-latest}
     container_name: llm-agent
     network_mode: host
     restart: unless-stopped
@@ -18,11 +18,13 @@ services:
       OLLAMA_MODELS: /hostfs${OLLAMA_MODELS_PATH:-/mnt/storage/models}
       MODEL_STORAGE_PATH: ${MODEL_STORAGE_PATH:-/mnt/storage/models}
       COMPOSE_DIR: ${COMPOSE_DIR:-}
+      COMPOSE_DIR_LOCAL: /host-compose
       COMPOSE_PROFILE: nvidia
     volumes:
       - agent-tls:/data/tls
       - /var/run/docker.sock:/var/run/docker.sock
       - /:/hostfs:ro
+      - ${COMPOSE_DIR:-.}:/host-compose
     deploy:
       resources:
         reservations:
@@ -33,7 +35,7 @@ services:
 
   llm-agent-amd:
     profiles: ["amd"]
-    image: amerenda/llm-manager:agent-amd-latest
+    image: amerenda/llm-manager:agent-amd-${AGENT_IMAGE_TAG:-latest}
     container_name: llm-agent
     network_mode: host
     restart: unless-stopped
@@ -44,6 +46,7 @@ services:
       OLLAMA_MODELS: /hostfs${OLLAMA_MODELS_PATH:-/mnt/storage/models}
       MODEL_STORAGE_PATH: ${MODEL_STORAGE_PATH:-/mnt/storage/models}
       COMPOSE_DIR: ${COMPOSE_DIR:-}
+      COMPOSE_DIR_LOCAL: /host-compose
       COMPOSE_PROFILE: amd
     devices:
       - /dev/kfd:/dev/kfd
@@ -56,6 +59,7 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
       - /sys:/sys:ro
       - /:/hostfs:ro
+      - ${COMPOSE_DIR:-.}:/host-compose
 
 volumes:
   agent-tls:

@@ -182,13 +182,17 @@ async def init_db(pool: asyncpg.Pool) -> None:
                 pass
 
         # Runner migrations
-        try:
-            await conn.execute(
-                "ALTER TABLE llm_runners ADD COLUMN enabled BOOLEAN NOT NULL DEFAULT TRUE"
-            )
-            logger.info("Added column llm_runners.enabled")
-        except asyncpg.DuplicateColumnError:
-            pass
+        for col, definition in [
+            ("enabled", "BOOLEAN NOT NULL DEFAULT TRUE"),
+            ("auto_update", "BOOLEAN NOT NULL DEFAULT FALSE"),
+        ]:
+            try:
+                await conn.execute(
+                    f"ALTER TABLE llm_runners ADD COLUMN {col} {definition}"
+                )
+                logger.info("Added column llm_runners.%s", col)
+            except asyncpg.DuplicateColumnError:
+                pass
 
         # Ensure the Default profile always exists
         await conn.execute(
@@ -491,7 +495,7 @@ async def get_active_runners(pool: asyncpg.Pool) -> list[dict]:
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT id, hostname, address, port, capabilities, enabled, last_seen, created_at
+            SELECT id, hostname, address, port, capabilities, enabled, auto_update, last_seen, created_at
             FROM llm_runners
             WHERE last_seen > NOW() - INTERVAL '90 seconds'
               AND enabled = TRUE
@@ -506,7 +510,7 @@ async def get_all_runners(pool: asyncpg.Pool) -> list[dict]:
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT id, hostname, address, port, capabilities, enabled, last_seen, created_at
+            SELECT id, hostname, address, port, capabilities, enabled, auto_update, last_seen, created_at
             FROM llm_runners
             WHERE last_seen > NOW() - INTERVAL '90 seconds'
             ORDER BY hostname
@@ -525,12 +529,22 @@ async def set_runner_enabled(pool: asyncpg.Pool, runner_id: int, enabled: bool) 
     return result.endswith("1")
 
 
+async def set_runner_auto_update(pool: asyncpg.Pool, runner_id: int, auto_update: bool) -> bool:
+    """Enable or disable auto-update for a runner. Returns False if not found."""
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "UPDATE llm_runners SET auto_update = $1 WHERE id = $2",
+            auto_update, runner_id,
+        )
+    return result.endswith("1")
+
+
 async def get_runner_by_id(pool: asyncpg.Pool, runner_id: int) -> Optional[dict]:
     """Return a runner by id, or None if not found."""
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            SELECT id, hostname, address, port, capabilities, enabled, last_seen, created_at
+            SELECT id, hostname, address, port, capabilities, enabled, auto_update, last_seen, created_at
             FROM llm_runners
             WHERE id = $1
             """,

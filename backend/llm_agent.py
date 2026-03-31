@@ -189,6 +189,19 @@ class LLMAgentClient:
             r.raise_for_status()
             return r.json()
 
+    # ── Agent management ───────────────────────────────────────────────────────
+
+    async def trigger_update(self, target_version: str) -> dict:
+        """Tell the agent to self-update to the given version."""
+        async with self._client(timeout=httpx.Timeout(10.0)) as c:
+            r = await c.post(
+                f"{self.base_url}/v1/update",
+                json={"target_version": target_version},
+                headers=self._headers,
+            )
+            r.raise_for_status()
+            return r.json()
+
     # ── ComfyUI operations ────────────────────────────────────────────────────
 
     async def switch_checkpoint(self, name: str) -> dict:

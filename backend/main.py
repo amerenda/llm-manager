@@ -719,6 +719,10 @@ async def runner_heartbeat(
     agent_version = req.capabilities.get("agent_version", "")
     if target and agent_version and target != agent_version:
         response["update_to"] = target
+    # Include auto_update preference so agent knows whether to self-update
+    runner = await db.get_runner_by_id(app.state.db, req.runner_id)
+    if runner:
+        response["auto_update"] = runner.get("auto_update", False)
     return response
 
 
@@ -746,16 +750,46 @@ async def list_runners():
 
 class RunnerUpdateRequest(BaseModel):
     enabled: Optional[bool] = None
+    auto_update: Optional[bool] = None
 
 
 @app.patch("/api/runners/{runner_id}")
 async def update_runner(runner_id: int, req: RunnerUpdateRequest):
-    """Update runner settings (enable/disable)."""
+    """Update runner settings (enable/disable, auto_update)."""
     if req.enabled is not None:
         found = await db.set_runner_enabled(app.state.db, runner_id, req.enabled)
         if not found:
             raise HTTPException(404, "Runner not found")
+    if req.auto_update is not None:
+        found = await db.set_runner_auto_update(app.state.db, runner_id, req.auto_update)
+        if not found:
+            raise HTTPException(404, "Runner not found")
     return {"ok": True}
+
+
+@app.post("/api/runners/{runner_id}/update")
+async def trigger_runner_update(
+    runner_id: int,
+    x_agent_psk: Optional[str] = Header(None),
+):
+    """Trigger a manual update on a specific runner."""
+    if AGENT_PSK and x_agent_psk != AGENT_PSK:
+        raise HTTPException(401, "Invalid PSK")
+    target = await db.get_global_setting(app.state.db, "agent_target_version")
+    if not target:
+        raise HTTPException(400, "No target agent version set")
+    runner = await db.get_runner_by_id(app.state.db, runner_id)
+    if not runner:
+        raise HTTPException(404, "Runner not found")
+    agent_version = runner.get("capabilities", {}).get("agent_version", "")
+    if agent_version == target:
+        return {"ok": True, "message": "Runner already at target version", "version": target}
+    client = await _get_runner_client(app.state.db, runner_id)
+    try:
+        resp = await client.trigger_update(target)
+        return {"ok": True, "message": f"Update to {target} triggered", "agent_response": resp}
+    except Exception as e:
+        raise HTTPException(502, f"Failed to trigger update on runner: {e}")
 
 
 # ── LLM proxy — all ops target active runner(s) ───────────────────────────────
