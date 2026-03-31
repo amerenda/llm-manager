@@ -284,16 +284,30 @@ export function Runners() {
                 {/* Clickable header */}
                 <button
                   onClick={() => setExpandedId(expanded ? null : runner.id)}
-                  className="w-full p-4 flex items-center justify-between text-left hover:bg-gray-800/30 rounded-xl transition-colors"
+                  className="w-full p-4 text-left hover:bg-gray-800/30 rounded-xl transition-colors space-y-2"
                 >
-                  <div className="flex items-center gap-2 min-w-0">
-                    {expanded
-                      ? <ChevronDown className="w-3.5 h-3.5 text-gray-500 shrink-0" />
-                      : <ChevronRight className="w-3.5 h-3.5 text-gray-500 shrink-0" />
-                    }
-                    <StatusDot online={online && enabled} />
-                    <span className="text-sm font-medium text-gray-200">{runner.hostname}</span>
-                    <span className="text-xs text-gray-600 font-mono">#{runner.id}</span>
+                  {/* Top row: identity + right-side info */}
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-2 min-w-0">
+                      {expanded
+                        ? <ChevronDown className="w-3.5 h-3.5 text-gray-500 shrink-0" />
+                        : <ChevronRight className="w-3.5 h-3.5 text-gray-500 shrink-0" />
+                      }
+                      <StatusDot online={online && enabled} />
+                      <span className="text-sm font-medium text-gray-200">{runner.hostname}</span>
+                      <span className="text-xs text-gray-600 font-mono">#{runner.id}</span>
+                    </div>
+                    <div className="flex items-center gap-3 shrink-0">
+                      {!expanded && isGpu && (
+                        <span className="text-xs text-gray-500 tabular-nums">
+                          {fmtBytes(caps.gpu_vram_used_bytes ?? 0)} / {fmtBytes(caps.gpu_vram_total_bytes ?? 0)}
+                        </span>
+                      )}
+                      <span className="text-xs text-gray-600 tabular-nums">{relativeTime(runner.last_seen)}</span>
+                    </div>
+                  </div>
+                  {/* Bottom row: version + badges */}
+                  <div className="flex items-center gap-2 pl-6">
                     {caps.agent_version && (
                       <span className="text-[10px] text-gray-500 font-mono">{caps.agent_version}</span>
                     )}
@@ -314,15 +328,6 @@ export function Runners() {
                         <span className="text-[10px] bg-green-900/50 text-green-400 border border-green-800 px-1.5 py-0.5 rounded-full">auto</span>
                       )}
                     </div>
-                  </div>
-                  <div className="flex items-center gap-3 shrink-0">
-                    {/* Compact VRAM summary in collapsed state */}
-                    {!expanded && isGpu && (
-                      <span className="text-xs text-gray-500 tabular-nums">
-                        {fmtBytes(caps.gpu_vram_used_bytes ?? 0)} / {fmtBytes(caps.gpu_vram_total_bytes ?? 0)}
-                      </span>
-                    )}
-                    <span className="text-xs text-gray-600 tabular-nums">{relativeTime(runner.last_seen)}</span>
                   </div>
                 </button>
 
