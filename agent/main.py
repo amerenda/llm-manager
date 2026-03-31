@@ -340,8 +340,39 @@ def _write_env_tag(env_path: str, tag: str):
         f.writelines(lines)
 
 
+def _get_own_image_prefix() -> str:
+    """Determine image repo + tag prefix from our own container's image name.
+    e.g. 'amerenda/llm-manager:agent-amd-sha-abc' -> ('amerenda/llm-manager', 'agent-amd-')
+    """
+    try:
+        own = _docker.containers.get(socket.gethostname())
+        img = own.image.tags[0] if own.image.tags else own.attrs["Config"]["Image"]
+    except Exception:
+        try:
+            own = _docker.containers.get("llm-agent")
+            img = own.image.tags[0] if own.image.tags else own.attrs["Config"]["Image"]
+        except Exception:
+            return ""
+    # img looks like 'amerenda/llm-manager:agent-amd-sha-abc1234'
+    if ":" not in img:
+        return ""
+    repo, tag = img.rsplit(":", 1)
+    # Strip the version suffix to get the prefix: 'agent-amd-sha-abc1234' -> 'agent-amd-'
+    # The version is the AGENT_VERSION baked at build time
+    if AGENT_VERSION != "unknown" and tag.endswith(AGENT_VERSION):
+        prefix = tag[: -len(AGENT_VERSION)]
+    elif tag.startswith("agent-amd-"):
+        prefix = "agent-amd-"
+    elif tag.startswith("agent-"):
+        prefix = "agent-"
+    else:
+        prefix = tag.rsplit("-", 1)[0] + "-" if "-" in tag else ""
+    return f"{repo}:{prefix}"
+
+
 async def _self_update(target_version: str):
-    """Pin image tag in .env, pull new image, and restart via docker compose."""
+    """Pull new image via Docker SDK, then run a helper container to
+    ``docker compose up -d --force-recreate`` with the new tag."""
     global _updating
     if _updating:
         return
@@ -354,36 +385,50 @@ async def _self_update(target_version: str):
     _updating = True
     try:
         logger.info("Self-updating to %s ...", target_version)
-        # COMPOSE_DIR is the host path (for docker compose -f via Docker socket)
-        # COMPOSE_DIR_LOCAL is the container-mounted path (for file I/O)
+
+        # Pin the target version in .env for future docker compose up
         local_dir = COMPOSE_DIR_LOCAL or COMPOSE_DIR
-        compose_file_local = os.path.join(local_dir, "compose.yaml")
-        compose_file_host = os.path.join(COMPOSE_DIR, "compose.yaml")
-        if not os.path.isfile(compose_file_local):
-            logger.error("Compose file not found: %s", compose_file_local)
-            _updating = False
-            return
-        # Pin the target version in .env so compose pulls the exact tag
         env_file = os.path.join(local_dir, ".env")
         _write_env_tag(env_file, target_version)
         logger.info("Pinned AGENT_IMAGE_TAG=%s in %s", target_version, env_file)
-        # Pull and recreate in background — this will kill the current container
-        # Use host path for docker compose since it runs via the Docker socket
-        import subprocess
+
+        # Determine new image tag from our current image name
+        prefix = _get_own_image_prefix()
+        if not prefix:
+            logger.error("Cannot determine own image name for update")
+            _updating = False
+            return
+        new_image = f"{prefix}{target_version}"
+        logger.info("Pulling %s ...", new_image)
+
+        # Pull new image via Docker SDK (talks to daemon over the socket)
+        repo, tag = new_image.rsplit(":", 1)
+        _docker.images.pull(repo, tag=tag)
+        logger.info("Pull complete: %s", new_image)
+
+        # Run a helper container with docker compose to recreate us.
+        # The helper mounts the Docker socket and the compose dir (host paths),
+        # then runs `docker compose up -d --force-recreate`.
+        compose_file = os.path.join(COMPOSE_DIR, "compose.yaml")
         cmd = (
-            f"docker compose -f {compose_file_host} --profile {COMPOSE_PROFILE} pull && "
-            f"docker compose -f {compose_file_host} --profile {COMPOSE_PROFILE} up -d --force-recreate"
+            f"sleep 2 && "
+            f"docker compose -f {compose_file} --profile {COMPOSE_PROFILE} up -d --force-recreate"
         )
-        subprocess.Popen(
-            cmd,
-            shell=True,
-            start_new_session=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+        logger.info("Launching helper container to recreate with new image...")
+        _docker.containers.run(
+            "docker:cli",
+            ["sh", "-c", cmd],
+            remove=True,
+            detach=True,
+            volumes={
+                "/var/run/docker.sock": {"bind": "/var/run/docker.sock", "mode": "rw"},
+                COMPOSE_DIR: {"bind": COMPOSE_DIR, "mode": "ro"},
+            },
+            environment={"AGENT_IMAGE_TAG": target_version},
+            network_mode="host",
         )
-        # Give it a moment then exit — docker compose will restart us with new image
-        await asyncio.sleep(5)
-        logger.info("Update pull started, exiting for restart...")
+        logger.info("Helper dispatched, exiting for restart...")
+        await asyncio.sleep(3)
         os._exit(0)
     except Exception as e:
         logger.error("Self-update failed: %s", e)
@@ -1166,4 +1211,3 @@ if __name__ == "__main__":
         ssl_certfile=_TLS_CERT_PATH,
         ssl_keyfile=_TLS_KEY_PATH,
     )
-# 2026-03-31T12:19:26Z
