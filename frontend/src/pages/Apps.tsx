@@ -47,20 +47,30 @@ function ModelRestrictionEditor({ appId, currentModels }: { appId: number; curre
   const [selected, setSelected] = useState<string[]>(currentModels)
   const [customPattern, setCustomPattern] = useState('')
   const updateModels = useUpdateAppAllowedModels()
-  const modelList = useModelList()
   const cloudModels = useCloudModels()
 
-  const localModels = modelList.data?.map(m => ({ id: m.name, safety: m.safety })) ?? []
   const cloudModelList = cloudModels.data?.filter((m: { enabled: boolean }) => m.enabled).map((m: { id: string }) => m.id) ?? []
 
-  // Separate custom patterns from specific model selections
-  const knownModels = new Set([...localModels.map(m => m.id), ...cloudModelList])
-  const customPatterns = selected.filter(s => !knownModels.has(s) && (s.includes('*') || s.includes('?')))
+  // Dynamic pattern helpers
+  const DYNAMIC_PATTERNS = ['@all', '@safe', '@unsafe'] as const
+  const hasDynamic = (p: string) => selected.includes(p)
+
+  // Custom patterns = anything that's not a dynamic pattern and not a known cloud model
+  const knownSet = new Set([...DYNAMIC_PATTERNS, ...cloudModelList, 'claude-*'])
+  const customPatterns = selected.filter(s => !knownSet.has(s))
 
   function toggle(model: string) {
     setSelected(prev =>
       prev.includes(model) ? prev.filter(m => m !== model) : [...prev, model]
     )
+  }
+
+  function setLocalPolicy(policy: '@all' | '@safe' | '@unsafe' | null) {
+    // Remove all dynamic patterns, then add the new one
+    setSelected(prev => {
+      const withoutDynamic = prev.filter(p => !DYNAMIC_PATTERNS.includes(p as typeof DYNAMIC_PATTERNS[number]))
+      return policy ? [...withoutDynamic, policy] : withoutDynamic
+    })
   }
 
   function addPattern() {
@@ -71,49 +81,43 @@ function ModelRestrictionEditor({ appId, currentModels }: { appId: number; curre
     }
   }
 
-  function applyPreset(preset: 'unrestricted' | 'safe-local' | 'all-local' | 'safe-all') {
-    const safeLocal = localModels.filter(m => m.safety !== 'unsafe').map(m => m.id)
-    const allLocal = localModels.map(m => m.id)
-
-    switch (preset) {
-      case 'unrestricted':
-        setSelected([])
-        break
-      case 'safe-local':
-        setSelected(safeLocal)
-        break
-      case 'all-local':
-        setSelected(allLocal)
-        break
-      case 'safe-all':
-        setSelected([...safeLocal, ...cloudModelList])
-        break
-    }
-  }
-
   function save() {
     updateModels.mutate({ appId, allowed_models: selected }, {
       onSuccess: () => setOpen(false),
     })
   }
 
-  const isUnrestricted = currentModels.length === 0
-  const hasCloud = currentModels.some(m => m.startsWith('claude-'))
-  const modelCount = currentModels.length
+  // Determine current local policy for display
+  const activeLocal = selected.find(p => DYNAMIC_PATTERNS.includes(p as typeof DYNAMIC_PATTERNS[number])) as string | undefined
+  const hasCloud = selected.some(m => m.startsWith('claude-') || cloudModelList.includes(m))
+  const isDefault = currentModels.length === 0
+
+  // Summary for closed state
+  function summaryText(): string {
+    if (isDefault) return 'Safe local'
+    if (!activeLocal && customPatterns.length === 0 && !hasCloud) return 'No local models'
+    const parts: string[] = []
+    if (activeLocal === '@all') parts.push('All local')
+    else if (activeLocal === '@safe') parts.push('Safe local')
+    else if (activeLocal === '@unsafe') parts.push('Unsafe local')
+    if (customPatterns.length > 0) parts.push(`${customPatterns.length} pattern${customPatterns.length !== 1 ? 's' : ''}`)
+    if (hasCloud) parts.push('+ cloud')
+    return parts.join(' ') || 'Custom'
+  }
 
   if (!open) {
     return (
       <button
         onClick={() => { setSelected(currentModels); setOpen(true) }}
-        title={isUnrestricted ? 'All safe local models (no cloud)' : `${modelCount} model pattern(s)`}
+        title={isDefault ? 'Default — all safe local models, no cloud' : `${currentModels.length} pattern(s)`}
         className={`flex items-center gap-1 text-xs px-2 py-1 rounded-lg transition-colors ${
-          isUnrestricted
+          isDefault
             ? 'bg-gray-800 text-gray-500 border border-gray-700 hover:border-gray-600'
             : 'bg-blue-900/30 text-blue-400 border border-blue-800'
         }`}
       >
         <Cpu className="w-3 h-3" />
-        {isUnrestricted ? 'Safe local' : `${modelCount} model${modelCount !== 1 ? 's' : ''}`}
+        {summaryText()}
         {hasCloud && <Cloud className="w-3 h-3 text-indigo-400" />}
       </button>
     )
@@ -129,61 +133,46 @@ function ModelRestrictionEditor({ appId, currentModels }: { appId: number; curre
           </button>
         </div>
 
-        {/* Presets */}
-        <div className="mb-4">
-          <p className="text-[10px] text-gray-500 uppercase tracking-wide mb-2">Quick presets</p>
-          <div className="flex gap-1.5 flex-wrap">
-            {[
-              { id: 'unrestricted' as const, label: 'Safe local only', desc: 'Default — all safe local models, no cloud' },
-              { id: 'safe-local' as const, label: 'Safe local (explicit)', desc: 'Same but listed explicitly' },
-              { id: 'all-local' as const, label: 'All local', desc: 'Including unsafe models' },
-              { id: 'safe-all' as const, label: 'Safe + Cloud', desc: 'Safe local + all cloud models' },
-            ].map(p => (
-              <button
-                key={p.id}
-                onClick={() => applyPreset(p.id)}
-                title={p.desc}
-                className="text-xs px-2.5 py-1.5 rounded-lg bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200 transition-colors"
-              >
-                {p.label}
-              </button>
-            ))}
-          </div>
-        </div>
-
         <div className="flex-1 overflow-y-auto space-y-4 mb-4">
-          {/* Local models */}
+          {/* Local model policy */}
           <div>
-            <p className="text-[10px] text-gray-500 uppercase tracking-wide mb-1.5 flex items-center gap-1">
-              <Cpu className="w-3 h-3" /> Local models
+            <p className="text-[10px] text-gray-500 uppercase tracking-wide mb-2 flex items-center gap-1">
+              <Server className="w-3 h-3" /> Local models
             </p>
-            <div className="space-y-1">
-              {localModels.length === 0 ? (
-                <p className="text-xs text-gray-600 py-2 text-center">No local models downloaded</p>
-              ) : (
-                localModels.sort((a, b) => a.id.localeCompare(b.id)).map(m => (
-                  <label key={m.id} className="flex items-center gap-2 px-3 py-1.5 rounded-lg hover:bg-gray-800 cursor-pointer">
-                    <input
-                      type="checkbox"
-                      checked={selected.includes(m.id)}
-                      onChange={() => toggle(m.id)}
-                      className="rounded border-gray-600 bg-gray-800 text-brand-500 focus:ring-brand-600"
-                    />
-                    <span className="text-sm text-gray-300 font-mono flex-1">{m.id}</span>
-                    {m.safety === 'unsafe' && (
-                      <span className="text-[10px] bg-red-900/40 text-red-400 px-1.5 py-0.5 rounded">unsafe</span>
-                    )}
-                  </label>
-                ))
-              )}
+            <p className="text-[10px] text-gray-600 mb-2">Includes models added in the future.</p>
+            <div className="flex gap-1.5 flex-wrap">
+              {([
+                { id: null, label: 'None', desc: 'No local models (use custom patterns or cloud only)' },
+                { id: '@safe' as const, label: 'Safe only', desc: 'All safe local models, current + future' },
+                { id: '@all' as const, label: 'All models', desc: 'All local models including unsafe, current + future' },
+                { id: '@unsafe' as const, label: 'Unsafe only', desc: 'Only unsafe local models, current + future' },
+              ] as const).map(p => {
+                const isActive = p.id === null
+                  ? !selected.some(s => DYNAMIC_PATTERNS.includes(s as typeof DYNAMIC_PATTERNS[number]))
+                  : hasDynamic(p.id)
+                return (
+                  <button
+                    key={p.id ?? 'none'}
+                    onClick={() => setLocalPolicy(p.id)}
+                    title={p.desc}
+                    className={`text-xs px-2.5 py-1.5 rounded-lg transition-colors ${
+                      isActive
+                        ? 'bg-brand-900 text-brand-300 border border-brand-700'
+                        : 'bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200 border border-transparent'
+                    }`}
+                  >
+                    {p.label}
+                  </button>
+                )
+              })}
             </div>
           </div>
 
-          {/* Cloud models */}
+          {/* Cloud models — individual opt-in */}
           <div>
             <p className="text-[10px] text-gray-500 uppercase tracking-wide mb-1.5 flex items-center gap-1">
               <Cloud className="w-3 h-3" /> Cloud models
-              <span className="text-gray-600">(denied by default)</span>
+              <span className="text-gray-600">(opt-in individually)</span>
             </p>
             <div className="space-y-1">
               {cloudModelList.length === 0 ? (
@@ -255,8 +244,8 @@ function ModelRestrictionEditor({ appId, currentModels }: { appId: number; curre
         <div className="border-t border-gray-800 pt-3">
           <p className="text-[10px] text-gray-600 mb-3">
             {selected.length === 0
-              ? 'No restrictions — app gets all safe local models, no cloud access.'
-              : `${selected.length} pattern${selected.length !== 1 ? 's' : ''} — only matched models are accessible.`}
+              ? 'Default — app gets all safe local models, no cloud access.'
+              : `${selected.length} rule${selected.length !== 1 ? 's' : ''} — only matched models are accessible.`}
           </p>
           <div className="flex gap-2">
             <button

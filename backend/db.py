@@ -908,6 +908,11 @@ async def check_model_allowed(pool: asyncpg.Pool, api_key: str, model: str) -> b
 
     Local models: no restrictions = unrestricted (allow all safe local models).
     Cloud models: no restrictions = denied. Must have an explicit grant (e.g., 'claude-*').
+
+    Dynamic patterns (resolved at check time, include future models):
+      @all    — all local models (safe + unsafe)
+      @safe   — only safe local models
+      @unsafe — only unsafe local models
     """
     import fnmatch
     from cloud_providers import detect_provider, ModelProvider
@@ -926,15 +931,31 @@ async def check_model_allowed(pool: asyncpg.Pool, api_key: str, model: str) -> b
     pattern_list = [r["model_pattern"] for r in patterns]
 
     if provider == ModelProvider.LOCAL:
-        # Local: no patterns = unrestricted (backward compatible)
+        # No patterns = unrestricted (backward compatible)
         if not pattern_list:
             return True
-        return any(fnmatch.fnmatch(model, p) for p in pattern_list)
+
+        # Check dynamic patterns first
+        dynamic = {p for p in pattern_list if p.startswith('@')}
+        if '@all' in dynamic:
+            return True
+        if dynamic & {'@safe', '@unsafe'}:
+            from library import classify_model
+            safety = await classify_model(pool, model)
+            if '@safe' in dynamic and safety == 'safe':
+                return True
+            if '@unsafe' in dynamic and safety == 'unsafe':
+                return True
+
+        # Check static patterns (explicit model names / globs)
+        static = [p for p in pattern_list if not p.startswith('@')]
+        return any(fnmatch.fnmatch(model, p) for p in static)
 
     # Cloud: must have an explicit grant
     if not pattern_list:
         return False
-    return any(fnmatch.fnmatch(model, p) for p in pattern_list)
+    static = [p for p in pattern_list if not p.startswith('@')]
+    return any(fnmatch.fnmatch(model, p) for p in static)
 
 
 # ── Library cache ────────────────────────────────────────────────────────────
