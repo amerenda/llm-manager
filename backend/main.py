@@ -767,17 +767,22 @@ async def update_runner(runner_id: int, req: RunnerUpdateRequest):
     return {"ok": True}
 
 
+class TriggerRunnerUpdateRequest(BaseModel):
+    target_version: Optional[str] = None
+
+
 @app.post("/api/runners/{runner_id}/update")
 async def trigger_runner_update(
     runner_id: int,
-    x_agent_psk: Optional[str] = Header(None),
+    req: TriggerRunnerUpdateRequest = TriggerRunnerUpdateRequest(),
 ):
-    """Trigger a manual update on a specific runner."""
-    if AGENT_PSK and x_agent_psk != AGENT_PSK:
-        raise HTTPException(401, "Invalid PSK")
-    target = await db.get_global_setting(app.state.db, "agent_target_version")
+    """Trigger a manual update on a specific runner.
+    If target_version is provided, use it; otherwise fall back to global target."""
+    target = req.target_version
     if not target:
-        raise HTTPException(400, "No target agent version set")
+        target = await db.get_global_setting(app.state.db, "agent_target_version")
+    if not target:
+        raise HTTPException(400, "No target version specified and no global target set")
     runner = await db.get_runner_by_id(app.state.db, runner_id)
     if not runner:
         raise HTTPException(404, "Runner not found")

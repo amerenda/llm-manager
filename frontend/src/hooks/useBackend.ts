@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import type { LlmStatus, LlmModel, RegisteredApp, Agent, Runner, Profile, ProfileActivation, LibraryModel, SafetyTag } from '../types'
+import type { LlmStatus, LlmModel, RegisteredApp, Agent, Runner, RunnerStatus, Profile, ProfileActivation, LibraryModel, SafetyTag } from '../types'
 
 // nginx proxies /api to the backend service
 async function get<T>(path: string): Promise<T> {
@@ -312,6 +312,26 @@ export function useUpdateRunner() {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['runners'] })
       qc.invalidateQueries({ queryKey: ['llm-status'] })
+    },
+  })
+}
+
+export function useRunnerStatus(runnerId: number | null) {
+  return useQuery<RunnerStatus>({
+    queryKey: ['runner-status', runnerId],
+    queryFn: () => get(`/api/llm/status?runner_id=${runnerId}`),
+    enabled: runnerId !== null,
+    refetchInterval: 5_000,
+  })
+}
+
+export function useTriggerRunnerUpdate() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ runnerId, target_version }: { runnerId: number; target_version?: string }) =>
+      post<{ ok: boolean; message: string }>(`/api/runners/${runnerId}/update`, target_version ? { target_version } : {}),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['runners'] })
     },
   })
 }
