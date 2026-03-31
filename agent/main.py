@@ -425,8 +425,14 @@ def _sys_stats() -> dict:
 
 def _disk_stats() -> dict:
     """Disk usage for the Ollama model storage path."""
-    # Walk up to find the actual mount point if the models dir doesn't exist yet
+    # The container mounts the host root at /hostfs.  MODEL_STORAGE_PATH is a
+    # *host* path (e.g. /mnt/storage/models) which won't exist inside the
+    # container.  Prefer the /hostfs-prefixed version for the actual statvfs
+    # call so we report the correct mount point instead of falling back to /.
     path = OLLAMA_MODELS_DIR
+    hostfs_path = f"/hostfs{path}"
+    if not os.path.exists(path) and os.path.exists(hostfs_path):
+        path = hostfs_path
     while not os.path.exists(path):
         parent = os.path.dirname(path)
         if parent == path:
