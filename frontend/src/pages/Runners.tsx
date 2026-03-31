@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Server, Cpu, MemoryStick, Volume2, RefreshCw, Power, Upload, AlertCircle } from 'lucide-react'
+import { Server, Cpu, HardDrive, Volume2, RefreshCw, Power, Upload, AlertCircle } from 'lucide-react'
 import { useRunners, useUpdateRunner, useAgentTargetVersion, useSetAgentTargetVersion } from '../hooks/useBackend'
 import { StatusDot } from '../components/StatusDot'
 import type { Runner } from '../types'
@@ -80,7 +80,7 @@ export function Runners() {
         {outdatedRunners.length > 0 && (
           <div className="flex items-center gap-1.5 text-xs text-amber-400">
             <AlertCircle className="w-3 h-3" />
-            {outdatedRunners.length} runner{outdatedRunners.length > 1 ? 's' : ''} outdated — will update on next heartbeat
+            {outdatedRunners.length} runner{outdatedRunners.length > 1 ? 's' : ''} outdated
           </div>
         )}
       </div>
@@ -99,6 +99,10 @@ export function Runners() {
             const isTts = !!caps.tts
             const vramPct = isGpu
               ? Math.round(((caps.gpu_vram_used_bytes ?? 0) / (caps.gpu_vram_total_bytes ?? 1)) * 100)
+              : null
+            const hasDisk = !!caps.disk_total_bytes
+            const diskPct = hasDisk
+              ? Math.round(((caps.disk_used_bytes ?? 0) / (caps.disk_total_bytes ?? 1)) * 100)
               : null
 
             return (
@@ -135,7 +139,17 @@ export function Runners() {
                       )}
                     </div>
                   </div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-center gap-3">
+                    <label className="flex items-center gap-1.5 cursor-pointer" title="Auto-update agent on new versions">
+                      <input
+                        type="checkbox"
+                        checked={runner.auto_update ?? false}
+                        onChange={() => update.mutate({ runnerId: runner.id, auto_update: !runner.auto_update })}
+                        disabled={update.isPending}
+                        className="w-3 h-3 rounded border-gray-600 bg-gray-800 text-brand-500 focus:ring-brand-500 focus:ring-offset-0 cursor-pointer"
+                      />
+                      <span className="text-[10px] text-gray-500">Auto-update</span>
+                    </label>
                     <button
                       onClick={() => update.mutate({ runnerId: runner.id, enabled: !enabled })}
                       disabled={update.isPending}
@@ -165,6 +179,24 @@ export function Runners() {
                       <div
                         className={`h-full rounded-full transition-all ${vramPct! > 80 ? 'bg-red-500' : vramPct! > 50 ? 'bg-yellow-500' : 'bg-brand-500'}`}
                         style={{ width: `${vramPct}%` }}
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {/* Disk usage bar */}
+                {hasDisk && (
+                  <div className="space-y-1">
+                    <div className="flex justify-between text-xs text-gray-500">
+                      <span className="flex items-center gap-1">
+                        <HardDrive className="w-3 h-3" />Disk
+                      </span>
+                      <span>{bytes(caps.disk_free_bytes ?? 0)} free / {bytes(caps.disk_total_bytes ?? 0)}</span>
+                    </div>
+                    <div className="h-1.5 bg-gray-800 rounded-full overflow-hidden">
+                      <div
+                        className={`h-full rounded-full transition-all ${diskPct! > 95 ? 'bg-red-500' : diskPct! > 85 ? 'bg-yellow-500' : 'bg-emerald-500'}`}
+                        style={{ width: `${diskPct}%` }}
                       />
                     </div>
                   </div>

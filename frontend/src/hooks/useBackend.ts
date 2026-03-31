@@ -307,8 +307,8 @@ export function useUpdateAppAllowedRunners() {
 export function useUpdateRunner() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: ({ runnerId, enabled }: { runnerId: number; enabled: boolean }) =>
-      patch<{ ok: boolean }>(`/api/runners/${runnerId}`, { enabled }),
+    mutationFn: ({ runnerId, ...body }: { runnerId: number; enabled?: boolean; auto_update?: boolean }) =>
+      patch<{ ok: boolean }>(`/api/runners/${runnerId}`, body),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['runners'] })
       qc.invalidateQueries({ queryKey: ['llm-status'] })

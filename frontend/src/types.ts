@@ -54,14 +54,19 @@ export interface Runner {
   address: string
   port: number
   enabled: boolean
+  auto_update: boolean
   capabilities: {
     // GPU runner fields
     gpu_vram_total_bytes?: number
     gpu_vram_used_bytes?: number
     gpu_vram_free_bytes?: number
+    disk_total_bytes?: number
+    disk_used_bytes?: number
+    disk_free_bytes?: number
     loaded_models?: string[]
     comfyui_running?: boolean
     agent_version?: string
+    auto_update?: boolean
     // TTS runner fields
     tts?: boolean
     stt?: boolean
