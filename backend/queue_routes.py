@@ -147,6 +147,9 @@ async def get_job(job_id: str, request: Request):
     job = await queue_db.get_job(pool, job_id)
     if not job:
         raise HTTPException(404, "Job not found")
+    meta = job.get("metadata")
+    if isinstance(meta, str):
+        meta = json.loads(meta)
     return QueueJobResult(
         job_id=job["id"],
         status=job["status"],
@@ -156,7 +159,7 @@ async def get_job(job_id: str, request: Request):
         created_at=job["created_at"].isoformat() if job.get("created_at") else None,
         started_at=job["started_at"].isoformat() if job.get("started_at") else None,
         completed_at=job["completed_at"].isoformat() if job.get("completed_at") else None,
-        metadata=job.get("metadata"),
+        metadata=meta,
     )
 
 
@@ -185,7 +188,7 @@ async def get_batch(batch_id: str, request: Request):
                 created_at=j["created_at"].isoformat() if j.get("created_at") else None,
                 started_at=j["started_at"].isoformat() if j.get("started_at") else None,
                 completed_at=j["completed_at"].isoformat() if j.get("completed_at") else None,
-                metadata=j.get("metadata"),
+                metadata=json.loads(j["metadata"]) if isinstance(j.get("metadata"), str) else j.get("metadata"),
             ) for j in jobs
         ],
     )
