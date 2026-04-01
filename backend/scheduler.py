@@ -327,6 +327,8 @@ class Scheduler:
             body["temperature"] = request["temperature"]
         if "max_tokens" in request:
             body["max_tokens"] = request["max_tokens"]
+        if request.get("tools"):
+            body["tools"] = request["tools"]
 
         result = await anthropic_chat(body, stream=False)
         await queue_db.update_job_status(self.pool, job_id, "completed", result=result)
@@ -347,16 +349,38 @@ class Scheduler:
             payload["options"]["temperature"] = request["temperature"]
         if "max_tokens" in request:
             payload["options"]["num_predict"] = request["max_tokens"]
+        if request.get("tools"):
+            payload["tools"] = request["tools"]
 
-        async with httpx.AsyncClient(timeout=120) as client:
+        async with httpx.AsyncClient(timeout=300) as client:
             resp = await client.post(f"{ollama_base}/api/chat", json=payload)
 
         if resp.status_code == 200:
             data = resp.json()
+            msg = data.get("message", {})
+
+            # Normalize Ollama tool_calls to OpenAI format
+            openai_msg = {"role": msg.get("role", "assistant"), "content": msg.get("content", "")}
+            if msg.get("tool_calls"):
+                import uuid as _uuid
+                openai_msg["tool_calls"] = [
+                    {
+                        "id": f"call_{_uuid.uuid4().hex[:8]}",
+                        "type": "function",
+                        "function": {
+                            "name": tc["function"]["name"],
+                            "arguments": json.dumps(tc["function"]["arguments"])
+                                if isinstance(tc["function"]["arguments"], dict)
+                                else tc["function"]["arguments"],
+                        },
+                    }
+                    for tc in msg["tool_calls"]
+                ]
+
             result = {
                 "choices": [{
-                    "message": data.get("message", {}),
-                    "finish_reason": "stop",
+                    "message": openai_msg,
+                    "finish_reason": "tool_calls" if msg.get("tool_calls") else "stop",
                 }],
                 "model": model,
                 "usage": {

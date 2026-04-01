@@ -10,6 +10,7 @@ class QueueJobRequest(BaseModel):
     temperature: float = 0.7
     max_tokens: int = 512
     stream: bool = False
+    tools: Optional[list[dict]] = None  # OpenAI-format tool definitions
     metadata: Optional[dict] = None  # app-specific passthrough
 
 
