@@ -415,13 +415,11 @@ class TestCheckSubmission:
         assert result["error"] == "insufficient_vram"
         assert result["non_evictable_gb"] == 8.5
 
-    def test_zero_gpu_total_skips_too_large_check(self):
-        """If GPU total is 0 (unknown), the model_too_large check is skipped."""
+    def test_zero_gpu_total_accepts_optimistically(self):
+        """If GPU total is 0 (unreachable), accept job for scheduler to handle."""
         sched = _make_scheduler(gpu_info={"total": 0, "used": 0, "free": 0})
         result = _run(sched.check_submission("llama2:70b"))
-        # free (0) < needed (40), no loaded models -> insufficient_vram
-        assert result["ok"] is False
-        assert result["error"] == "insufficient_vram"
+        assert result["ok"] is True
 
     @patch("queue_db.get_model_settings", new_callable=AsyncMock)
     def test_mixed_evictable_and_pinned(self, mock_settings):
