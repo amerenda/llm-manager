@@ -407,7 +407,12 @@ class Scheduler:
         vram_needed = vram_for_model(model)
         gpu = await self._get_gpu_info()
 
-        if gpu["total"] > 0 and vram_needed > gpu["total"]:
+        # If we can't reach GPU info (e.g. non-scheduler replica), accept the
+        # job optimistically — the scheduler will handle VRAM when it picks it up.
+        if gpu["total"] == 0:
+            return {"ok": True}
+
+        if vram_needed > gpu["total"]:
             return {
                 "ok": False,
                 "error": "model_too_large",
