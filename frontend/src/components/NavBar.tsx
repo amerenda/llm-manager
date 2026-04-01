@@ -1,5 +1,5 @@
 import { NavLink } from 'react-router-dom'
-import { LayoutDashboard, Layers, AppWindow, Server, Sliders, LogIn, LogOut } from 'lucide-react'
+import { LayoutDashboard, Layers, AppWindow, Server, Sliders, ListOrdered, LogIn, LogOut } from 'lucide-react'
 
 const navItems = [
   { to: '/', label: 'Dashboard', icon: LayoutDashboard },
@@ -7,6 +7,7 @@ const navItems = [
   { to: '/models', label: 'Models', icon: Layers },
   { to: '/profiles', label: 'Profiles', icon: Sliders },
   { to: '/apps', label: 'Apps', icon: AppWindow },
+  { to: '/queue', label: 'Queue', icon: ListOrdered },
 ]
 
 interface NavBarProps {

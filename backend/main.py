@@ -23,6 +23,7 @@ from prometheus_client import (
     CONTENT_TYPE_LATEST,
     Counter,
     Gauge,
+    Histogram,
     generate_latest,
 )
 from pydantic import BaseModel
@@ -78,6 +79,14 @@ api_requests_total = Counter(
     ["endpoint", "method", "status"],
 )
 registered_apps_gauge = Gauge("llm_backend_registered_apps", "Number of registered apps")
+
+# Queue metrics
+queue_jobs_submitted = Counter("llm_queue_jobs_submitted_total", "Total jobs submitted to queue", ["model", "app"])
+queue_jobs_completed = Counter("llm_queue_jobs_completed_total", "Total completed queue jobs", ["model", "status"])
+queue_depth_gauge = Gauge("llm_queue_depth", "Current queue depth")
+queue_active_jobs_gauge = Gauge("llm_queue_active_jobs", "Currently running jobs")
+queue_job_duration_seconds = Histogram("llm_queue_job_duration_seconds", "Job processing time", ["model"], buckets=[1, 5, 10, 30, 60, 120, 300])
+queue_job_wait_seconds = Histogram("llm_queue_job_wait_seconds", "Time job spent waiting in queue", ["model"], buckets=[0.5, 1, 5, 10, 30, 60, 120])
 
 
 def _inc_request(endpoint: str, method: str, status: int):
@@ -238,8 +247,13 @@ async def admin_auth_middleware(request: Request, call_next):
     path = request.url.path
 
     # Skip auth for public/self-authenticated routes
+    # Queue job cancel (DELETE) and priority (PATCH) require admin auth
     if path in _PUBLIC_PATHS or any(path.startswith(p) for p in _PUBLIC_PREFIXES):
-        return await call_next(request)
+        method = request.method
+        if path.startswith("/api/queue/jobs/") and method in ("DELETE", "PATCH"):
+            pass  # fall through to admin auth check below
+        else:
+            return await call_next(request)
 
     # Skip auth for non-API routes (docs, openapi.json, etc.)
     if not path.startswith("/api/"):
@@ -1846,6 +1860,13 @@ async def metrics_endpoint():
         try:
             apps = await get_apps(app.state.db)
             registered_apps_gauge.set(len(apps))
+        except Exception:
+            pass
+        try:
+            pending = await queue_db.get_pending_jobs(app.state.db)
+            queue_depth_gauge.set(len(pending))
+            running = await queue_db.get_running_jobs(app.state.db)
+            queue_active_jobs_gauge.set(len(running))
         except Exception:
             pass
 

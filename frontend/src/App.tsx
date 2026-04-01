@@ -6,6 +6,7 @@ import { Models } from './pages/Models'
 import { Apps } from './pages/Apps'
 import { Runners } from './pages/Runners'
 import { Profiles } from './pages/Profiles'
+import { Queue } from './pages/Queue'
 import { useAuth } from './hooks/useBackend'
 
 export default function App() {
@@ -32,6 +33,7 @@ export default function App() {
             <Route path="/models" element={<Models />} />
             <Route path="/profiles" element={<Profiles />} />
             <Route path="/apps" element={<Apps />} />
+            <Route path="/queue" element={<Queue />} />
           </Routes>
         ) : (
           <PublicDashboard />

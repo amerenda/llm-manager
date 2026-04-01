@@ -211,3 +211,63 @@ export interface SafetyTag {
   classification: string
   reason: string
 }
+
+// ── Queue ──────────────────────────────────────────────────────────────────
+
+export interface QueueJob {
+  id: string
+  batch_id: string | null
+  app_id: number | null
+  app_name: string | null
+  model: string
+  status: string
+  priority: number
+  metadata: Record<string, unknown> | null
+  error: string | null
+  request_summary?: {
+    message_count: number
+    temperature?: number
+    max_tokens?: number
+  }
+  created_at: string | null
+  started_at: string | null
+  completed_at: string | null
+}
+
+export interface QueueMetrics {
+  active: {
+    queued: number
+    running: number
+    loading_model: number
+    waiting_for_eviction: number
+  }
+  last_hour: {
+    completed: number
+    failed: number
+    cancelled: number
+  }
+  timing: {
+    avg_processing_secs: number
+    avg_wait_secs: number
+    max_processing_secs: number
+    min_processing_secs: number
+  }
+  by_model: {
+    model: string
+    total: number
+    completed: number
+    failed: number
+    avg_secs: number
+  }[]
+  by_app: {
+    app_name: string
+    total: number
+    completed: number
+    failed: number
+  }[]
+  totals: {
+    all_time: number
+    completed: number
+    failed: number
+  }
+}

@@ -1,5 +1,5 @@
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
-import type { LlmStatus, LlmModel, RegisteredApp, Agent, Runner, RunnerStatus, Profile, ProfileActivation, LibraryModel, SafetyTag } from '../types'
+import type { LlmStatus, LlmModel, RegisteredApp, Agent, Runner, RunnerStatus, Profile, ProfileActivation, LibraryModel, SafetyTag, QueueJob, QueueMetrics } from '../types'
 
 // nginx proxies /api to the backend service
 async function get<T>(path: string): Promise<T> {
@@ -672,5 +672,51 @@ export function useAgents() {
     queryKey: ['agents'],
     queryFn: () => get('/api/agents'),
     refetchInterval: 30_000,
+  })
+}
+
+// ── Queue ────────────────────────────────────────────────────────────────────
+
+export function useQueueJobs() {
+  return useQuery<QueueJob[]>({
+    queryKey: ['queue-jobs'],
+    queryFn: () => get('/api/queue/jobs'),
+    refetchInterval: 3_000,
+  })
+}
+
+export function useQueueHistory() {
+  return useQuery<QueueJob[]>({
+    queryKey: ['queue-history'],
+    queryFn: () => get('/api/queue/history'),
+    refetchInterval: 10_000,
+  })
+}
+
+export function useQueueMetrics() {
+  return useQuery<QueueMetrics>({
+    queryKey: ['queue-metrics'],
+    queryFn: () => get('/api/queue/metrics'),
+    refetchInterval: 5_000,
+  })
+}
+
+export function useCancelQueueJob() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (jobId: string) => del<{ ok: boolean }>(`/api/queue/jobs/${jobId}`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['queue-jobs'] })
+      qc.invalidateQueries({ queryKey: ['queue-metrics'] })
+    },
+  })
+}
+
+export function useSetJobPriority() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ jobId, priority }: { jobId: string; priority: number }) =>
+      patch<{ ok: boolean }>(`/api/queue/jobs/${jobId}/priority`, { priority }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['queue-jobs'] }),
   })
 }

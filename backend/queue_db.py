@@ -202,6 +202,194 @@ async def upsert_model_settings(pool: asyncpg.Pool, model_name: str, **kwargs):
 
 # ── Rate Limits ───────────────────────────────────────────────────────────────
 
+async def update_job_priority(pool: asyncpg.Pool, job_id: str, priority: int):
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE queue_jobs SET priority = $2 WHERE id = $1", job_id, priority)
+
+
+async def list_jobs(pool: asyncpg.Pool, status: Optional[str] = None, limit: int = 100) -> list[dict]:
+    """List jobs with optional status filter, includes app name."""
+    async with pool.acquire() as conn:
+        if status:
+            rows = await conn.fetch("""
+                SELECT j.*, a.name as app_name
+                FROM queue_jobs j
+                LEFT JOIN registered_apps a ON j.app_id = a.id
+                WHERE j.status = $1
+                ORDER BY j.priority DESC, j.created_at ASC
+                LIMIT $2
+            """, status, limit)
+        else:
+            rows = await conn.fetch("""
+                SELECT j.*, a.name as app_name
+                FROM queue_jobs j
+                LEFT JOIN registered_apps a ON j.app_id = a.id
+                WHERE j.status NOT IN ('completed', 'failed', 'cancelled')
+                ORDER BY
+                    CASE j.status WHEN 'running' THEN 0 WHEN 'loading_model' THEN 1 ELSE 2 END,
+                    j.priority DESC, j.created_at ASC
+                LIMIT $1
+            """, limit)
+    result = []
+    for r in rows:
+        d = dict(r)
+        # Convert timestamps to ISO strings
+        for ts_field in ('created_at', 'started_at', 'completed_at'):
+            if d.get(ts_field):
+                d[ts_field] = d[ts_field].isoformat()
+        # Don't send full request/result blobs in listings
+        if d.get('request'):
+            req = d['request']
+            d['request_summary'] = {
+                'message_count': len(req.get('messages', [])),
+                'temperature': req.get('temperature'),
+                'max_tokens': req.get('max_tokens'),
+            }
+        d.pop('request', None)
+        d.pop('result', None)
+        result.append(d)
+    return result
+
+
+async def get_queue_metrics(pool: asyncpg.Pool) -> dict:
+    """Get comprehensive queue metrics."""
+    async with pool.acquire() as conn:
+        # Current counts by status
+        status_counts = await conn.fetch("""
+            SELECT status, COUNT(*) as cnt FROM queue_jobs
+            WHERE status NOT IN ('completed', 'failed', 'cancelled')
+            GROUP BY status
+        """)
+
+        # Completed/failed in last hour
+        hourly = await conn.fetchrow("""
+            SELECT
+                COUNT(*) FILTER (WHERE status = 'completed') as completed_1h,
+                COUNT(*) FILTER (WHERE status = 'failed') as failed_1h,
+                COUNT(*) FILTER (WHERE status = 'cancelled') as cancelled_1h
+            FROM queue_jobs
+            WHERE completed_at > now() - interval '1 hour'
+        """)
+
+        # Average processing time (last hour, completed only)
+        avg_times = await conn.fetchrow("""
+            SELECT
+                AVG(EXTRACT(EPOCH FROM (completed_at - started_at))) as avg_processing_secs,
+                AVG(EXTRACT(EPOCH FROM (started_at - created_at))) as avg_wait_secs,
+                MAX(EXTRACT(EPOCH FROM (completed_at - started_at))) as max_processing_secs,
+                MIN(EXTRACT(EPOCH FROM (completed_at - started_at))) as min_processing_secs
+            FROM queue_jobs
+            WHERE status = 'completed'
+            AND completed_at > now() - interval '1 hour'
+            AND started_at IS NOT NULL
+        """)
+
+        # Jobs per model (last hour)
+        model_breakdown = await conn.fetch("""
+            SELECT model,
+                   COUNT(*) as total,
+                   COUNT(*) FILTER (WHERE status = 'completed') as completed,
+                   COUNT(*) FILTER (WHERE status = 'failed') as failed,
+                   AVG(EXTRACT(EPOCH FROM (completed_at - started_at)))
+                       FILTER (WHERE status = 'completed' AND started_at IS NOT NULL) as avg_secs
+            FROM queue_jobs
+            WHERE created_at > now() - interval '1 hour'
+            GROUP BY model
+            ORDER BY total DESC
+        """)
+
+        # Jobs per app (last hour)
+        app_breakdown = await conn.fetch("""
+            SELECT a.name as app_name, COUNT(*) as total,
+                   COUNT(*) FILTER (WHERE j.status = 'completed') as completed,
+                   COUNT(*) FILTER (WHERE j.status = 'failed') as failed
+            FROM queue_jobs j
+            LEFT JOIN registered_apps a ON j.app_id = a.id
+            WHERE j.created_at > now() - interval '1 hour'
+            GROUP BY a.name
+            ORDER BY total DESC
+        """)
+
+        # Total all-time
+        totals = await conn.fetchrow("""
+            SELECT
+                COUNT(*) as total_all_time,
+                COUNT(*) FILTER (WHERE status = 'completed') as completed_all_time,
+                COUNT(*) FILTER (WHERE status = 'failed') as failed_all_time
+            FROM queue_jobs
+        """)
+
+    active_statuses = {r['status']: r['cnt'] for r in status_counts}
+
+    return {
+        "active": {
+            "queued": active_statuses.get('queued', 0),
+            "running": active_statuses.get('running', 0),
+            "loading_model": active_statuses.get('loading_model', 0),
+            "waiting_for_eviction": active_statuses.get('waiting_for_eviction', 0),
+        },
+        "last_hour": {
+            "completed": hourly['completed_1h'],
+            "failed": hourly['failed_1h'],
+            "cancelled": hourly['cancelled_1h'],
+        },
+        "timing": {
+            "avg_processing_secs": round(avg_times['avg_processing_secs'] or 0, 2),
+            "avg_wait_secs": round(avg_times['avg_wait_secs'] or 0, 2),
+            "max_processing_secs": round(avg_times['max_processing_secs'] or 0, 2),
+            "min_processing_secs": round(avg_times['min_processing_secs'] or 0, 2),
+        },
+        "by_model": [
+            {
+                "model": r['model'],
+                "total": r['total'],
+                "completed": r['completed'],
+                "failed": r['failed'],
+                "avg_secs": round(r['avg_secs'] or 0, 2),
+            }
+            for r in model_breakdown
+        ],
+        "by_app": [
+            {
+                "app_name": r['app_name'] or 'unknown',
+                "total": r['total'],
+                "completed": r['completed'],
+                "failed": r['failed'],
+            }
+            for r in app_breakdown
+        ],
+        "totals": {
+            "all_time": totals['total_all_time'],
+            "completed": totals['completed_all_time'],
+            "failed": totals['failed_all_time'],
+        },
+    }
+
+
+async def list_recent_jobs(pool: asyncpg.Pool, limit: int = 50) -> list[dict]:
+    """List recently completed/failed jobs."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT j.*, a.name as app_name
+            FROM queue_jobs j
+            LEFT JOIN registered_apps a ON j.app_id = a.id
+            WHERE j.status IN ('completed', 'failed', 'cancelled')
+            ORDER BY j.completed_at DESC
+            LIMIT $1
+        """, limit)
+    result = []
+    for r in rows:
+        d = dict(r)
+        for ts_field in ('created_at', 'started_at', 'completed_at'):
+            if d.get(ts_field):
+                d[ts_field] = d[ts_field].isoformat()
+        d.pop('request', None)
+        d.pop('result', None)
+        result.append(d)
+    return result
+
+
 async def get_rate_limit(pool: asyncpg.Pool, app_id: int) -> dict:
     async with pool.acquire() as conn:
         row = await conn.fetchrow(

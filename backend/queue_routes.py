@@ -275,6 +275,44 @@ async def wait_for_batch(batch_id: str, request: Request):
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
+@router.patch("/jobs/{job_id}/priority")
+async def set_job_priority(job_id: str, body: dict, request: Request):
+    """Set the priority of a queued job. Higher priority = processed first."""
+    pool = _get_pool(request)
+    job = await queue_db.get_job(pool, job_id)
+    if not job:
+        raise HTTPException(404, "Job not found")
+    if job["status"] not in ("queued", "waiting_for_eviction"):
+        raise HTTPException(400, f"Cannot reprioritize job in '{job['status']}' state")
+    priority = body.get("priority", 0)
+    await queue_db.update_job_priority(pool, job_id, priority)
+    return {"ok": True, "job_id": job_id, "priority": priority}
+
+
+@router.get("/jobs")
+async def list_queue_jobs(request: Request, status: Optional[str] = None, limit: int = 100):
+    """List jobs in the queue with optional status filter."""
+    pool = _get_pool(request)
+    jobs = await queue_db.list_jobs(pool, status=status, limit=limit)
+    return jobs
+
+
+@router.get("/metrics")
+async def queue_metrics(request: Request):
+    """Queue performance metrics for the dashboard."""
+    pool = _get_pool(request)
+    metrics = await queue_db.get_queue_metrics(pool)
+    return metrics
+
+
+@router.get("/history")
+async def queue_history(request: Request, limit: int = 50):
+    """Get recently completed/failed jobs."""
+    pool = _get_pool(request)
+    jobs = await queue_db.list_recent_jobs(pool, limit=limit)
+    return jobs
+
+
 @router.get("/status", response_model=QueueOverview)
 async def queue_status(request: Request):
     pool = _get_pool(request)
