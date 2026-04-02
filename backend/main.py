@@ -168,9 +168,9 @@ async def lifespan(app: FastAPI):
     )
     app.state.lock_conn = lock_conn
 
-    async def get_ollama():
-        return await _get_runner_ollama_base(pool)
-    scheduler = Scheduler(pool, get_ollama, lock_conn=lock_conn if got_lock else None)
+    async def get_runner():
+        return await _get_runner_client(pool)
+    scheduler = Scheduler(pool, get_runner, lock_conn=lock_conn if got_lock else None)
     app.state.scheduler = scheduler
 
     if DISABLE_SCHEDULER:
@@ -181,7 +181,30 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("Scheduler skipped — another pod holds the lock")
 
+    # Background task: retry lock acquisition if scheduler isn't running
+    async def _retry_lock():
+        nonlocal got_lock
+        while not DISABLE_SCHEDULER and not got_lock:
+            await asyncio.sleep(15)
+            try:
+                acquired = await lock_conn.fetchval(
+                    "SELECT pg_try_advisory_lock($1)", SCHEDULER_LOCK_ID
+                )
+                if acquired:
+                    got_lock = True
+                    scheduler.lock_conn = lock_conn
+                    scheduler.start()
+                    logger.info("Queue scheduler started (advisory lock acquired on retry)")
+                    return
+            except Exception:
+                pass
+
+    lock_retry_task = asyncio.create_task(_retry_lock()) if not got_lock and not DISABLE_SCHEDULER else None
+
     yield
+
+    if lock_retry_task and not lock_retry_task.done():
+        lock_retry_task.cancel()
 
     scheduler.stop()
     if got_lock:

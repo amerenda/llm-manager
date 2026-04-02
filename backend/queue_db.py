@@ -241,6 +241,9 @@ async def list_jobs(pool: asyncpg.Pool, status: Optional[str] = None, limit: int
         # Don't send full request/result blobs in listings
         if d.get('request'):
             req = d['request']
+            if isinstance(req, str):
+                import json as _json
+                req = _json.loads(req)
             d['request_summary'] = {
                 'message_count': len(req.get('messages', [])),
                 'temperature': req.get('temperature'),
@@ -248,6 +251,9 @@ async def list_jobs(pool: asyncpg.Pool, status: Optional[str] = None, limit: int
             }
         d.pop('request', None)
         d.pop('result', None)
+        if isinstance(d.get('metadata'), str):
+            import json as _json
+            d['metadata'] = _json.loads(d['metadata'])
         result.append(d)
     return result
 
@@ -386,6 +392,9 @@ async def list_recent_jobs(pool: asyncpg.Pool, limit: int = 50) -> list[dict]:
                 d[ts_field] = d[ts_field].isoformat()
         d.pop('request', None)
         d.pop('result', None)
+        if isinstance(d.get('metadata'), str):
+            import json as _json
+            d['metadata'] = _json.loads(d['metadata'])
         result.append(d)
     return result
 
