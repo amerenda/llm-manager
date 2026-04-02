@@ -117,11 +117,17 @@ class Scheduler:
                         await self._process_batch(model, batch)
 
                 # Process remaining models (need loading)
+                any_failed = False
                 for model, batch in model_groups.items():
                     success = await self._ensure_model_loaded(model)
                     if success:
                         await self._process_batch(model, batch)
-                    # If loading failed, jobs stay queued for retry
+                    else:
+                        any_failed = True
+
+                # Back off if we couldn't load any models — avoid tight loop
+                if any_failed:
+                    await asyncio.sleep(10)
 
             except asyncio.CancelledError:
                 break
@@ -145,7 +151,7 @@ class Scheduler:
                 }
             self._loaded_models = current
         except Exception:
-            logger.warning("Failed to sync loaded models from runner agent")
+            logger.warning("Failed to sync loaded models from runner agent", exc_info=True)
 
     async def _get_gpu_info(self) -> dict:
         """Get GPU VRAM info from runner agent."""
