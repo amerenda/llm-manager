@@ -536,11 +536,13 @@ async def models_for_agents():
         # Load library cache for enrichment (fallback for :latest tags) and categories
         library_cache = {}
         library_categories: dict = {}
+        library_descriptions: dict = {}
         try:
             async with pool.acquire() as conn:
-                rows = await conn.fetch("SELECT name, parameter_sizes, categories FROM ollama_library_cache")
+                rows = await conn.fetch("SELECT name, description, parameter_sizes, categories FROM ollama_library_cache")
                 for row in rows:
                     library_cache[row["name"]] = row["parameter_sizes"]
+                    library_descriptions[row["name"]] = row["description"] or ""
                     cats = row["categories"]
                     if isinstance(cats, str):
                         import json
@@ -590,12 +592,14 @@ async def models_for_agents():
                     param_count = f"{sizes[0]} (default)"
             # Categories: prefer model_settings override, else library cache by base name
             ms = model_settings_map.get(name, {})
+            base = name.split(":")[0]
             categories = list(ms.get("categories") or [])
             if not categories:
-                base = name.split(":")[0]
                 categories = library_categories.get(base, [])
             # Safety: prefer model_settings override, else pattern-based classification
             safety = ms.get("safety") or safety_map.get(name, "safe")
+            # Description from library cache
+            description = library_descriptions.get(base, "")
             models.append({
                 "name": name,
                 "size_gb": size_gb,
@@ -604,6 +608,7 @@ async def models_for_agents():
                 "quantization": quant,
                 "safety": safety,
                 "categories": categories,
+                "description": description,
                 "runners": model_runners.get(name, []),
                 "downloaded": True,
                 "loaded": name in loaded_names,

@@ -163,6 +163,7 @@ function InstalledModelsView({ runners, selectedRunner, selectedRunnerHostname }
   const [pullInput, setPullInput] = useState('')
   const [pullMsg, setPullMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
   const [editingModel, setEditingModel] = useState<ModelInfo | null>(null)
+  const [expandedModel, setExpandedModel] = useState<string | null>(null)
 
   const activeOps = (ops.data ?? []).filter(op => op.status === 'running')
   const allLoadedModels = status.data?.loaded_ollama_models ?? []
@@ -309,77 +310,139 @@ function InstalledModelsView({ runners, selectedRunner, selectedRunnerHostname }
               ? allLoadedModels.some(lm => lm.name === m.name && lm.runner === selectedRunnerHostname)
               : allLoadedModels.some(lm => lm.name === m.name)
             const displayName = m.name.replace(/:latest$/, '')
+            const isExpanded = expandedModel === m.name
 
             return (
-              <div key={m.name} className="bg-gray-900 border border-gray-800 rounded-xl px-4 py-3 flex items-center gap-3">
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-1.5 flex-wrap">
-                    <span className="text-sm text-gray-200 font-medium">{displayName}</span>
-                    {m.parameter_count && (
-                      <span className="text-[10px] bg-gray-800 text-gray-400 px-1.5 py-0.5 rounded">{m.parameter_count}</span>
-                    )}
-                    {m.quantization && (
-                      <span className="text-[10px] bg-gray-800 text-gray-500 px-1.5 py-0.5 rounded">{m.quantization}</span>
-                    )}
-                    {(m.categories ?? []).map(cat => (
-                      <span key={cat} className="text-[10px] bg-indigo-900/30 text-indigo-400 px-1.5 py-0.5 rounded-full">{cat}</span>
-                    ))}
-                    <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${
-                      m.safety === 'unsafe' ? 'bg-red-900/30 text-red-400' : 'bg-green-900/20 text-green-600'
-                    }`}>{m.safety}</span>
-                    {isLoaded && (
-                      <span className="text-[10px] bg-blue-900/40 text-blue-400 px-1.5 py-0.5 rounded-full flex items-center gap-0.5">
-                        <Cpu className="w-2.5 h-2.5" /> VRAM
-                      </span>
-                    )}
-                  </div>
-                  <div className="flex items-center gap-3 mt-0.5">
-                    <p className="text-[10px] text-gray-600">
+              <div key={m.name} className={`bg-gray-900 border rounded-xl overflow-hidden transition-colors ${isExpanded ? 'border-brand-700/60' : 'border-gray-800'}`}>
+                {/* Header row — click to expand */}
+                <div
+                  className="px-4 py-3 flex items-center gap-3 cursor-pointer hover:bg-gray-800/40 transition-colors"
+                  onClick={() => setExpandedModel(isExpanded ? null : m.name)}
+                >
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      <span className="text-sm text-gray-200 font-medium">{displayName}</span>
+                      {m.parameter_count && (
+                        <span className="text-[10px] bg-gray-800 text-gray-400 px-1.5 py-0.5 rounded">{m.parameter_count}</span>
+                      )}
+                      {m.quantization && (
+                        <span className="text-[10px] bg-gray-800 text-gray-500 px-1.5 py-0.5 rounded">{m.quantization}</span>
+                      )}
+                      {(m.categories ?? []).map(cat => (
+                        <span key={cat} className="text-[10px] bg-indigo-900/30 text-indigo-400 px-1.5 py-0.5 rounded-full">{cat}</span>
+                      ))}
+                      <span className={`text-[10px] px-1.5 py-0.5 rounded-full ${
+                        m.safety === 'unsafe' ? 'bg-red-900/30 text-red-400' : 'bg-green-900/20 text-green-600'
+                      }`}>{m.safety}</span>
+                      {isLoaded && (
+                        <span className="text-[10px] bg-blue-900/40 text-blue-400 px-1.5 py-0.5 rounded-full flex items-center gap-0.5">
+                          <Cpu className="w-2.5 h-2.5" /> VRAM
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-[10px] text-gray-600 mt-0.5">
                       ~{m.vram_estimate_gb} GB VRAM{m.size_gb ? ` · ${m.size_gb} GB disk` : ''}
+                      {selectedRunner === undefined && (m.runners ?? []).length > 0 && (
+                        <span className="ml-2">
+                          {(m.runners ?? []).map(r => (
+                            <span key={r.runner_id} className="text-[10px] bg-gray-800 text-gray-500 px-1.5 py-0.5 rounded mr-1">{r.hostname}</span>
+                          ))}
+                        </span>
+                      )}
                     </p>
-                    {selectedRunner === undefined && (m.runners ?? []).length > 0 && (
-                      <div className="flex gap-1">
-                        {(m.runners ?? []).map(r => (
-                          <span key={r.runner_id} className="text-[10px] bg-gray-800 text-gray-500 px-1.5 py-0.5 rounded">{r.hostname}</span>
-                        ))}
-                      </div>
+                  </div>
+                  <div className="flex items-center gap-1.5 flex-shrink-0" onClick={e => e.stopPropagation()}>
+                    <button onClick={() => setEditingModel(m)} title="Edit categories / safety"
+                      className="p-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-500 hover:text-gray-300 transition-colors">
+                      <Settings2 className="w-3.5 h-3.5" />
+                    </button>
+                    {selectedRunner !== undefined && (
+                      isLoaded ? (
+                        <button onClick={() => unloadVram.mutate({ model: m.name, runner_id: selectedRunner })}
+                          disabled={unloadVram.isPending} title="Free VRAM"
+                          className="flex items-center gap-1 text-xs bg-yellow-900/30 hover:bg-yellow-800/40 text-yellow-400 px-2.5 py-1 rounded-lg transition-colors disabled:opacity-40">
+                          {unloadVram.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Upload className="w-3 h-3" />}
+                          Unload
+                        </button>
+                      ) : (
+                        <button onClick={() => load.mutate({ model: m.name, runner_id: selectedRunner })}
+                          disabled={load.isPending} title="Load into VRAM"
+                          className="flex items-center gap-1 text-xs bg-brand-900/50 hover:bg-brand-800/50 text-brand-300 px-2.5 py-1 rounded-lg transition-colors disabled:opacity-40">
+                          {load.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Cpu className="w-3 h-3" />}
+                          Load
+                        </button>
+                      )
+                    )}
+                    {selectedRunner !== undefined && (
+                      <button
+                        onClick={() => {
+                          if (window.confirm(`Delete ${m.name} from ${selectedRunnerHostname}?`))
+                            del.mutate({ model: m.name, runner_id: selectedRunner })
+                        }}
+                        disabled={del.isPending} title="Delete from disk"
+                        className="p-1.5 rounded-lg bg-gray-800 hover:bg-red-900/50 hover:text-red-400 text-gray-500 transition-colors">
+                        {del.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
+                      </button>
                     )}
                   </div>
                 </div>
-                <div className="flex items-center gap-1.5 flex-shrink-0">
-                  <button onClick={() => setEditingModel(m)} title="Edit categories / safety"
-                    className="p-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-500 hover:text-gray-300 transition-colors">
-                    <Settings2 className="w-3.5 h-3.5" />
-                  </button>
-                  {selectedRunner !== undefined && (
-                    isLoaded ? (
-                      <button onClick={() => unloadVram.mutate({ model: m.name, runner_id: selectedRunner })}
-                        disabled={unloadVram.isPending} title="Free VRAM"
-                        className="flex items-center gap-1 text-xs bg-yellow-900/30 hover:bg-yellow-800/40 text-yellow-400 px-2.5 py-1 rounded-lg transition-colors disabled:opacity-40">
-                        {unloadVram.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Upload className="w-3 h-3" />}
-                        Unload
-                      </button>
-                    ) : (
-                      <button onClick={() => load.mutate({ model: m.name, runner_id: selectedRunner })}
-                        disabled={load.isPending} title="Load into VRAM"
-                        className="flex items-center gap-1 text-xs bg-brand-900/50 hover:bg-brand-800/50 text-brand-300 px-2.5 py-1 rounded-lg transition-colors disabled:opacity-40">
-                        {load.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Cpu className="w-3 h-3" />}
-                        Load
-                      </button>
-                    )
-                  )}
-                  {selectedRunner !== undefined && (
-                    <button
-                      onClick={() => {
-                        if (window.confirm(`Delete ${m.name} from ${selectedRunnerHostname}?`))
-                          del.mutate({ model: m.name, runner_id: selectedRunner })
-                      }}
-                      disabled={del.isPending} title="Delete from disk"
-                      className="p-1.5 rounded-lg bg-gray-800 hover:bg-red-900/50 hover:text-red-400 text-gray-500 transition-colors">
-                      {del.isPending ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5" />}
-                    </button>
-                  )}
-                </div>
+
+                {/* Expanded details */}
+                {isExpanded && (
+                  <div className="border-t border-gray-800 px-4 py-3 space-y-3">
+                    {m.description && (
+                      <p className="text-xs text-gray-400 leading-relaxed">{m.description}</p>
+                    )}
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                      <div>
+                        <p className="text-[10px] text-gray-500 uppercase tracking-wide">VRAM estimate</p>
+                        <p className="text-xs text-gray-300 mt-0.5">~{m.vram_estimate_gb} GB</p>
+                      </div>
+                      {m.size_gb > 0 && (
+                        <div>
+                          <p className="text-[10px] text-gray-500 uppercase tracking-wide">Disk size</p>
+                          <p className="text-xs text-gray-300 mt-0.5">{m.size_gb} GB</p>
+                        </div>
+                      )}
+                      <div>
+                        <p className="text-[10px] text-gray-500 uppercase tracking-wide">Parameters</p>
+                        <p className="text-xs text-gray-300 mt-0.5">{m.parameter_count || '—'}</p>
+                      </div>
+                      <div>
+                        <p className="text-[10px] text-gray-500 uppercase tracking-wide">Quantization</p>
+                        <p className="text-xs text-gray-300 mt-0.5">{m.quantization || 'Default'}</p>
+                      </div>
+                      <div>
+                        <p className="text-[10px] text-gray-500 uppercase tracking-wide">Safety</p>
+                        <p className={`text-xs mt-0.5 ${m.safety === 'unsafe' ? 'text-red-400' : 'text-green-500'}`}>{m.safety}</p>
+                      </div>
+                      {(m.categories ?? []).length > 0 && (
+                        <div className="col-span-2">
+                          <p className="text-[10px] text-gray-500 uppercase tracking-wide">Categories</p>
+                          <div className="flex gap-1 flex-wrap mt-0.5">
+                            {(m.categories ?? []).map(cat => (
+                              <span key={cat} className="text-[10px] bg-indigo-900/30 text-indigo-400 px-1.5 py-0.5 rounded-full">{cat}</span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      <div className="col-span-2">
+                        <p className="text-[10px] text-gray-500 uppercase tracking-wide">Full name</p>
+                        <p className="text-xs text-gray-500 mt-0.5 font-mono truncate">{m.name}</p>
+                      </div>
+                      {(m.runners ?? []).length > 0 && (
+                        <div className="col-span-2 sm:col-span-4">
+                          <p className="text-[10px] text-gray-500 uppercase tracking-wide">On runners</p>
+                          <div className="flex gap-1.5 flex-wrap mt-0.5">
+                            {(m.runners ?? []).map(r => (
+                              <span key={r.runner_id} className="text-[10px] bg-gray-800 text-gray-400 px-1.5 py-0.5 rounded">{r.hostname}</span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
             )
           })

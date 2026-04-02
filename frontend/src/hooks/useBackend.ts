@@ -108,6 +108,7 @@ export interface ModelInfo {
   quantization: string | null
   safety: string
   categories: string[]
+  description: string
   runners: { runner_id: number; hostname: string }[]
   downloaded: boolean
   loaded: boolean
