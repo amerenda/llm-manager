@@ -12,6 +12,7 @@ import time
 from typing import Optional
 
 import asyncpg
+import httpx
 
 import queue_db
 from gpu import vram_for_model
@@ -122,7 +123,15 @@ class Scheduler:
                     # Mark jobs as loading_model so clients see progress
                     for job in batch:
                         await queue_db.update_job_status(self.pool, job["id"], "loading_model")
-                    success = await self._ensure_model_loaded(model)
+                    try:
+                        success = await self._ensure_model_loaded(model)
+                    except RuntimeError as e:
+                        # Permanent failure (e.g. model not found) — fail all jobs
+                        logger.error("Permanent model load failure: %s", e)
+                        for job in batch:
+                            await queue_db.update_job_status(
+                                self.pool, job["id"], "failed", error=str(e))
+                        continue
                     if success:
                         await self._process_batch(model, batch)
                     else:
@@ -242,11 +251,13 @@ class Scheduler:
         return freed >= vram_needed
 
     async def _load_model(self, model: str) -> bool:
-        """Load a model via runner agent."""
+        """Load a model via runner agent. Returns True on success, False on
+        retriable error. Raises RuntimeError for permanent failures (model
+        not found) so the caller can fail the jobs."""
         try:
             client = await self.get_runner_client()
             logger.info("Loading model %s", model)
-            result = await client.load_model(model, keep_alive=-1)
+            await client.load_model(model, keep_alive=-1)
             self._loaded_models[model] = {
                 "loaded_at": time.time(),
                 "vram_gb": vram_for_model(model),
@@ -254,6 +265,11 @@ class Scheduler:
             }
             logger.info("Model %s loaded", model)
             return True
+        except httpx.HTTPStatusError as e:
+            if e.response.status_code == 404:
+                raise RuntimeError(f"Model {model} not found on runner") from e
+            logger.exception("Error loading model %s", model)
+            return False
         except Exception:
             logger.exception("Error loading model %s", model)
             return False
