@@ -76,16 +76,34 @@ class Scheduler:
             try:
                 client = await self.get_runner_client(runner_id=r["id"])
                 models_resp = await client.models()
-                names = [m.get("id", m.get("name", "")) for m in models_resp.get("data", models_resp.get("models", []))]
+                model_list = models_resp.get("data", models_resp.get("models", []))
+                names = [m.get("id", m.get("name", "")) for m in model_list]
                 if model in names:
                     self._model_runner_cache[model] = r["id"]
                     logger.info("Model %s found on runner %s (id=%d)", model, r["hostname"], r["id"])
+                    # Cache actual model size in DB if not already set
+                    await self._cache_model_size(model, model_list)
                     return client
             except Exception:
                 continue
 
         # Not found on any runner
         raise RuntimeError(f"Model {model} not found on any runner")
+
+    async def _cache_model_size(self, model: str, model_list: list[dict]):
+        """Store actual model size from runner's model list in model_settings DB."""
+        existing = await queue_db.get_model_settings(self.pool, model)
+        if existing.get("vram_estimate_gb"):
+            return  # already set, don't overwrite
+        for m in model_list:
+            if m.get("id", m.get("name", "")) != model:
+                continue
+            size_bytes = m.get("size", 0)
+            if size_bytes and size_bytes > 0:
+                size_gb = round(size_bytes / (1024 ** 3), 2)
+                await queue_db.upsert_model_settings(self.pool, model, vram_estimate_gb=size_gb)
+                logger.info("Cached VRAM estimate for %s from runner: %.2f GB", model, size_gb)
+            break
 
     async def _verify_lock(self) -> bool:
         """Verify we still hold the advisory lock. Returns False if lost."""
@@ -221,12 +239,19 @@ class Scheduler:
         except Exception:
             return {"total": 0, "used": 0, "free": 0}
 
+    async def _vram_for_model(self, model: str) -> float:
+        """VRAM estimate: DB setting > hardcoded lookup > heuristic."""
+        settings = await queue_db.get_model_settings(self.pool, model)
+        if settings.get("vram_estimate_gb"):
+            return float(settings["vram_estimate_gb"])
+        return vram_for_model(model)
+
     async def _ensure_model_loaded(self, model: str) -> bool:
         """Load a model, evicting others if needed. Returns True if successful."""
         if model in self._loaded_models:
             return True
 
-        vram_needed = vram_for_model(model)
+        vram_needed = await self._vram_for_model(model)
         gpu = await self._get_gpu_info()
 
         # Check if model fits at all
@@ -295,7 +320,7 @@ class Scheduler:
     async def _load_model(self, model: str) -> bool:
         """Load a model via the runner that has it downloaded. Returns True on
         success, False on retriable error. Raises RuntimeError for permanent
-        failures (model not on any runner)."""
+        failures (model not on any runner, or runner rejected load)."""
         try:
             client = await self._get_runner_for_model(model)
             logger.info("Loading model %s", model)
@@ -310,8 +335,13 @@ class Scheduler:
         except RuntimeError:
             raise  # model not found — permanent failure
         except httpx.HTTPStatusError as e:
-            if e.response.status_code == 404:
-                raise RuntimeError(f"Model {model} not found on runner") from e
+            if e.response.status_code in (400, 404, 422):
+                # 404 = not on runner, 400/422 = runner rejected (e.g. embedding model,
+                # model not pulled, unsupported). All are permanent — don't retry.
+                raise RuntimeError(
+                    f"Model {model} cannot be loaded by runner "
+                    f"(HTTP {e.response.status_code})"
+                ) from e
             logger.exception("Error loading model %s", model)
             return False
         except Exception:
@@ -412,7 +442,7 @@ class Scheduler:
         if detect_provider(model) != ModelProvider.LOCAL:
             return {"ok": True, "provider": detect_provider(model).value}
 
-        vram_needed = vram_for_model(model)
+        vram_needed = await self._vram_for_model(model)
 
         # Get live GPU info and loaded models from runner
         try:

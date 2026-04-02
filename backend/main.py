@@ -176,6 +176,9 @@ async def lifespan(app: FastAPI):
     if DISABLE_SCHEDULER:
         logger.info("Scheduler disabled via DISABLE_SCHEDULER env var")
     elif got_lock:
+        recovered = await queue_db.recover_stuck_jobs(pool)
+        if recovered:
+            logger.warning("Recovered %d jobs stuck in loading_model/running → queued", recovered)
         scheduler.start()
         logger.info("Queue scheduler started (advisory lock acquired)")
     else:

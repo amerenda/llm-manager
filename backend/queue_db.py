@@ -149,6 +149,19 @@ async def count_app_recent_jobs(pool: asyncpg.Pool, app_id: int) -> int:
     return row["cnt"]
 
 
+async def recover_stuck_jobs(pool: asyncpg.Pool) -> int:
+    """Reset jobs stuck in loading_model/running back to queued on startup."""
+    async with pool.acquire() as conn:
+        result = await conn.execute("""
+            UPDATE queue_jobs SET status = 'queued', started_at = NULL
+            WHERE status IN ('loading_model', 'running')
+        """)
+    count = int(result.split()[-1])
+    if count:
+        logger.info("Recovered %d stuck jobs → queued", count)
+    return count
+
+
 async def cleanup_old_jobs(pool: asyncpg.Pool, hours: int = 24):
     """Delete completed/failed jobs older than N hours."""
     async with pool.acquire() as conn:
