@@ -348,14 +348,37 @@ from scheduler import Scheduler
 
 
 def _make_scheduler(loaded_models=None, gpu_info=None):
-    """Create a Scheduler with mocked pool and runner client."""
+    """Create a Scheduler with mocked pool and runner client.
+
+    loaded_models: dict of {name: {vram_gb, ...}} for _loaded_models cache
+    gpu_info: dict with total/used/free for GPU state
+
+    The runner client's status() is mocked to return consistent data
+    derived from gpu_info and loaded_models.
+    """
     pool = MagicMock()
-    get_runner_client = AsyncMock()
-    sched = Scheduler(pool, get_runner_client)
-    if loaded_models:
-        sched._loaded_models = loaded_models
     if gpu_info is None:
         gpu_info = {"total": 24.0, "used": 0, "free": 24.0}
+    if loaded_models is None:
+        loaded_models = {}
+
+    # Build runner status response from gpu_info + loaded_models
+    ollama_models = [
+        {"name": name, "size_gb": info.get("vram_gb", 0)}
+        for name, info in loaded_models.items()
+    ]
+    runner_status = {
+        "gpu_vram_total_gb": gpu_info["total"],
+        "gpu_vram_used_gb": gpu_info["used"],
+        "loaded_ollama_models": ollama_models,
+    }
+    mock_client = AsyncMock()
+    mock_client.status = AsyncMock(return_value=runner_status)
+    get_runner_client = AsyncMock(return_value=mock_client)
+
+    sched = Scheduler(pool, get_runner_client)
+    sched._loaded_models = dict(loaded_models)
+    # Also mock _get_gpu_info for tests that use _ensure_model_loaded
     sched._get_gpu_info = AsyncMock(return_value=gpu_info)
     return sched
 

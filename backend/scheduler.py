@@ -353,35 +353,45 @@ class Scheduler:
             return {"ok": True, "provider": detect_provider(model).value}
 
         vram_needed = vram_for_model(model)
-        gpu = await self._get_gpu_info()
 
-        # If we can't reach GPU info (e.g. non-scheduler replica), accept the
-        # job optimistically — the scheduler will handle VRAM when it picks it up.
-        if gpu["total"] == 0:
+        # Get live GPU info and loaded models from runner
+        try:
+            client = await self.get_runner_client()
+            status = await client.status()
+            gpu_total = status.get("gpu_vram_total_gb", 0)
+            gpu_used = status.get("gpu_vram_used_gb", 0)
+            gpu_free = round(gpu_total - gpu_used, 1)
+            loaded_models = {m["name"]: m.get("size_gb", 0) for m in status.get("loaded_ollama_models", [])}
+        except Exception:
+            # Can't reach runner — accept optimistically
             return {"ok": True}
 
-        if vram_needed > gpu["total"]:
+        if gpu_total == 0:
+            return {"ok": True}
+
+        if vram_needed > gpu_total:
             return {
                 "ok": False,
                 "error": "model_too_large",
-                "message": f"{model} requires {vram_needed:.1f}GB VRAM, GPU has {gpu['total']:.1f}GB total",
+                "message": f"{model} requires {vram_needed:.1f}GB VRAM, GPU has {gpu_total:.1f}GB total",
                 "vram_required_gb": vram_needed,
-                "vram_available_gb": gpu["total"],
+                "vram_available_gb": gpu_total,
             }
 
-        if model in self._loaded_models:
+        # Model already loaded — no swap needed
+        if model in loaded_models:
             return {"ok": True}
 
-        if gpu["free"] >= vram_needed:
+        if gpu_free >= vram_needed:
             return {"ok": True}
 
-        # Check eviction feasibility
+        # Check eviction feasibility using live loaded model data
         evictable_vram = 0
         non_evictable_vram = 0
         loaded_info = []
-        for name, info in self._loaded_models.items():
+        for name, size_gb in loaded_models.items():
             settings = await queue_db.get_model_settings(self.pool, name)
-            model_vram = info.get("vram_gb", vram_for_model(name))
+            model_vram = size_gb or vram_for_model(name)
             if settings.get("do_not_evict", False) or not settings.get("evictable", True):
                 non_evictable_vram += model_vram
                 loaded_info.append({"model": name, "vram_gb": model_vram, "do_not_evict": True})
@@ -389,7 +399,7 @@ class Scheduler:
                 evictable_vram += model_vram
                 loaded_info.append({"model": name, "vram_gb": model_vram, "do_not_evict": False})
 
-        available_after_eviction = gpu["free"] + evictable_vram
+        available_after_eviction = gpu_free + evictable_vram
         if available_after_eviction < vram_needed:
             return {
                 "ok": False,
