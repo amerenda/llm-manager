@@ -529,8 +529,21 @@ async def models_for_agents():
         except Exception:
             pass
 
+        def _is_chat_model(model_name: str) -> bool:
+            """Return False for embedding and vision-only models — not usable for chat."""
+            n = model_name.lower().split(":")[0]
+            # Embedding models (bert-family, nomic, minilm, bge, etc.)
+            if "embed" in n or "minilm" in n or n.startswith("bge-"):
+                return False
+            # Vision-only (non-chat) models
+            if n in ("clip",) or n.startswith("clip-"):
+                return False
+            return True
+
         models = []
         for name, m in all_models_map.items():
+            if not _is_chat_model(name):
+                continue
             # Agent API returns OpenAI format (no size), fall back to VRAM estimate
             size_gb = round(m.get("size", 0) / 1e9, 2) if m.get("size") else 0
             vram_est = round(vram_for_model(name), 2)
