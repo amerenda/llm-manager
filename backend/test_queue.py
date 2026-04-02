@@ -348,10 +348,10 @@ from scheduler import Scheduler
 
 
 def _make_scheduler(loaded_models=None, gpu_info=None):
-    """Create a Scheduler with mocked pool and ollama base."""
+    """Create a Scheduler with mocked pool and runner client."""
     pool = MagicMock()
-    get_ollama = AsyncMock(return_value="http://localhost:11434")
-    sched = Scheduler(pool, get_ollama)
+    get_runner_client = AsyncMock()
+    sched = Scheduler(pool, get_runner_client)
     if loaded_models:
         sched._loaded_models = loaded_models
     if gpu_info is None:

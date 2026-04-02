@@ -8,7 +8,6 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Header, Request
 from fastapi.responses import StreamingResponse
 
-import httpx
 import queue_db
 from queue_models import (
     QueueJobRequest, QueueBatchRequest, QueueJobResponse,
@@ -324,17 +323,14 @@ async def queue_status(request: Request):
     pending = await queue_db.get_pending_jobs(pool)
     models_queued = list(set(j["model"] for j in pending))
 
-    # Get loaded models from Ollama directly (works on any pod)
+    # Get loaded models from scheduler cache or runner agent
     models_loaded = list(scheduler.loaded_models.keys())
     if not models_loaded:
-        # Scheduler not running on this pod — query Ollama directly
         try:
-            ollama_base = await scheduler.get_ollama_base()
-            async with httpx.AsyncClient(timeout=10) as client:
-                ps_resp = await client.get(f"{ollama_base}/api/ps")
-                if ps_resp.status_code == 200:
-                    for m in ps_resp.json().get("models", []):
-                        models_loaded.append(m.get("name", ""))
+            client = await scheduler.get_runner_client()
+            status = await client.status()
+            for m in status.get("loaded_ollama_models", []):
+                models_loaded.append(m.get("name", ""))
         except Exception:
             pass
 

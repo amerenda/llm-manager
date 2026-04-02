@@ -12,7 +12,6 @@ import time
 from typing import Optional
 
 import asyncpg
-import httpx
 
 import queue_db
 from gpu import vram_for_model
@@ -25,10 +24,10 @@ SCHEDULER_LOCK_ID = 900001  # Must match main.py
 
 
 class Scheduler:
-    def __init__(self, pool: asyncpg.Pool, get_ollama_base: callable,
+    def __init__(self, pool: asyncpg.Pool, get_runner_client: callable,
                  lock_conn=None):
         self.pool = pool
-        self.get_ollama_base = get_ollama_base  # async callable returning ollama URL
+        self.get_runner_client = get_runner_client  # async callable returning LLMAgentClient
         self.lock_conn = lock_conn  # dedicated connection for advisory lock
         self._task: Optional[asyncio.Task] = None
         self._current_job_id: Optional[str] = None
@@ -131,48 +130,31 @@ class Scheduler:
                 await asyncio.sleep(5)
 
     async def _sync_loaded_models(self):
-        """Sync loaded model list from Ollama's /api/ps endpoint."""
+        """Sync loaded model list from runner agent's /v1/status endpoint."""
         try:
-            ollama_base = await self.get_ollama_base()
-            async with httpx.AsyncClient(timeout=10) as client:
-                resp = await client.get(f"{ollama_base}/api/ps")
-                if resp.status_code == 200:
-                    data = resp.json()
-                    current = {}
-                    for m in data.get("models", []):
-                        name = m.get("name", "")
-                        size_bytes = m.get("size_vram", m.get("size", 0))
-                        vram_gb = round(size_bytes / (1024**3), 1) if size_bytes else vram_for_model(name)
-                        current[name] = {
-                            "loaded_at": self._loaded_models.get(name, {}).get("loaded_at", time.time()),
-                            "vram_gb": vram_gb,
-                            "active_jobs": len(await queue_db.get_active_jobs_for_model(self.pool, name)),
-                        }
-                    self._loaded_models = current
+            client = await self.get_runner_client()
+            status = await client.status()
+            current = {}
+            for m in status.get("loaded_ollama_models", []):
+                name = m.get("name", "")
+                vram_gb = m.get("size_gb", vram_for_model(name))
+                current[name] = {
+                    "loaded_at": self._loaded_models.get(name, {}).get("loaded_at", time.time()),
+                    "vram_gb": vram_gb,
+                    "active_jobs": len(await queue_db.get_active_jobs_for_model(self.pool, name)),
+                }
+            self._loaded_models = current
         except Exception:
-            logger.warning("Failed to sync loaded models from Ollama")
+            logger.warning("Failed to sync loaded models from runner agent")
 
     async def _get_gpu_info(self) -> dict:
-        """Get GPU VRAM info from Ollama."""
+        """Get GPU VRAM info from runner agent."""
         try:
-            ollama_base = await self.get_ollama_base()
-            async with httpx.AsyncClient(timeout=10) as client:
-                # Use /api/ps to get model VRAM usage, nvidia-smi for total
-                resp = await client.get(f"{ollama_base}/api/ps")
-                if resp.status_code != 200:
-                    return {"total": 0, "used": 0, "free": 0}
-
-                # Sum up VRAM from loaded models
-                data = resp.json()
-                used = 0
-                for m in data.get("models", []):
-                    size_bytes = m.get("size_vram", m.get("size", 0))
-                    used += size_bytes / (1024**3)
-
-                # Get total from the runner's /v1/status endpoint or estimate
-                # For now, use the models' VRAM as a rough measure
-                # TODO: get actual GPU total from runner status endpoint
-                return {"total": 24.0, "used": round(used, 1), "free": round(24.0 - used, 1)}
+            client = await self.get_runner_client()
+            status = await client.status()
+            total = status.get("gpu_vram_total_gb", 0)
+            used = status.get("gpu_vram_used_gb", 0)
+            return {"total": round(total, 1), "used": round(used, 1), "free": round(total - used, 1)}
         except Exception:
             return {"total": 0, "used": 0, "free": 0}
 
@@ -248,45 +230,31 @@ class Scheduler:
         return freed >= vram_needed
 
     async def _load_model(self, model: str) -> bool:
-        """Load a model via Ollama."""
+        """Load a model via runner agent."""
         try:
-            ollama_base = await self.get_ollama_base()
+            client = await self.get_runner_client()
             logger.info("Loading model %s", model)
-            async with httpx.AsyncClient(timeout=300) as client:
-                resp = await client.post(
-                    f"{ollama_base}/api/generate",
-                    json={"model": model, "prompt": "", "keep_alive": "10m"},
-                )
-                if resp.status_code == 200:
-                    self._loaded_models[model] = {
-                        "loaded_at": time.time(),
-                        "vram_gb": vram_for_model(model),
-                        "active_jobs": 0,
-                    }
-                    logger.info("Model %s loaded", model)
-                    return True
-                else:
-                    logger.error("Failed to load model %s: %s", model, resp.text[:200])
-                    return False
+            result = await client.load_model(model, keep_alive=-1)
+            self._loaded_models[model] = {
+                "loaded_at": time.time(),
+                "vram_gb": vram_for_model(model),
+                "active_jobs": 0,
+            }
+            logger.info("Model %s loaded", model)
+            return True
         except Exception:
             logger.exception("Error loading model %s", model)
             return False
 
     async def _unload_model(self, model: str) -> bool:
-        """Unload a model via Ollama."""
+        """Unload a model via runner agent."""
         try:
-            ollama_base = await self.get_ollama_base()
+            client = await self.get_runner_client()
             logger.info("Unloading model %s", model)
-            async with httpx.AsyncClient(timeout=30) as client:
-                resp = await client.post(
-                    f"{ollama_base}/api/generate",
-                    json={"model": model, "prompt": "", "keep_alive": "0"},
-                )
-                if resp.status_code == 200:
-                    self._loaded_models.pop(model, None)
-                    logger.info("Model %s unloaded", model)
-                    return True
-                return False
+            await client.unload_model(model)
+            self._loaded_models.pop(model, None)
+            logger.info("Model %s unloaded", model)
+            return True
         except Exception:
             logger.exception("Error unloading model %s", model)
             return False
@@ -337,62 +305,30 @@ class Scheduler:
                     job_id, model, usage.get("completion_tokens", 0))
 
     async def _run_local_job(self, job_id: str, model: str, request: dict):
-        """Execute a local Ollama inference job."""
-        ollama_base = await self.get_ollama_base()
-        payload = {
-            "model": model,
-            "messages": request.get("messages", []),
-            "stream": False,
-            "options": {},
-        }
+        """Execute a local inference job via runner agent."""
+        client = await self.get_runner_client()
+        kwargs = {}
         if "temperature" in request:
-            payload["options"]["temperature"] = request["temperature"]
+            kwargs["temperature"] = request["temperature"]
         if "max_tokens" in request:
-            payload["options"]["num_predict"] = request["max_tokens"]
+            kwargs["max_tokens"] = request["max_tokens"]
         if request.get("tools"):
-            payload["tools"] = request["tools"]
+            kwargs["tools"] = request["tools"]
 
-        async with httpx.AsyncClient(timeout=300) as client:
-            resp = await client.post(f"{ollama_base}/api/chat", json=payload)
-
-        if resp.status_code == 200:
-            data = resp.json()
-            msg = data.get("message", {})
-
-            # Normalize Ollama tool_calls to OpenAI format
-            openai_msg = {"role": msg.get("role", "assistant"), "content": msg.get("content", "")}
-            if msg.get("tool_calls"):
-                import uuid as _uuid
-                openai_msg["tool_calls"] = [
-                    {
-                        "id": f"call_{_uuid.uuid4().hex[:8]}",
-                        "type": "function",
-                        "function": {
-                            "name": tc["function"]["name"],
-                            "arguments": json.dumps(tc["function"]["arguments"])
-                                if isinstance(tc["function"]["arguments"], dict)
-                                else tc["function"]["arguments"],
-                        },
-                    }
-                    for tc in msg["tool_calls"]
-                ]
-
-            result = {
-                "choices": [{
-                    "message": openai_msg,
-                    "finish_reason": "tool_calls" if msg.get("tool_calls") else "stop",
-                }],
-                "model": model,
-                "usage": {
-                    "prompt_tokens": data.get("prompt_eval_count", 0),
-                    "completion_tokens": data.get("eval_count", 0),
-                },
-            }
+        try:
+            result = await client.chat(
+                messages=request.get("messages", []),
+                model=model,
+                stream=False,
+                **kwargs,
+            )
+            # Runner agent returns OpenAI-format response
             await queue_db.update_job_status(self.pool, job_id, "completed", result=result)
+            usage = result.get("usage", {})
             logger.info("Job %s completed (model=%s, tokens=%d)",
-                        job_id, model, data.get("eval_count", 0))
-        else:
-            error = f"Ollama returned {resp.status_code}: {resp.text[:200]}"
+                        job_id, model, usage.get("completion_tokens", 0))
+        except Exception as e:
+            error = f"Runner agent error: {e}"
             await queue_db.update_job_status(self.pool, job_id, "failed", error=error)
             logger.error("Job %s failed: %s", job_id, error)
 
