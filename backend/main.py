@@ -168,8 +168,8 @@ async def lifespan(app: FastAPI):
     )
     app.state.lock_conn = lock_conn
 
-    async def get_runner():
-        return await _get_runner_client(pool)
+    async def get_runner(runner_id=None):
+        return await _get_runner_client(pool, runner_id=runner_id)
     scheduler = Scheduler(pool, get_runner, lock_conn=lock_conn if got_lock else None)
     app.state.scheduler = scheduler
 

@@ -28,13 +28,15 @@ class Scheduler:
     def __init__(self, pool: asyncpg.Pool, get_runner_client: callable,
                  lock_conn=None):
         self.pool = pool
-        self.get_runner_client = get_runner_client  # async callable returning LLMAgentClient
+        self.get_runner_client = get_runner_client  # async callable(runner_id=None) -> LLMAgentClient
         self.lock_conn = lock_conn  # dedicated connection for advisory lock
         self._task: Optional[asyncio.Task] = None
         self._current_job_id: Optional[str] = None
         self._running = False
-        # Track loaded models: {model_name: {"loaded_at": float, "vram_gb": float}}
+        # Track loaded models: {model_name: {"loaded_at": float, "vram_gb": float, "runner_id": int}}
         self._loaded_models: dict[str, dict] = {}
+        # Cache: model -> runner_id (which runner has it downloaded)
+        self._model_runner_cache: dict[str, int] = {}
 
     def start(self):
         if self._task is None or self._task.done():
@@ -55,6 +57,35 @@ class Scheduler:
     @property
     def loaded_models(self) -> dict[str, dict]:
         return dict(self._loaded_models)
+
+    async def _get_runner_for_model(self, model: str):
+        """Find which runner has a model downloaded and return its client.
+        Checks cache first, then queries all runners."""
+        import db as _db
+
+        # Check cache
+        if model in self._model_runner_cache:
+            try:
+                return await self.get_runner_client(runner_id=self._model_runner_cache[model])
+            except Exception:
+                del self._model_runner_cache[model]
+
+        # Query all runners
+        runners = await _db.get_active_runners(self.pool)
+        for r in runners:
+            try:
+                client = await self.get_runner_client(runner_id=r["id"])
+                models_resp = await client.models()
+                names = [m.get("id", m.get("name", "")) for m in models_resp.get("data", models_resp.get("models", []))]
+                if model in names:
+                    self._model_runner_cache[model] = r["id"]
+                    logger.info("Model %s found on runner %s (id=%d)", model, r["hostname"], r["id"])
+                    return client
+            except Exception:
+                continue
+
+        # Not found on any runner
+        raise RuntimeError(f"Model {model} not found on any runner")
 
     async def _verify_lock(self) -> bool:
         """Verify we still hold the advisory lock. Returns False if lost."""
@@ -151,27 +182,38 @@ class Scheduler:
                 await asyncio.sleep(5)
 
     async def _sync_loaded_models(self):
-        """Sync loaded model list from runner agent's /v1/status endpoint."""
+        """Sync loaded model list from all runner agents."""
+        import db as _db
         try:
-            client = await self.get_runner_client()
-            status = await client.status()
+            runners = await _db.get_active_runners(self.pool)
             current = {}
-            for m in status.get("loaded_ollama_models", []):
-                name = m.get("name", "")
-                vram_gb = m.get("size_gb", vram_for_model(name))
-                current[name] = {
-                    "loaded_at": self._loaded_models.get(name, {}).get("loaded_at", time.time()),
-                    "vram_gb": vram_gb,
-                    "active_jobs": len(await queue_db.get_active_jobs_for_model(self.pool, name)),
-                }
+            for r in runners:
+                try:
+                    client = await self.get_runner_client(runner_id=r["id"])
+                    status = await client.status()
+                    for m in status.get("loaded_ollama_models", []):
+                        name = m.get("name", "")
+                        vram_gb = m.get("size_gb", vram_for_model(name))
+                        current[name] = {
+                            "loaded_at": self._loaded_models.get(name, {}).get("loaded_at", time.time()),
+                            "vram_gb": vram_gb,
+                            "active_jobs": len(await queue_db.get_active_jobs_for_model(self.pool, name)),
+                            "runner_id": r["id"],
+                        }
+                except Exception:
+                    continue
             self._loaded_models = current
         except Exception:
-            logger.warning("Failed to sync loaded models from runner agent", exc_info=True)
+            logger.warning("Failed to sync loaded models from runner agents", exc_info=True)
 
-    async def _get_gpu_info(self) -> dict:
-        """Get GPU VRAM info from runner agent."""
+    async def _get_gpu_info(self, runner_id: int | None = None) -> dict:
+        """Get GPU VRAM info from a specific runner or the first available."""
+        import db as _db
         try:
-            client = await self.get_runner_client()
+            if runner_id:
+                client = await self.get_runner_client(runner_id=runner_id)
+            else:
+                client = await self.get_runner_client()
             status = await client.status()
             total = status.get("gpu_vram_total_gb", 0)
             used = status.get("gpu_vram_used_gb", 0)
@@ -251,11 +293,11 @@ class Scheduler:
         return freed >= vram_needed
 
     async def _load_model(self, model: str) -> bool:
-        """Load a model via runner agent. Returns True on success, False on
-        retriable error. Raises RuntimeError for permanent failures (model
-        not found) so the caller can fail the jobs."""
+        """Load a model via the runner that has it downloaded. Returns True on
+        success, False on retriable error. Raises RuntimeError for permanent
+        failures (model not on any runner)."""
         try:
-            client = await self.get_runner_client()
+            client = await self._get_runner_for_model(model)
             logger.info("Loading model %s", model)
             await client.load_model(model, keep_alive=-1)
             self._loaded_models[model] = {
@@ -265,6 +307,8 @@ class Scheduler:
             }
             logger.info("Model %s loaded", model)
             return True
+        except RuntimeError:
+            raise  # model not found — permanent failure
         except httpx.HTTPStatusError as e:
             if e.response.status_code == 404:
                 raise RuntimeError(f"Model {model} not found on runner") from e
@@ -277,7 +321,7 @@ class Scheduler:
     async def _unload_model(self, model: str) -> bool:
         """Unload a model via runner agent."""
         try:
-            client = await self.get_runner_client()
+            client = await self._get_runner_for_model(model)
             logger.info("Unloading model %s", model)
             await client.unload_model(model)
             self._loaded_models.pop(model, None)
@@ -334,7 +378,7 @@ class Scheduler:
 
     async def _run_local_job(self, job_id: str, model: str, request: dict):
         """Execute a local inference job via runner agent."""
-        client = await self.get_runner_client()
+        client = await self._get_runner_for_model(model)
         kwargs = {}
         if "temperature" in request:
             kwargs["temperature"] = request["temperature"]
