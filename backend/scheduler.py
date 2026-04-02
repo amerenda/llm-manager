@@ -119,10 +119,16 @@ class Scheduler:
                 # Process remaining models (need loading)
                 any_failed = False
                 for model, batch in model_groups.items():
+                    # Mark jobs as loading_model so clients see progress
+                    for job in batch:
+                        await queue_db.update_job_status(self.pool, job["id"], "loading_model")
                     success = await self._ensure_model_loaded(model)
                     if success:
                         await self._process_batch(model, batch)
                     else:
+                        # Revert to queued so they're retried
+                        for job in batch:
+                            await queue_db.update_job_status(self.pool, job["id"], "queued")
                         any_failed = True
 
                 # Back off if we couldn't load any models — avoid tight loop
