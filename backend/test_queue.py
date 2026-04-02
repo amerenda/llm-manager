@@ -380,6 +380,10 @@ def _make_scheduler(loaded_models=None, gpu_info=None):
     sched._loaded_models = dict(loaded_models)
     # Also mock _get_gpu_info for tests that use _ensure_model_loaded
     sched._get_gpu_info = AsyncMock(return_value=gpu_info)
+    # Mock _vram_for_model to use the sync hardcoded estimate (avoids DB call)
+    from gpu import vram_for_model as _vram_sync
+    async def _vram(model): return _vram_sync(model)
+    sched._vram_for_model = _vram
     return sched
 
 
