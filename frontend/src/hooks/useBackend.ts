@@ -107,6 +107,8 @@ export interface ModelInfo {
   parameter_count: string | null
   quantization: string | null
   safety: string
+  categories: string[]
+  runners: { runner_id: number; hostname: string }[]
   downloaded: boolean
   loaded: boolean
   fits: boolean
@@ -118,6 +120,15 @@ export function useModelList() {
     queryKey: ['model-list'],
     queryFn: () => get('/api/models'),
     refetchInterval: 10_000,
+  })
+}
+
+export function useUpdateModelSettings() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ model, ...body }: { model: string; categories?: string[]; safety?: string; vram_estimate_gb?: number | null }) =>
+      patch<{ model_name: string }>(`/api/models/${encodeURIComponent(model)}/settings`, body),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['model-list'] }),
   })
 }
 
@@ -351,6 +362,20 @@ export function useUpdateAppPermissions() {
   return useMutation({
     mutationFn: ({ appId, allow_profile_switch }: { appId: number; allow_profile_switch: boolean }) =>
       patch<{ ok: boolean }>(`/api/apps/${appId}/permissions`, { allow_profile_switch }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['apps'] }),
+  })
+}
+
+export function useUpdateAppCategories() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ appId, allowed_categories, excluded_categories, allow_profile_switch }: {
+      appId: number
+      allow_profile_switch: boolean
+      allowed_categories: string[]
+      excluded_categories: string[]
+    }) =>
+      patch<{ ok: boolean }>(`/api/apps/${appId}/permissions`, { allow_profile_switch, allowed_categories, excluded_categories }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['apps'] }),
   })
 }

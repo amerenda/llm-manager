@@ -500,6 +500,7 @@ async def models_for_agents():
 
         # Get models from ALL runners via their agent API
         all_models_map: dict = {}  # name -> model dict
+        model_runners: dict = {}  # name -> [{runner_id, hostname}]
         loaded_names = set()
         for runner in runners_list:
             try:
@@ -509,6 +510,10 @@ async def models_for_agents():
                     name = m.get("id", "")
                     if name:
                         all_models_map[name] = m
+                        model_runners.setdefault(name, []).append({
+                            "runner_id": runner["id"],
+                            "hostname": runner["hostname"],
+                        })
                 status = await client.status()
                 for lm in status.get("loaded_ollama_models", []):
                     loaded_names.add(lm["name"])
@@ -519,13 +524,28 @@ async def models_for_agents():
         model_names = list(all_models_map.keys())
         safety_map = await classify_models_batch(pool, model_names)
 
-        # Load library cache for enrichment (fallback for :latest tags)
+        # Load model_settings for categories/safety overrides
+        model_settings_map: dict = {}
+        try:
+            rows = await queue_db.get_all_model_settings(pool)
+            for r in rows:
+                model_settings_map[r["model_name"]] = r
+        except Exception:
+            pass
+
+        # Load library cache for enrichment (fallback for :latest tags) and categories
         library_cache = {}
+        library_categories: dict = {}
         try:
             async with pool.acquire() as conn:
-                rows = await conn.fetch("SELECT name, parameter_sizes FROM ollama_library_cache")
+                rows = await conn.fetch("SELECT name, parameter_sizes, categories FROM ollama_library_cache")
                 for row in rows:
                     library_cache[row["name"]] = row["parameter_sizes"]
+                    cats = row["categories"]
+                    if isinstance(cats, str):
+                        import json
+                        cats = json.loads(cats)
+                    library_categories[row["name"]] = cats or []
         except Exception:
             pass
 
@@ -568,13 +588,23 @@ async def models_for_agents():
                 elif sizes:
                     # :latest is typically the smallest or default size
                     param_count = f"{sizes[0]} (default)"
+            # Categories: prefer model_settings override, else library cache by base name
+            ms = model_settings_map.get(name, {})
+            categories = list(ms.get("categories") or [])
+            if not categories:
+                base = name.split(":")[0]
+                categories = library_categories.get(base, [])
+            # Safety: prefer model_settings override, else pattern-based classification
+            safety = ms.get("safety") or safety_map.get(name, "safe")
             models.append({
                 "name": name,
                 "size_gb": size_gb,
                 "vram_estimate_gb": vram_est,
                 "parameter_count": param_count,
                 "quantization": quant,
-                "safety": safety_map.get(name, "safe"),
+                "safety": safety,
+                "categories": categories,
+                "runners": model_runners.get(name, []),
                 "downloaded": True,
                 "loaded": name in loaded_names,
                 "fits": len(fits_on) > 0,
@@ -1400,6 +1430,10 @@ async def list_apps():
         a_copy.setdefault("allow_profile_switch", False)
         a_copy.setdefault("allowed_runner_ids", [])
         a_copy["allowed_runner_ids"] = list(a_copy["allowed_runner_ids"] or [])
+        a_copy.setdefault("allowed_categories", [])
+        a_copy["allowed_categories"] = list(a_copy["allowed_categories"] or [])
+        a_copy.setdefault("excluded_categories", [])
+        a_copy["excluded_categories"] = list(a_copy["excluded_categories"] or [])
         a_copy["allowed_models"] = await db.get_app_allowed_models(app.state.db, a_copy["id"])
         result.append(a_copy)
     return result
@@ -1505,13 +1539,18 @@ async def approve_app_endpoint(app_id: int):
 
 class AppPermissionsRequest(BaseModel):
     allow_profile_switch: bool
+    allowed_categories: Optional[list[str]] = None
+    excluded_categories: Optional[list[str]] = None
 
 
 @app.patch("/api/apps/{app_id}/permissions")
 async def update_app_permissions_endpoint(app_id: int, req: AppPermissionsRequest):
     """Update permissions for an app."""
     _inc_request("/api/apps/permissions", "PATCH", 200)
-    found = await db.update_app_permissions(app.state.db, app_id, req.allow_profile_switch)
+    found = await db.update_app_permissions(
+        app.state.db, app_id, req.allow_profile_switch,
+        req.allowed_categories, req.excluded_categories,
+    )
     if not found:
         raise HTTPException(404, "App not found")
     return {"ok": True}

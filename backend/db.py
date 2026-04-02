@@ -170,8 +170,15 @@ async def init_db(pool: asyncpg.Pool) -> None:
             ("allow_profile_switch", "FALSE"),
             ("allow_unsafe", "FALSE"),
             ("allowed_runner_ids", "'{}'"),
+            ("allowed_categories", "'{}'"),
+            ("excluded_categories", "'{}'"),
         ]:
-            col_type = "TEXT" if col == "status" else "INTEGER[]" if col == "allowed_runner_ids" else "BOOLEAN"
+            col_type = (
+                "TEXT" if col == "status"
+                else "INTEGER[]" if col == "allowed_runner_ids"
+                else "TEXT[]" if col in ("allowed_categories", "excluded_categories")
+                else "BOOLEAN"
+            )
             try:
                 await conn.execute(
                     f"ALTER TABLE registered_apps ADD COLUMN {col} "
@@ -351,13 +358,21 @@ async def update_app_permissions(
     pool: asyncpg.Pool,
     app_id: int,
     allow_profile_switch: bool,
+    allowed_categories: Optional[list] = None,
+    excluded_categories: Optional[list] = None,
 ) -> bool:
     """Update app permissions. Returns False if not found."""
     async with pool.acquire() as conn:
         result = await conn.execute(
-            "UPDATE registered_apps SET allow_profile_switch = $1 WHERE id = $2",
+            """UPDATE registered_apps
+               SET allow_profile_switch = $1,
+                   allowed_categories = COALESCE($3, allowed_categories),
+                   excluded_categories = COALESCE($4, excluded_categories)
+               WHERE id = $2""",
             allow_profile_switch,
             app_id,
+            allowed_categories,
+            excluded_categories,
         )
     return result.endswith("1")
 
@@ -401,7 +416,8 @@ async def get_apps(pool: asyncpg.Pool) -> list[dict]:
         rows = await conn.fetch(
             """
             SELECT id, name, base_url, api_key, status, allow_profile_switch,
-                   allowed_runner_ids, last_seen, metadata, created_at
+                   allowed_runner_ids, allowed_categories, excluded_categories,
+                   last_seen, metadata, created_at
             FROM registered_apps
             ORDER BY name
             """

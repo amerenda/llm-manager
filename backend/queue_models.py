@@ -69,6 +69,9 @@ class ModelSettingsUpdate(BaseModel):
     do_not_evict: Optional[bool] = None
     evictable: Optional[bool] = None
     wait_for_completion: Optional[bool] = None
+    vram_estimate_gb: Optional[float] = None
+    categories: Optional[list[str]] = None
+    safety: Optional[str] = None
 
 
 class ModelSettings(BaseModel):
@@ -77,6 +80,8 @@ class ModelSettings(BaseModel):
     evictable: bool = True
     wait_for_completion: bool = True
     vram_estimate_gb: Optional[float] = None
+    categories: list[str] = []
+    safety: str = "safe"
 
 
 class EvictionError(BaseModel):

@@ -87,9 +87,27 @@ export interface RegisteredApp {
   allow_profile_switch: boolean
   allowed_models: string[]   // empty = unrestricted
   allowed_runner_ids: number[] // empty = any runner
+  allowed_categories: string[] // empty = no restriction
+  excluded_categories: string[] // empty = no restriction
   api_key_preview?: string
   last_seen: string | null   // ISO timestamp or null
   metadata: Record<string, unknown>
+}
+
+// An installed model from GET /api/models (enriched with categories/runners)
+export interface InstalledModel {
+  name: string
+  size_gb: number
+  vram_estimate_gb: number
+  parameter_count: string | null
+  quantization: string | null
+  safety: string
+  categories: string[]
+  runners: { runner_id: number; hostname: string }[]
+  downloaded: boolean
+  loaded: boolean
+  fits: boolean
+  fits_on: { runner: string; vram_total_gb: number }[]
 }
 
 // ── Profiles ────────────────────────────────────────────────────────────────

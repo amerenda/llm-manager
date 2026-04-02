@@ -52,6 +52,26 @@ async def _resolve_app(request: Request, authorization: Optional[str]) -> Option
     return row["id"]
 
 
+def _model_passes_category_filter(
+    model_categories: list,
+    allowed: list,
+    excluded: list,
+) -> bool:
+    """
+    Returns False if the model is blocked by the app's category permissions.
+
+    allowed_categories: model must have at least one of these (ignored if model has no categories)
+    excluded_categories: model is blocked only if ALL its categories are in excluded (ignored if model has no categories)
+    """
+    if not model_categories:
+        return True  # uncategorized models always pass
+    if allowed and not any(c in allowed for c in model_categories):
+        return False
+    if excluded and all(c in excluded for c in model_categories):
+        return False
+    return True
+
+
 async def _check_rate_limit(pool, app_id: int):
     """Check per-app rate limits."""
     if app_id is None:
@@ -77,6 +97,15 @@ async def submit_job(body: QueueJobRequest, request: Request,
     scheduler = _get_scheduler(request)
     app_id = await _resolve_app(request, authorization)
     await _check_rate_limit(pool, app_id)
+
+    # Category access check
+    if app_id is not None:
+        perms = await queue_db.get_app_category_perms(pool, app_id)
+        if perms["allowed_categories"] or perms["excluded_categories"]:
+            model_settings = await queue_db.get_model_settings(pool, body.model)
+            model_cats = list(model_settings.get("categories") or [])
+            if not _model_passes_category_filter(model_cats, perms["allowed_categories"], perms["excluded_categories"]):
+                raise HTTPException(403, "Model not accessible under app category restrictions")
 
     # Pre-check VRAM
     check = await scheduler.check_submission(body.model)
@@ -120,7 +149,19 @@ async def submit_batch(body: QueueBatchRequest, request: Request,
     batch_id = f"batch_{str(uuid.uuid4())[:8]}"
     jobs = []
 
+    # Fetch category perms once for the batch
+    _cat_perms = None
+    if app_id is not None:
+        _cat_perms = await queue_db.get_app_category_perms(pool, app_id)
+
     for job_req in body.jobs:
+        # Category access check
+        if _cat_perms and (_cat_perms["allowed_categories"] or _cat_perms["excluded_categories"]):
+            model_settings = await queue_db.get_model_settings(pool, job_req.model)
+            model_cats = list(model_settings.get("categories") or [])
+            if not _model_passes_category_filter(model_cats, _cat_perms["allowed_categories"], _cat_perms["excluded_categories"]):
+                raise HTTPException(403, f"Model {job_req.model} not accessible under app category restrictions")
+
         # Pre-check VRAM for each unique model
         check = await scheduler.check_submission(job_req.model)
         if not check["ok"]:
@@ -378,7 +419,7 @@ async def get_model_settings(model_name: str, request: Request):
 @model_router.patch("/{model_name}/settings", response_model=ModelSettings)
 async def update_model_settings(model_name: str, body: ModelSettingsUpdate, request: Request):
     pool = _get_pool(request)
-    updates = body.model_dump(exclude_none=True)
+    updates = {k: v for k, v in body.model_dump(exclude_unset=True).items() if v is not None}
     if updates:
         await queue_db.upsert_model_settings(pool, model_name, **updates)
     settings = await queue_db.get_model_settings(pool, model_name)

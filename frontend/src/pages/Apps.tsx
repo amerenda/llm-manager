@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { AppWindow, Plus, Loader2, CheckCircle2, AlertCircle, Copy, Check, Shield, RefreshCw, Cpu, X, Cloud, Server } from 'lucide-react'
-import { useApps, useRegisterApp, useApproveApp, useUpdateAppPermissions, useUpdateAppAllowedModels, useModelList, useCloudModels, useRunners, useUpdateAppAllowedRunners } from '../hooks/useBackend'
+import { useApps, useRegisterApp, useApproveApp, useUpdateAppPermissions, useUpdateAppAllowedModels, useModelList, useCloudModels, useRunners, useUpdateAppAllowedRunners, useUpdateAppCategories } from '../hooks/useBackend'
 import { StatusDot } from '../components/StatusDot'
 import type { RegisteredApp, Runner } from '../types'
 
@@ -268,6 +268,135 @@ function ModelRestrictionEditor({ appId, currentModels }: { appId: number; curre
   )
 }
 
+const STANDARD_CATEGORIES = ['tools', 'vision', 'thinking', 'embedding']
+
+function CategoryFilterEditor({ appId, currentAllowed, currentExcluded, allowProfileSwitch }: {
+  appId: number
+  currentAllowed: string[]
+  currentExcluded: string[]
+  allowProfileSwitch: boolean
+}) {
+  const [open, setOpen] = useState(false)
+  const [allowed, setAllowed] = useState<string[]>(currentAllowed)
+  const [excluded, setExcluded] = useState<string[]>(currentExcluded)
+  const [customCat, setCustomCat] = useState('')
+  const update = useUpdateAppCategories()
+
+  function toggleAllowed(cat: string) {
+    setAllowed(prev => prev.includes(cat) ? prev.filter(c => c !== cat) : [...prev, cat])
+    setExcluded(prev => prev.filter(c => c !== cat))  // can't be in both
+  }
+
+  function toggleExcluded(cat: string) {
+    setExcluded(prev => prev.includes(cat) ? prev.filter(c => c !== cat) : [...prev, cat])
+    setAllowed(prev => prev.filter(c => c !== cat))  // can't be in both
+  }
+
+  function addCustom() {
+    const c = customCat.trim().toLowerCase()
+    if (c && !allowed.includes(c) && !excluded.includes(c)) {
+      setAllowed(prev => [...prev, c])
+      setCustomCat('')
+    }
+  }
+
+  function save() {
+    update.mutate(
+      { appId, allow_profile_switch: allowProfileSwitch, allowed_categories: allowed, excluded_categories: excluded },
+      { onSuccess: () => setOpen(false) }
+    )
+  }
+
+  const hasFilter = currentAllowed.length > 0 || currentExcluded.length > 0
+
+  if (!open) {
+    return (
+      <button
+        onClick={() => { setAllowed(currentAllowed); setExcluded(currentExcluded); setOpen(true) }}
+        title={hasFilter ? `Category filter active` : 'No category filter'}
+        className={`flex items-center gap-1 text-xs px-2 py-1 rounded-lg transition-colors ${
+          hasFilter
+            ? 'bg-indigo-900/30 text-indigo-400 border border-indigo-800'
+            : 'bg-gray-800 text-gray-500 border border-gray-700 hover:border-gray-600'
+        }`}
+      >
+        <Shield className="w-3 h-3" />
+        {hasFilter ? `${currentAllowed.length + currentExcluded.length} cat filter` : 'No cat filter'}
+      </button>
+    )
+  }
+
+  const allCats = [...new Set([...STANDARD_CATEGORIES, ...allowed, ...excluded])]
+
+  return (
+    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={() => setOpen(false)}>
+      <div className="bg-gray-900 border border-gray-700 rounded-xl p-5 w-[28rem] max-h-[80vh] flex flex-col" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-sm font-semibold text-gray-200">Category Filters</h3>
+          <button onClick={() => setOpen(false)} className="text-gray-500 hover:text-gray-300"><X className="w-4 h-4" /></button>
+        </div>
+        <p className="text-[10px] text-gray-500 mb-4">
+          Require: app sees only models with at least one of these categories (uncategorized models always pass).<br />
+          Exclude: app cannot use models whose <em>only</em> categories are all in this set.
+        </p>
+
+        <div className="flex-1 overflow-y-auto space-y-3 mb-4">
+          <div className="grid grid-cols-3 gap-1 text-[10px] text-center mb-1">
+            <span className="text-gray-600">Category</span>
+            <span className="text-green-600">Require</span>
+            <span className="text-red-600">Exclude</span>
+          </div>
+          {allCats.map(cat => (
+            <div key={cat} className="grid grid-cols-3 gap-1 items-center">
+              <span className="text-xs text-gray-300">{cat}</span>
+              <div className="flex justify-center">
+                <button onClick={() => toggleAllowed(cat)}
+                  className={`w-6 h-6 rounded transition-colors ${
+                    allowed.includes(cat) ? 'bg-green-700 text-white' : 'bg-gray-800 text-gray-600 hover:bg-gray-700'
+                  }`}>
+                  {allowed.includes(cat) ? '✓' : ''}
+                </button>
+              </div>
+              <div className="flex justify-center">
+                <button onClick={() => toggleExcluded(cat)}
+                  className={`w-6 h-6 rounded transition-colors ${
+                    excluded.includes(cat) ? 'bg-red-800 text-white' : 'bg-gray-800 text-gray-600 hover:bg-gray-700'
+                  }`}>
+                  {excluded.includes(cat) ? '✓' : ''}
+                </button>
+              </div>
+            </div>
+          ))}
+          <div className="flex gap-2 mt-2">
+            <input type="text" value={customCat} onChange={e => setCustomCat(e.target.value)}
+              onKeyDown={e => e.key === 'Enter' && addCustom()}
+              placeholder="Add category"
+              className="flex-1 bg-gray-950 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-brand-600"
+            />
+            <button onClick={addCustom} disabled={!customCat.trim()}
+              className="text-xs px-2.5 py-1.5 rounded-lg bg-gray-800 text-gray-400 hover:bg-gray-700 disabled:opacity-30 transition-colors">
+              Add
+            </button>
+          </div>
+        </div>
+
+        <div className="border-t border-gray-800 pt-3">
+          <div className="flex gap-2">
+            <button onClick={() => { setAllowed([]); setExcluded([]) }}
+              className="flex-1 text-xs px-3 py-2 rounded-lg bg-gray-800 text-gray-400 hover:bg-gray-700 transition-colors">
+              Clear all
+            </button>
+            <button onClick={save} disabled={update.isPending}
+              className="flex-1 text-xs px-3 py-2 rounded-lg bg-brand-600 text-white hover:bg-brand-500 disabled:opacity-40 transition-colors">
+              {update.isPending ? 'Saving...' : 'Save'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function RunnerAffinityEditor({ appId, currentRunnerIds }: { appId: number; currentRunnerIds: number[] }) {
   const [open, setOpen] = useState(false)
   const [selected, setSelected] = useState<number[]>(currentRunnerIds)
@@ -476,6 +605,12 @@ export function Apps() {
                         {a.allow_profile_switch ? 'Profiles' : 'No profiles'}
                       </button>
                       <ModelRestrictionEditor appId={a.id} currentModels={a.allowed_models ?? []} />
+                      <CategoryFilterEditor
+                        appId={a.id}
+                        currentAllowed={a.allowed_categories ?? []}
+                        currentExcluded={a.excluded_categories ?? []}
+                        allowProfileSwitch={a.allow_profile_switch}
+                      />
                       <RunnerAffinityEditor appId={a.id} currentRunnerIds={a.allowed_runner_ids ?? []} />
                     </div>
                   </td>

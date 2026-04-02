@@ -34,6 +34,8 @@ CREATE TABLE IF NOT EXISTS model_settings (
     evictable BOOLEAN DEFAULT true,
     wait_for_completion BOOLEAN DEFAULT true,
     vram_estimate_gb REAL,
+    categories TEXT[] NOT NULL DEFAULT '{}',
+    safety TEXT NOT NULL DEFAULT 'safe',
     updated_at TIMESTAMPTZ DEFAULT now()
 );
 
@@ -49,6 +51,15 @@ CREATE TABLE IF NOT EXISTS app_rate_limits (
 async def init_queue_tables(pool: asyncpg.Pool):
     async with pool.acquire() as conn:
         await conn.execute(QUEUE_TABLES_SQL)
+        # Migrations for model_settings
+        for stmt in [
+            "ALTER TABLE model_settings ADD COLUMN IF NOT EXISTS categories TEXT[] NOT NULL DEFAULT '{}'",
+            "ALTER TABLE model_settings ADD COLUMN IF NOT EXISTS safety TEXT NOT NULL DEFAULT 'safe'",
+        ]:
+            try:
+                await conn.execute(stmt)
+            except Exception:
+                pass
     logger.info("Queue tables initialized")
 
 
@@ -187,6 +198,8 @@ async def get_model_settings(pool: asyncpg.Pool, model_name: str) -> dict:
         "evictable": True,
         "wait_for_completion": True,
         "vram_estimate_gb": None,
+        "categories": [],
+        "safety": "safe",
     }
 
 
@@ -410,6 +423,21 @@ async def list_recent_jobs(pool: asyncpg.Pool, limit: int = 50) -> list[dict]:
             d['metadata'] = _json.loads(d['metadata'])
         result.append(d)
     return result
+
+
+async def get_app_category_perms(pool: asyncpg.Pool, app_id: int) -> dict:
+    """Return allowed_categories and excluded_categories for an app."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT allowed_categories, excluded_categories FROM registered_apps WHERE id = $1",
+            app_id,
+        )
+    if not row:
+        return {"allowed_categories": [], "excluded_categories": []}
+    return {
+        "allowed_categories": list(row["allowed_categories"] or []),
+        "excluded_categories": list(row["excluded_categories"] or []),
+    }
 
 
 async def get_rate_limit(pool: asyncpg.Pool, app_id: int) -> dict:
