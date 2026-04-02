@@ -18,6 +18,13 @@ from scheduler import Scheduler
 
 logger = logging.getLogger(__name__)
 
+
+def _parse_jsonb(val):
+    """Parse JSONB value that asyncpg may return as a string."""
+    if isinstance(val, str):
+        return json.loads(val)
+    return val
+
 router = APIRouter(prefix="/api/queue", tags=["queue"])
 model_router = APIRouter(prefix="/api/models", tags=["models"])
 
@@ -146,19 +153,16 @@ async def get_job(job_id: str, request: Request):
     job = await queue_db.get_job(pool, job_id)
     if not job:
         raise HTTPException(404, "Job not found")
-    meta = job.get("metadata")
-    if isinstance(meta, str):
-        meta = json.loads(meta)
     return QueueJobResult(
         job_id=job["id"],
         status=job["status"],
         model=job["model"],
-        result=job.get("result"),
+        result=_parse_jsonb(job.get("result")),
         error=job.get("error"),
         created_at=job["created_at"].isoformat() if job.get("created_at") else None,
         started_at=job["started_at"].isoformat() if job.get("started_at") else None,
         completed_at=job["completed_at"].isoformat() if job.get("completed_at") else None,
-        metadata=meta,
+        metadata=_parse_jsonb(job.get("metadata")),
     )
 
 
@@ -182,12 +186,12 @@ async def get_batch(batch_id: str, request: Request):
                 job_id=j["id"],
                 status=j["status"],
                 model=j["model"],
-                result=j.get("result"),
+                result=_parse_jsonb(j.get("result")),
                 error=j.get("error"),
                 created_at=j["created_at"].isoformat() if j.get("created_at") else None,
                 started_at=j["started_at"].isoformat() if j.get("started_at") else None,
                 completed_at=j["completed_at"].isoformat() if j.get("completed_at") else None,
-                metadata=json.loads(j["metadata"]) if isinstance(j.get("metadata"), str) else j.get("metadata"),
+                metadata=_parse_jsonb(j.get("metadata")),
             ) for j in jobs
         ],
     )
@@ -227,7 +231,7 @@ async def wait_for_job(job_id: str, request: Request):
                 "model": job["model"],
             }
             if status == "completed":
-                event["result"] = job.get("result")
+                event["result"] = _parse_jsonb(job.get("result"))
                 yield f"data: {json.dumps(event)}\n\n"
                 break
             elif status in ("failed", "cancelled"):
