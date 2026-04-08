@@ -169,10 +169,18 @@ function InstalledModelsView({ runners, selectedRunner, selectedRunnerHostname }
   const allLoadedModels = status.data?.loaded_ollama_models ?? []
   const runnerStatuses = status.data?.runners ?? []
 
+  const [searchFilter, setSearchFilter] = useState('')
+  const [safetyFilter, setSafetyFilter] = useState('')
+  const [capFilter, setCapFilter] = useState('')
+
   const allModels = (modelList.data ?? []).sort((a, b) => a.name.localeCompare(b.name))
-  const models = selectedRunner !== undefined
+  const models = (selectedRunner !== undefined
     ? allModels.filter(m => (m.runners ?? []).some(r => r.runner_id === selectedRunner))
     : allModels
+  )
+    .filter(m => !searchFilter || m.name.toLowerCase().includes(searchFilter.toLowerCase()))
+    .filter(m => !safetyFilter || m.safety === safetyFilter)
+    .filter(m => !capFilter || (m.categories ?? []).includes(capFilter))
 
   async function handlePull() {
     const name = pullInput.trim()
@@ -295,6 +303,46 @@ function InstalledModelsView({ runners, selectedRunner, selectedRunnerHostname }
           )}
         </div>
       )}
+
+      {/* Filters */}
+      <div className="flex flex-wrap gap-2 items-center">
+        <div className="relative flex-1 min-w-[160px]">
+          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-600 pointer-events-none" />
+          <input
+            type="text"
+            value={searchFilter}
+            onChange={e => setSearchFilter(e.target.value)}
+            placeholder="Filter models…"
+            className="w-full bg-gray-900 border border-gray-800 rounded-lg pl-8 pr-3 py-1.5 text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-brand-600"
+          />
+        </div>
+        <div className="flex gap-1">
+          {(['', 'safe', 'unsafe'] as const).map(s => (
+            <button key={s} onClick={() => setSafetyFilter(s)}
+              className={`text-xs px-2.5 py-1.5 rounded-lg transition-colors border ${
+                safetyFilter === s
+                  ? s === 'unsafe' ? 'bg-red-900/50 text-red-400 border-red-700'
+                    : s === 'safe' ? 'bg-green-900/50 text-green-400 border-green-700'
+                    : 'bg-gray-700 text-gray-200 border-gray-600'
+                  : 'bg-gray-900 text-gray-500 hover:bg-gray-800 border-transparent'
+              }`}>
+              {s === '' ? 'All' : s === 'safe' ? 'Safe' : 'Unsafe'}
+            </button>
+          ))}
+        </div>
+        <div className="flex gap-1">
+          {STANDARD_CATEGORIES.map(cat => (
+            <button key={cat} onClick={() => setCapFilter(capFilter === cat ? '' : cat)}
+              className={`text-xs px-2.5 py-1.5 rounded-lg transition-colors border ${
+                capFilter === cat
+                  ? 'bg-indigo-900/50 text-indigo-300 border-indigo-700'
+                  : 'bg-gray-900 text-gray-500 hover:bg-gray-800 border-transparent'
+              }`}>
+              {cat}
+            </button>
+          ))}
+        </div>
+      </div>
 
       {/* Model list */}
       <div className="space-y-2">
