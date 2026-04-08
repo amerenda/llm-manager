@@ -1650,6 +1650,31 @@ async def llm_unload_model(req: ModelUnloadRequest, runner_id: Optional[int] = N
     return {"ok": True, "op_id": op_id, "message": f"Unloading {req.model} in background"}
 
 
+@app.post("/api/llm/runners/{runner_id}/flush")
+async def flush_runner_vram(runner_id: int):
+    """Unload all models from VRAM on a specific runner."""
+    _inc_request(f"/api/llm/runners/{runner_id}/flush", "POST", 200)
+    op_id = f"flush-{runner_id}-{id(runner_id)}"
+    _ops[op_id] = {"status": "running", "model": "all", "type": "flush"}
+
+    async def _do_flush():
+        try:
+            client = await _get_runner_client(app.state.db, runner_id)
+            status = await client.status()
+            for m in status.get("loaded_ollama_models", []):
+                try:
+                    await client.unload_model_from_vram(m["name"])
+                except Exception as e:
+                    logger.warning("Failed to unload %s during flush: %s", m["name"], e)
+            _ops[op_id]["status"] = "completed"
+        except Exception as e:
+            _ops[op_id]["status"] = "failed"
+            _ops[op_id]["error"] = str(e)
+
+    asyncio.create_task(_do_flush())
+    return {"ok": True, "op_id": op_id, "message": f"Flushing all models from runner {runner_id}"}
+
+
 # ── Profiles ──────────────────────────────────────────────────────────────────
 
 class ProfileCreateRequest(BaseModel):

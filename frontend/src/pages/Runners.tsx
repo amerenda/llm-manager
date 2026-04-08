@@ -1,6 +1,6 @@
 import { useState } from 'react'
-import { Server, Cpu, HardDrive, MemoryStick, Volume2, RefreshCw, Power, Upload, AlertCircle, ChevronDown, ChevronRight, Play } from 'lucide-react'
-import { useRunners, useUpdateRunner, useAgentTargetVersion, useSetAgentTargetVersion, useRunnerStatus, useTriggerRunnerUpdate } from '../hooks/useBackend'
+import { Server, Cpu, HardDrive, MemoryStick, Volume2, RefreshCw, Power, Upload, AlertCircle, ChevronDown, ChevronRight, Play, Loader2, Zap } from 'lucide-react'
+import { useRunners, useUpdateRunner, useAgentTargetVersion, useSetAgentTargetVersion, useRunnerStatus, useTriggerRunnerUpdate, useFlushRunnerVram } from '../hooks/useBackend'
 import { StatusDot } from '../components/StatusDot'
 import type { Runner } from '../types'
 
@@ -38,9 +38,11 @@ function RunnerDetail({ runner, target }: { runner: Runner; target: string }) {
   const status = useRunnerStatus(runner.id)
   const update = useUpdateRunner()
   const triggerUpdate = useTriggerRunnerUpdate()
+  const flushVram = useFlushRunnerVram()
   const [updateVersion, setUpdateVersion] = useState('')
   const caps = runner.capabilities
   const s = status.data
+  const isGpu = !!caps.gpu_vram_total_bytes
 
   const isOutdated = target && caps.agent_version && caps.agent_version !== target
 
@@ -145,6 +147,21 @@ function RunnerDetail({ runner, target }: { runner: Runner; target: string }) {
           />
           <span className="text-xs text-gray-400">Enabled</span>
         </label>
+
+        {/* Flush VRAM — GPU runners only */}
+        {isGpu && (
+          <button
+            onClick={() => {
+              if (window.confirm(`Unload all models from VRAM on ${runner.hostname}?`))
+                flushVram.mutate(runner.id)
+            }}
+            disabled={flushVram.isPending}
+            className="ml-auto flex items-center gap-1 text-xs bg-orange-900/30 hover:bg-orange-800/40 text-orange-400 border border-orange-800/50 px-2.5 py-1 rounded-lg transition-colors disabled:opacity-40"
+          >
+            {flushVram.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Zap className="w-3 h-3" />}
+            Flush VRAM
+          </button>
+        )}
       </div>
 
       {/* Version management */}

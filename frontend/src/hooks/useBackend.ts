@@ -231,6 +231,18 @@ export function useUnloadFromVram() {
   })
 }
 
+export function useFlushRunnerVram() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (runner_id: number) =>
+      post<{ ok: boolean }>(`/api/llm/runners/${runner_id}/flush`),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: ['llm-status'] })
+      qc.invalidateQueries({ queryKey: ['runners'] })
+    },
+  })
+}
+
 // ── ComfyUI ───────────────────────────────────────────────────────────────────
 
 export function useCheckpoints() {
