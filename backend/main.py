@@ -1652,27 +1652,44 @@ async def llm_unload_model(req: ModelUnloadRequest, runner_id: Optional[int] = N
 
 @app.post("/api/llm/runners/{runner_id}/flush")
 async def flush_runner_vram(runner_id: int):
-    """Unload all models from VRAM on a specific runner."""
+    """Unload all models from VRAM on a specific runner. Synchronous — waits for completion."""
     _inc_request(f"/api/llm/runners/{runner_id}/flush", "POST", 200)
-    op_id = f"flush-{runner_id}-{id(runner_id)}"
-    _ops[op_id] = {"status": "running", "model": "all", "type": "flush"}
+    client = await _get_runner_client(app.state.db, runner_id)
+    status = await client.status()
+    loaded = status.get("loaded_ollama_models", [])
 
-    async def _do_flush():
+    if not loaded:
+        return {
+            "ok": True,
+            "unloaded": [],
+            "message": "No models reported as loaded by Ollama. If VRAM is still full, try restarting Ollama.",
+        }
+
+    unloaded = []
+    errors = []
+    for m in loaded:
         try:
-            client = await _get_runner_client(app.state.db, runner_id)
-            status = await client.status()
-            for m in status.get("loaded_ollama_models", []):
-                try:
-                    await client.unload_model_from_vram(m["name"])
-                except Exception as e:
-                    logger.warning("Failed to unload %s during flush: %s", m["name"], e)
-            _ops[op_id]["status"] = "completed"
+            await client.unload_model_from_vram(m["name"])
+            unloaded.append(m["name"])
         except Exception as e:
-            _ops[op_id]["status"] = "failed"
-            _ops[op_id]["error"] = str(e)
+            logger.warning("Failed to unload %s during flush: %s", m["name"], e)
+            errors.append({"model": m["name"], "error": str(e)})
 
-    asyncio.create_task(_do_flush())
-    return {"ok": True, "op_id": op_id, "message": f"Flushing all models from runner {runner_id}"}
+    return {
+        "ok": True,
+        "unloaded": unloaded,
+        "errors": errors,
+        "message": f"Unloaded {len(unloaded)} model(s)" + (f", {len(errors)} error(s)" if errors else ""),
+    }
+
+
+@app.post("/api/llm/runners/{runner_id}/restart-ollama")
+async def restart_runner_ollama(runner_id: int):
+    """Restart Ollama on the runner (requires OLLAMA_CONTAINER configured on agent)."""
+    _inc_request(f"/api/llm/runners/{runner_id}/restart-ollama", "POST", 200)
+    client = await _get_runner_client(app.state.db, runner_id)
+    result = await client.restart_ollama()
+    return result
 
 
 # ── Profiles ──────────────────────────────────────────────────────────────────

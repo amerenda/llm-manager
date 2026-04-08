@@ -189,6 +189,13 @@ class LLMAgentClient:
             r.raise_for_status()
             return r.json()
 
+    async def restart_ollama(self) -> dict:
+        """Restart the Ollama container on this runner (requires OLLAMA_CONTAINER on agent)."""
+        async with self._client(timeout=httpx.Timeout(30.0)) as c:
+            r = await c.post(f"{self.base_url}/v1/ollama/restart", headers=self._headers)
+            r.raise_for_status()
+            return r.json()
+
     # ── Agent management ───────────────────────────────────────────────────────
 
     async def trigger_update(self, target_version: str) -> dict:

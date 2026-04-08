@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Server, Cpu, HardDrive, MemoryStick, Volume2, RefreshCw, Power, Upload, AlertCircle, ChevronDown, ChevronRight, Play, Loader2, Zap } from 'lucide-react'
-import { useRunners, useUpdateRunner, useAgentTargetVersion, useSetAgentTargetVersion, useRunnerStatus, useTriggerRunnerUpdate, useFlushRunnerVram } from '../hooks/useBackend'
+import { useRunners, useUpdateRunner, useAgentTargetVersion, useSetAgentTargetVersion, useRunnerStatus, useTriggerRunnerUpdate, useFlushRunnerVram, useRestartOllama } from '../hooks/useBackend'
 import { StatusDot } from '../components/StatusDot'
 import type { Runner } from '../types'
 
@@ -39,7 +39,9 @@ function RunnerDetail({ runner, target }: { runner: Runner; target: string }) {
   const update = useUpdateRunner()
   const triggerUpdate = useTriggerRunnerUpdate()
   const flushVram = useFlushRunnerVram()
+  const restartOllama = useRestartOllama()
   const [updateVersion, setUpdateVersion] = useState('')
+  const [flushMsg, setFlushMsg] = useState<string | null>(null)
   const caps = runner.capabilities
   const s = status.data
   const isGpu = !!caps.gpu_vram_total_bytes
@@ -148,21 +150,47 @@ function RunnerDetail({ runner, target }: { runner: Runner; target: string }) {
           <span className="text-xs text-gray-400">Enabled</span>
         </label>
 
-        {/* Flush VRAM — GPU runners only */}
+        {/* Flush VRAM + Restart Ollama — GPU runners only */}
         {isGpu && (
-          <button
-            onClick={() => {
-              if (window.confirm(`Unload all models from VRAM on ${runner.hostname}?`))
-                flushVram.mutate(runner.id)
-            }}
-            disabled={flushVram.isPending}
-            className="ml-auto flex items-center gap-1 text-xs bg-orange-900/30 hover:bg-orange-800/40 text-orange-400 border border-orange-800/50 px-2.5 py-1 rounded-lg transition-colors disabled:opacity-40"
-          >
-            {flushVram.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Zap className="w-3 h-3" />}
-            Flush VRAM
-          </button>
+          <div className="ml-auto flex items-center gap-1.5">
+            <button
+              onClick={() => {
+                if (window.confirm(`Unload all models from VRAM on ${runner.hostname}?`)) {
+                  setFlushMsg(null)
+                  flushVram.mutate(runner.id, {
+                    onSuccess: (data) => setFlushMsg(data.message),
+                    onError: (e) => setFlushMsg(`Error: ${(e as Error).message}`),
+                  })
+                }
+              }}
+              disabled={flushVram.isPending}
+              className="flex items-center gap-1 text-xs bg-orange-900/30 hover:bg-orange-800/40 text-orange-400 border border-orange-800/50 px-2.5 py-1 rounded-lg transition-colors disabled:opacity-40"
+            >
+              {flushVram.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Zap className="w-3 h-3" />}
+              Flush VRAM
+            </button>
+            <button
+              onClick={() => {
+                if (window.confirm(`Restart Ollama on ${runner.hostname}? This will briefly interrupt inference.`)) {
+                  setFlushMsg(null)
+                  restartOllama.mutate(runner.id, {
+                    onSuccess: (data) => setFlushMsg(data.message),
+                    onError: (e) => setFlushMsg(`Error: ${(e as Error).message}`),
+                  })
+                }
+              }}
+              disabled={restartOllama.isPending}
+              className="flex items-center gap-1 text-xs bg-red-900/30 hover:bg-red-800/40 text-red-400 border border-red-800/50 px-2.5 py-1 rounded-lg transition-colors disabled:opacity-40"
+            >
+              {restartOllama.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Power className="w-3 h-3" />}
+              Restart Ollama
+            </button>
+          </div>
         )}
       </div>
+      {flushMsg && (
+        <p className="text-xs text-amber-400 mt-1">{flushMsg}</p>
+      )}
 
       {/* Version management */}
       <div className="border-t border-gray-800 pt-3 space-y-2">

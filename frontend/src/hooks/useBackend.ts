@@ -235,7 +235,19 @@ export function useFlushRunnerVram() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: (runner_id: number) =>
-      post<{ ok: boolean }>(`/api/llm/runners/${runner_id}/flush`),
+      post<{ ok: boolean; unloaded: string[]; errors: { model: string; error: string }[]; message: string }>(`/api/llm/runners/${runner_id}/flush`),
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: ['llm-status'] })
+      qc.invalidateQueries({ queryKey: ['runners'] })
+    },
+  })
+}
+
+export function useRestartOllama() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (runner_id: number) =>
+      post<{ ok: boolean; message: string }>(`/api/llm/runners/${runner_id}/restart-ollama`),
     onSettled: () => {
       qc.invalidateQueries({ queryKey: ['llm-status'] })
       qc.invalidateQueries({ queryKey: ['runners'] })

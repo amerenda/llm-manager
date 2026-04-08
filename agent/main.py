@@ -80,6 +80,7 @@ COMFYUI_URL = os.environ.get("COMFYUI_URL", "http://localhost:8188")
 COMFYUI_OUTPUT_DIR = os.environ.get("COMFYUI_OUTPUT_DIR", "/outputs")
 COMFYUI_IMAGE = os.environ.get("COMFYUI_IMAGE", "murderbot-image-comfyui:latest")
 COMFYUI_CONTAINER = os.environ.get("COMFYUI_CONTAINER", "comfyui")
+OLLAMA_CONTAINER = os.environ.get("OLLAMA_CONTAINER", "")
 NODE = socket.gethostname()
 
 # Docker client for managing ComfyUI container
@@ -1185,6 +1186,25 @@ async def stop_comfyui():
         return {"ok": True, "message": "ComfyUI container not found (already stopped)"}
     except Exception as e:
         raise HTTPException(500, f"Failed to stop ComfyUI: {e}")
+
+
+# ── Ollama lifecycle ──────────────────────────────────────────────────────────
+
+@app.post("/v1/ollama/restart")
+async def restart_ollama():
+    """Restart the Ollama container to clear stuck VRAM. Requires OLLAMA_CONTAINER env var."""
+    if not OLLAMA_CONTAINER:
+        raise HTTPException(503, "OLLAMA_CONTAINER not configured — cannot restart Ollama via Docker")
+    if not _DOCKER_OK:
+        raise HTTPException(503, "Docker not available")
+    try:
+        container = _docker.containers.get(OLLAMA_CONTAINER)
+        container.restart(timeout=15)
+        return {"ok": True, "message": f"Ollama container '{OLLAMA_CONTAINER}' restarted"}
+    except docker_lib.errors.NotFound:
+        raise HTTPException(404, f"Container '{OLLAMA_CONTAINER}' not found")
+    except Exception as e:
+        raise HTTPException(500, f"Failed to restart Ollama: {e}")
 
 
 @app.get("/metrics")
