@@ -583,11 +583,13 @@ export function useProfileActivations() {
 // ── Operations (background pull/sync tracking) ─────────────────────────────
 
 export interface Op {
+  op_id?: string
   status: 'running' | 'completed' | 'failed'
   model: string
   type: string
   progress?: string
   error?: string
+  target?: string
 }
 
 export function useOps(enabled = true) {

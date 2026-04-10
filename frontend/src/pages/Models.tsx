@@ -561,7 +561,8 @@ function LibraryBrowserSection({ selectedRunner, selectedRunnerHostname, allRunn
     const failed = failedOps.find(op => op.model === model || model.startsWith(op.model + ':') || op.model.startsWith(model + ':'))
     if (failed) return { status: 'failed' as const, error: failed.error }
     const completed = completedOps.find(op => op.model === model || model.startsWith(op.model + ':') || op.model.startsWith(model + ':'))
-    if (completed) return { status: 'completed' as const }
+    // Only show "done" if the model is actually still downloaded on a runner
+    if (completed && downloadedNames.has(model)) return { status: 'completed' as const }
     if (isModelPulling(model)) return { status: 'running' as const }
     return null
   }

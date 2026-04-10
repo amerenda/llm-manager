@@ -68,8 +68,8 @@ UAT_TEST_RUNNER = os.environ.get("UAT_TEST_RUNNER", "")  # runner_id for UAT con
 UAT_TEST_MODEL = os.environ.get("UAT_TEST_MODEL", "")  # model name for UAT connectivity tests
 NODE = socket.gethostname()
 
-# Background operations tracker (pull, load, unload)
-_ops: dict[str, dict] = {}
+# Background operations are now stored in PostgreSQL (background_ops table)
+# to ensure consistent state across multiple backend replicas.
 
 # ── Prometheus metrics ────────────────────────────────────────────────────────
 
@@ -1047,19 +1047,23 @@ async def llm_pull_model(req: LLMPullRequest, runner_id: Optional[int] = None):
         pass  # non-critical, proceed with pull
 
     op_id = f"pull-{req.model}-{id(req)}"
-    _ops[op_id] = {"status": "running", "model": req.model, "type": "pull", "progress": ""}
+    pool = app.state.db
+    await db.create_op(pool, op_id, "pull", req.model)
 
     async def _do_pull():
         try:
-            client = await _get_runner_client(app.state.db, runner_id)
+            client = await _get_runner_client(pool, runner_id)
             last_status = ""
+            last_write = 0.0
             async for chunk in client.pull_model(req.model):
                 last_status = chunk.decode().strip()
-                _ops[op_id]["progress"] = last_status
-            _ops[op_id]["status"] = "completed"
+                now = asyncio.get_event_loop().time()
+                if now - last_write >= 1.0:
+                    await db.update_op(pool, op_id, progress=last_status)
+                    last_write = now
+            await db.update_op(pool, op_id, status="completed", progress=last_status)
         except Exception as e:
-            _ops[op_id]["status"] = "failed"
-            _ops[op_id]["error"] = str(e)
+            await db.update_op(pool, op_id, status="failed", error=str(e))
 
     asyncio.create_task(_do_pull())
     msg = f"Pulling {req.model} in background"
@@ -1073,17 +1077,23 @@ async def update_model(model: str, runner_id: Optional[int] = None):
     """Pull the latest version of an already-downloaded model. Runs in background."""
     _inc_request("/api/models/update", "POST", 200)
     op_id = f"update-{model}-{id(model)}"
-    _ops[op_id] = {"status": "running", "model": model, "type": "update", "progress": ""}
+    pool = app.state.db
+    await db.create_op(pool, op_id, "update", model)
 
     async def _do_update():
         try:
-            client = await _get_runner_client(app.state.db, runner_id)
+            client = await _get_runner_client(pool, runner_id)
+            last_status = ""
+            last_write = 0.0
             async for chunk in client.pull_model(model):
-                _ops[op_id]["progress"] = chunk.decode().strip()
-            _ops[op_id]["status"] = "completed"
+                last_status = chunk.decode().strip()
+                now = asyncio.get_event_loop().time()
+                if now - last_write >= 1.0:
+                    await db.update_op(pool, op_id, progress=last_status)
+                    last_write = now
+            await db.update_op(pool, op_id, status="completed", progress=last_status)
         except Exception as e:
-            _ops[op_id]["status"] = "failed"
-            _ops[op_id]["error"] = str(e)
+            await db.update_op(pool, op_id, status="failed", error=str(e))
 
     asyncio.create_task(_do_update())
     return {"ok": True, "op_id": op_id, "message": f"Updating {model} in background"}
@@ -1195,18 +1205,22 @@ async def sync_models():
     # Trigger pulls in background
     for p in unique_pulls:
         op_id = f"sync-{p['model']}-{p['target_runner_id']}"
-        _ops[op_id] = {"status": "running", "model": p["model"], "type": "sync",
-                       "target": p["target_runner"], "progress": ""}
+        await db.create_op(pool, op_id, "sync", p["model"], target=p["target_runner"])
 
         async def _do_sync_pull(model=p["model"], rid=p["target_runner_id"], oid=op_id):
             try:
                 client = await _get_runner_client(pool, rid)
+                last_status = ""
+                last_write = 0.0
                 async for chunk in client.pull_model(model):
-                    _ops[oid]["progress"] = chunk.decode().strip()
-                _ops[oid]["status"] = "completed"
+                    last_status = chunk.decode().strip()
+                    now = asyncio.get_event_loop().time()
+                    if now - last_write >= 1.0:
+                        await db.update_op(pool, oid, progress=last_status)
+                        last_write = now
+                await db.update_op(pool, oid, status="completed", progress=last_status)
             except Exception as e:
-                _ops[oid]["status"] = "failed"
-                _ops[oid]["error"] = str(e)
+                await db.update_op(pool, oid, status="failed", error=str(e))
 
         asyncio.create_task(_do_sync_pull())
 
@@ -1220,19 +1234,16 @@ async def sync_models():
 @app.get("/api/ops")
 async def list_operations():
     """List all background operations and their status."""
-    # Clean up old completed ops (keep last 20)
-    completed = [k for k, v in _ops.items() if v["status"] in ("completed", "failed")]
-    for k in completed[:-20]:
-        del _ops[k]
-    return list(_ops.values())
+    return await db.get_ops(app.state.db)
 
 
 @app.get("/api/ops/{op_id}")
 async def get_operation(op_id: str):
     """Get status of a background operation."""
-    if op_id not in _ops:
+    op = await db.get_op(app.state.db, op_id)
+    if op is None:
         raise HTTPException(404, "Operation not found")
-    return _ops[op_id]
+    return op
 
 
 @app.post("/api/llm/models/delete")
@@ -1611,16 +1622,16 @@ async def llm_load_model(req: ModelLoadRequest, runner_id: Optional[int] = None)
     """Load a model into VRAM. Runs in background."""
     _inc_request("/api/llm/models/load", "POST", 200)
     op_id = f"load-{req.model}-{id(req)}"
-    _ops[op_id] = {"status": "running", "model": req.model, "type": "load"}
+    pool = app.state.db
+    await db.create_op(pool, op_id, "load", req.model)
 
     async def _do_load():
         try:
-            client = await _get_runner_client(app.state.db, runner_id)
+            client = await _get_runner_client(pool, runner_id)
             await client.load_model(req.model, req.keep_alive)
-            _ops[op_id]["status"] = "completed"
+            await db.update_op(pool, op_id, status="completed")
         except Exception as e:
-            _ops[op_id]["status"] = "failed"
-            _ops[op_id]["error"] = str(e)
+            await db.update_op(pool, op_id, status="failed", error=str(e))
 
     asyncio.create_task(_do_load())
     return {"ok": True, "op_id": op_id, "message": f"Loading {req.model} in background"}
@@ -1635,16 +1646,16 @@ async def llm_unload_model(req: ModelUnloadRequest, runner_id: Optional[int] = N
     """Unload a model from VRAM. Runs in background."""
     _inc_request("/api/llm/models/unload", "POST", 200)
     op_id = f"unload-{req.model}-{id(req)}"
-    _ops[op_id] = {"status": "running", "model": req.model, "type": "unload"}
+    pool = app.state.db
+    await db.create_op(pool, op_id, "unload", req.model)
 
     async def _do_unload():
         try:
-            client = await _get_runner_client(app.state.db, runner_id)
+            client = await _get_runner_client(pool, runner_id)
             await client.unload_model_from_vram(req.model)
-            _ops[op_id]["status"] = "completed"
+            await db.update_op(pool, op_id, status="completed")
         except Exception as e:
-            _ops[op_id]["status"] = "failed"
-            _ops[op_id]["error"] = str(e)
+            await db.update_op(pool, op_id, status="failed", error=str(e))
 
     asyncio.create_task(_do_unload())
     return {"ok": True, "op_id": op_id, "message": f"Unloading {req.model} in background"}

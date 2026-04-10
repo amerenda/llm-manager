@@ -137,6 +137,21 @@ CREATE TABLE IF NOT EXISTS api_keys (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_api_keys_provider_user
     ON api_keys (provider, COALESCE(user_id, 0));
 
+CREATE TABLE IF NOT EXISTS background_ops (
+    op_id TEXT PRIMARY KEY,
+    op_type TEXT NOT NULL,
+    model TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'running',
+    progress TEXT NOT NULL DEFAULT '',
+    error TEXT,
+    target TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_background_ops_status
+    ON background_ops (status);
+
 CREATE TABLE IF NOT EXISTS cloud_model_config (
     model_id TEXT PRIMARY KEY,
     provider TEXT NOT NULL DEFAULT 'anthropic',
@@ -1125,3 +1140,90 @@ async def delete_cloud_model_config(pool: asyncpg.Pool, model_id: str) -> bool:
         result = await conn.execute(
             "DELETE FROM cloud_model_config WHERE model_id = $1", model_id)
     return "DELETE 1" in result
+
+
+# ── Background operations ────────────────────────────────────────────────────
+
+async def create_op(
+    pool: asyncpg.Pool,
+    op_id: str,
+    op_type: str,
+    model: str,
+    target: Optional[str] = None,
+) -> None:
+    """Create a new background operation."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO background_ops (op_id, op_type, model, status, progress, target, created_at, updated_at)
+            VALUES ($1, $2, $3, 'running', '', $4, NOW(), NOW())
+            ON CONFLICT (op_id) DO UPDATE SET
+                status = 'running', progress = '', error = NULL,
+                updated_at = NOW()
+            """,
+            op_id, op_type, model, target,
+        )
+
+
+async def update_op(
+    pool: asyncpg.Pool,
+    op_id: str,
+    status: Optional[str] = None,
+    progress: Optional[str] = None,
+    error: Optional[str] = None,
+) -> None:
+    """Update fields on a background operation."""
+    parts = ["updated_at = NOW()"]
+    vals: list = []
+    idx = 1
+    if status is not None:
+        idx += 1
+        parts.append(f"status = ${idx}")
+        vals.append(status)
+    if progress is not None:
+        idx += 1
+        parts.append(f"progress = ${idx}")
+        vals.append(progress)
+    if error is not None:
+        idx += 1
+        parts.append(f"error = ${idx}")
+        vals.append(error)
+    sql = f"UPDATE background_ops SET {', '.join(parts)} WHERE op_id = $1"
+    async with pool.acquire() as conn:
+        await conn.execute(sql, op_id, *vals)
+
+
+async def get_ops(pool: asyncpg.Pool) -> list[dict]:
+    """Return all ops, auto-expiring completed/failed ops older than 5 minutes."""
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            DELETE FROM background_ops
+            WHERE status IN ('completed', 'failed')
+              AND updated_at < NOW() - INTERVAL '5 minutes'
+            """
+        )
+        rows = await conn.fetch(
+            """
+            SELECT op_id, op_type AS type, model, status, progress, error, target,
+                   created_at, updated_at
+            FROM background_ops
+            ORDER BY created_at DESC
+            """
+        )
+    return [dict(r) for r in rows]
+
+
+async def get_op(pool: asyncpg.Pool, op_id: str) -> Optional[dict]:
+    """Return a single op by id."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT op_id, op_type AS type, model, status, progress, error, target,
+                   created_at, updated_at
+            FROM background_ops
+            WHERE op_id = $1
+            """,
+            op_id,
+        )
+    return dict(row) if row else None
