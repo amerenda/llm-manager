@@ -1020,6 +1020,23 @@ async def llm_models(runner_id: Optional[int] = None):
         except Exception:
             pass
 
+    # Enrich with categories from model_settings or library cache
+    for mid, m in model_map.items():
+        try:
+            settings = await queue_db.get_model_settings(pool, mid)
+            cats = list(settings.get("categories") or [])
+            if not cats:
+                base = mid.split(":")[0]
+                async with pool.acquire() as conn:
+                    row = await conn.fetchrow(
+                        "SELECT categories FROM ollama_library_cache WHERE name = $1", base)
+                if row and row["categories"]:
+                    c = row["categories"]
+                    cats = json.loads(c) if isinstance(c, str) else list(c)
+            m["categories"] = cats
+        except Exception:
+            m["categories"] = []
+
     return {"data": list(model_map.values())}
 
 
