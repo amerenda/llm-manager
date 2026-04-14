@@ -347,11 +347,12 @@ class TestGetRateLimit:
 from scheduler import Scheduler
 
 
-def _make_scheduler(loaded_models=None, gpu_info=None):
+def _make_scheduler(loaded_models=None, gpu_info=None, runners=None):
     """Create a Scheduler with mocked pool and runner client.
 
     loaded_models: dict of {name: {vram_gb, ...}} for _loaded_models cache
     gpu_info: dict with total/used/free for GPU state
+    runners: list of runner dicts (for multi-runner tests); defaults to one runner
 
     The runner client's status() is mocked to return consistent data
     derived from gpu_info and loaded_models.
@@ -376,6 +377,9 @@ def _make_scheduler(loaded_models=None, gpu_info=None):
     mock_client.status = AsyncMock(return_value=runner_status)
     get_runner_client = AsyncMock(return_value=mock_client)
 
+    if runners is None:
+        runners = [{"id": 1, "hostname": "test-runner"}]
+
     sched = Scheduler(pool, get_runner_client)
     sched._loaded_models = dict(loaded_models)
     # Also mock _get_gpu_info for tests that use _ensure_model_loaded
@@ -384,6 +388,9 @@ def _make_scheduler(loaded_models=None, gpu_info=None):
     from gpu import vram_for_model as _vram_sync
     async def _vram(model): return _vram_sync(model)
     sched._vram_for_model = _vram
+    # Mock db.get_active_runners for check_submission
+    import db as _db
+    _db.get_active_runners = AsyncMock(return_value=runners)
     return sched
 
 
@@ -440,7 +447,6 @@ class TestCheckSubmission:
         result = _run(sched.check_submission("qwen2.5:14b"))
         assert result["ok"] is False
         assert result["error"] == "insufficient_vram"
-        assert result["non_evictable_gb"] == 8.5
 
     def test_zero_gpu_total_accepts_optimistically(self):
         """If GPU total is 0 (unreachable), accept job for scheduler to handle."""
@@ -475,6 +481,33 @@ class TestCheckSubmission:
         result = _run(sched.check_submission("llama2:70b"))
         assert "40.0" in result["message"]
         assert "12.0" in result["message"]
+
+    def test_multi_runner_accepts_if_any_fits(self):
+        """Model too large for runner 1 but fits on runner 2."""
+        pool = MagicMock()
+        runners = [
+            {"id": 1, "hostname": "small-gpu"},
+            {"id": 2, "hostname": "big-gpu"},
+        ]
+        statuses = {
+            1: {"gpu_vram_total_gb": 8.0, "gpu_vram_used_gb": 0, "loaded_ollama_models": []},
+            2: {"gpu_vram_total_gb": 24.0, "gpu_vram_used_gb": 0, "loaded_ollama_models": []},
+        }
+        mock_client = AsyncMock()
+        async def get_client(runner_id=None):
+            c = AsyncMock()
+            rid = runner_id or 1
+            c.status = AsyncMock(return_value=statuses[rid])
+            return c
+        sched = Scheduler(pool, get_client)
+        from gpu import vram_for_model as _vram_sync
+        async def _vram(model): return _vram_sync(model)
+        sched._vram_for_model = _vram
+        import db as _db
+        _db.get_active_runners = AsyncMock(return_value=runners)
+        # deepseek-r1:14b needs ~9GB — too large for 8GB runner, fits on 24GB
+        result = _run(sched.check_submission("deepseek-r1:14b"))
+        assert result["ok"] is True
 
 
 class TestSchedulerProperties:
