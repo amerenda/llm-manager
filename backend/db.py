@@ -187,6 +187,7 @@ async def init_db(pool: asyncpg.Pool) -> None:
             ("allowed_runner_ids", "'{}'"),
             ("allowed_categories", "'{}'"),
             ("excluded_categories", "'{}'"),
+            ("disable_thinking", "FALSE"),
         ]:
             col_type = (
                 "TEXT" if col == "status"
@@ -375,6 +376,7 @@ async def update_app_permissions(
     allow_profile_switch: bool,
     allowed_categories: Optional[list] = None,
     excluded_categories: Optional[list] = None,
+    disable_thinking: Optional[bool] = None,
 ) -> bool:
     """Update app permissions. Returns False if not found."""
     async with pool.acquire() as conn:
@@ -382,12 +384,14 @@ async def update_app_permissions(
             """UPDATE registered_apps
                SET allow_profile_switch = $1,
                    allowed_categories = COALESCE($3, allowed_categories),
-                   excluded_categories = COALESCE($4, excluded_categories)
+                   excluded_categories = COALESCE($4, excluded_categories),
+                   disable_thinking = COALESCE($5, disable_thinking)
                WHERE id = $2""",
             allow_profile_switch,
             app_id,
             allowed_categories,
             excluded_categories,
+            disable_thinking,
         )
     return result.endswith("1")
 
@@ -425,6 +429,12 @@ async def heartbeat_app(
     return result.endswith("1")
 
 
+async def get_app_by_id(pool: asyncpg.Pool, app_id: int) -> dict | None:
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM registered_apps WHERE id = $1", app_id)
+    return dict(row) if row else None
+
+
 async def get_apps(pool: asyncpg.Pool) -> list[dict]:
     """Return all registered apps."""
     async with pool.acquire() as conn:
@@ -432,7 +442,7 @@ async def get_apps(pool: asyncpg.Pool) -> list[dict]:
             """
             SELECT id, name, base_url, api_key, status, allow_profile_switch,
                    allowed_runner_ids, allowed_categories, excluded_categories,
-                   last_seen, metadata, created_at
+                   disable_thinking, last_seen, metadata, created_at
             FROM registered_apps
             ORDER BY name
             """
