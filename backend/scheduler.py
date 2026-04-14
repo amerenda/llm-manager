@@ -13,12 +13,41 @@ from typing import Optional
 
 import asyncpg
 import httpx
+from prometheus_client import Counter, Gauge, Histogram
 
 import queue_db
 from gpu import vram_for_model
 from cloud_providers import detect_provider, ModelProvider, anthropic_chat
 
 logger = logging.getLogger(__name__)
+
+# ── Scheduler Prometheus metrics ─────────────────────────────────────────────
+
+scheduler_model_load_total = Counter(
+    "llm_scheduler_model_load_total", "Model load attempts", ["model", "status"])
+scheduler_model_load_seconds = Histogram(
+    "llm_scheduler_model_load_seconds", "Time to load model into VRAM", ["model"],
+    buckets=[5, 10, 30, 60, 120, 300, 600])
+scheduler_model_eviction_total = Counter(
+    "llm_scheduler_model_eviction_total", "Model evictions", ["model"])
+scheduler_job_inference_seconds = Histogram(
+    "llm_scheduler_job_inference_seconds", "Inference time (excluding queue wait)", ["model"],
+    buckets=[0.5, 1, 2, 5, 10, 30, 60, 120])
+scheduler_job_tokens_total = Counter(
+    "llm_scheduler_job_tokens_total", "Total tokens generated", ["model", "type"])
+scheduler_job_errors_total = Counter(
+    "llm_scheduler_job_errors_total", "Job failures", ["model", "reason"])
+scheduler_loaded_models = Gauge(
+    "llm_scheduler_loaded_models", "Number of models currently loaded in VRAM")
+scheduler_loaded_vram_gb = Gauge(
+    "llm_scheduler_loaded_vram_gb", "Total VRAM used by loaded models")
+scheduler_submission_rejected_total = Counter(
+    "llm_scheduler_submission_rejected_total", "Pre-check rejections", ["model", "reason"])
+scheduler_loop_iterations_total = Counter(
+    "llm_scheduler_loop_iterations_total", "Scheduler loop iterations")
+scheduler_batch_size = Histogram(
+    "llm_scheduler_batch_size", "Jobs per batch", ["model"],
+    buckets=[1, 2, 3, 5, 10, 20])
 
 
 SCHEDULER_LOCK_ID = 900001  # Must match main.py
@@ -130,6 +159,7 @@ class Scheduler:
                     self._running = False
                     break
 
+                scheduler_loop_iterations_total.inc()
                 jobs = await queue_db.get_pending_jobs(self.pool)
                 if not jobs:
                     await asyncio.sleep(1)
@@ -321,23 +351,28 @@ class Scheduler:
         """Load a model via the runner that has it downloaded. Returns True on
         success, False on retriable error. Raises RuntimeError for permanent
         failures (model not on any runner, or runner rejected load)."""
+        t0 = time.time()
         try:
             client = await self._get_runner_for_model(model)
             logger.info("Loading model %s", model)
             await client.load_model(model, keep_alive=-1)
+            elapsed = time.time() - t0
             self._loaded_models[model] = {
                 "loaded_at": time.time(),
                 "vram_gb": vram_for_model(model),
                 "active_jobs": 0,
             }
-            logger.info("Model %s loaded", model)
+            scheduler_model_load_total.labels(model=model, status="success").inc()
+            scheduler_model_load_seconds.labels(model=model).observe(elapsed)
+            self._update_loaded_gauges()
+            logger.info("Model %s loaded in %.1fs", model, elapsed)
             return True
         except RuntimeError:
+            scheduler_model_load_total.labels(model=model, status="permanent_failure").inc()
             raise  # model not found — permanent failure
         except httpx.HTTPStatusError as e:
+            scheduler_model_load_total.labels(model=model, status="permanent_failure").inc()
             if e.response.status_code in (400, 404, 422):
-                # 404 = not on runner, 400/422 = runner rejected (e.g. embedding model,
-                # model not pulled, unsupported). All are permanent — don't retry.
                 raise RuntimeError(
                     f"Model {model} cannot be loaded by runner "
                     f"(HTTP {e.response.status_code})"
@@ -345,8 +380,14 @@ class Scheduler:
             logger.exception("Error loading model %s", model)
             return False
         except Exception:
+            scheduler_model_load_total.labels(model=model, status="error").inc()
             logger.exception("Error loading model %s", model)
             return False
+
+    def _update_loaded_gauges(self):
+        scheduler_loaded_models.set(len(self._loaded_models))
+        scheduler_loaded_vram_gb.set(
+            sum(m.get("vram_gb", 0) for m in self._loaded_models.values()))
 
     async def _unload_model(self, model: str) -> bool:
         """Unload a model via runner agent."""
@@ -355,6 +396,8 @@ class Scheduler:
             logger.info("Unloading model %s", model)
             await client.unload_model(model)
             self._loaded_models.pop(model, None)
+            scheduler_model_eviction_total.labels(model=model).inc()
+            self._update_loaded_gauges()
             logger.info("Model %s unloaded", model)
             return True
         except Exception:
@@ -363,6 +406,7 @@ class Scheduler:
 
     async def _process_batch(self, model: str, jobs: list[dict]):
         """Process a batch of jobs for a single model."""
+        scheduler_batch_size.labels(model=model).observe(len(jobs))
         logger.info("Processing %d jobs for model %s", len(jobs), model)
         for job in jobs:
             if not self._running:
@@ -417,6 +461,7 @@ class Scheduler:
         if request.get("tools"):
             kwargs["tools"] = request["tools"]
 
+        t0 = time.time()
         try:
             result = await client.chat(
                 messages=request.get("messages", []),
@@ -424,12 +469,18 @@ class Scheduler:
                 stream=False,
                 **kwargs,
             )
-            # Runner agent returns OpenAI-format response
+            elapsed = time.time() - t0
+            scheduler_job_inference_seconds.labels(model=model).observe(elapsed)
             await queue_db.update_job_status(self.pool, job_id, "completed", result=result)
             usage = result.get("usage", {})
-            logger.info("Job %s completed (model=%s, tokens=%d)",
-                        job_id, model, usage.get("completion_tokens", 0))
+            prompt_tokens = usage.get("prompt_tokens", 0)
+            completion_tokens = usage.get("completion_tokens", 0)
+            scheduler_job_tokens_total.labels(model=model, type="prompt").inc(prompt_tokens)
+            scheduler_job_tokens_total.labels(model=model, type="completion").inc(completion_tokens)
+            logger.info("Job %s completed (model=%s, tokens=%d, %.1fs)",
+                        job_id, model, completion_tokens, elapsed)
         except Exception as e:
+            scheduler_job_errors_total.labels(model=model, reason="inference_error").inc()
             error = f"Runner agent error: {e}"
             await queue_db.update_job_status(self.pool, job_id, "failed", error=error)
             logger.error("Job %s failed: %s", job_id, error)
@@ -437,76 +488,88 @@ class Scheduler:
     # ── Public methods for VRAM analysis ──────────────────────────────────────
 
     async def check_submission(self, model: str) -> dict:
-        """Pre-check a job submission. Returns warnings/errors about VRAM."""
-        # Cloud models don't need VRAM checks
+        """Pre-check a job submission against ALL runners. A model is accepted
+        if at least one runner can fit it (directly, or after eviction)."""
         if detect_provider(model) != ModelProvider.LOCAL:
             return {"ok": True, "provider": detect_provider(model).value}
 
+        import db as _db
         vram_needed = await self._vram_for_model(model)
 
-        # Get live GPU info and loaded models from runner
-        try:
-            client = await self.get_runner_client()
-            status = await client.status()
+        runners = await _db.get_active_runners(self.pool)
+        if not runners:
+            return {"ok": True}
+
+        best_result = None
+        max_gpu_total = 0
+
+        for r in runners:
+            try:
+                client = await self.get_runner_client(runner_id=r["id"])
+                status = await client.status()
+            except Exception:
+                continue
+
             gpu_total = status.get("gpu_vram_total_gb", 0)
             gpu_used = status.get("gpu_vram_used_gb", 0)
             gpu_free = round(gpu_total - gpu_used, 1)
             loaded_models = {m["name"]: m.get("size_gb", 0) for m in status.get("loaded_ollama_models", [])}
-        except Exception:
-            # Can't reach runner — accept optimistically
+
+            if gpu_total > max_gpu_total:
+                max_gpu_total = gpu_total
+
+            if vram_needed > gpu_total:
+                continue
+
+            if model in loaded_models:
+                return {"ok": True}
+
+            if gpu_free >= vram_needed:
+                return {"ok": True}
+
+            evictable_vram = 0
+            non_evictable_vram = 0
+            loaded_info = []
+            for name, size_gb in loaded_models.items():
+                settings = await queue_db.get_model_settings(self.pool, name)
+                model_vram = size_gb or vram_for_model(name)
+                if settings.get("do_not_evict", False) or not settings.get("evictable", True):
+                    non_evictable_vram += model_vram
+                    loaded_info.append({"model": name, "vram_gb": model_vram, "do_not_evict": True})
+                else:
+                    evictable_vram += model_vram
+                    loaded_info.append({"model": name, "vram_gb": model_vram, "do_not_evict": False})
+
+            available_after_eviction = gpu_free + evictable_vram
+            if available_after_eviction >= vram_needed:
+                to_evict = [m["model"] for m in loaded_info if not m["do_not_evict"]]
+                best_result = {
+                    "ok": True,
+                    "warning": "eviction_required",
+                    "message": f"Will evict {', '.join(to_evict)} to free VRAM for {model}",
+                    "evicting": to_evict,
+                }
+
+        if best_result:
+            return best_result
+
+        if max_gpu_total == 0:
             return {"ok": True}
 
-        if gpu_total == 0:
-            return {"ok": True}
-
-        if vram_needed > gpu_total:
+        if vram_needed > max_gpu_total:
+            scheduler_submission_rejected_total.labels(model=model, reason="model_too_large").inc()
             return {
                 "ok": False,
                 "error": "model_too_large",
-                "message": f"{model} requires {vram_needed:.1f}GB VRAM, GPU has {gpu_total:.1f}GB total",
+                "message": f"{model} requires {vram_needed:.1f}GB VRAM, largest GPU has {max_gpu_total:.1f}GB",
                 "vram_required_gb": vram_needed,
-                "vram_available_gb": gpu_total,
+                "vram_available_gb": max_gpu_total,
             }
 
-        # Model already loaded — no swap needed
-        if model in loaded_models:
-            return {"ok": True}
-
-        if gpu_free >= vram_needed:
-            return {"ok": True}
-
-        # Check eviction feasibility using live loaded model data
-        evictable_vram = 0
-        non_evictable_vram = 0
-        loaded_info = []
-        for name, size_gb in loaded_models.items():
-            settings = await queue_db.get_model_settings(self.pool, name)
-            model_vram = size_gb or vram_for_model(name)
-            if settings.get("do_not_evict", False) or not settings.get("evictable", True):
-                non_evictable_vram += model_vram
-                loaded_info.append({"model": name, "vram_gb": model_vram, "do_not_evict": True})
-            else:
-                evictable_vram += model_vram
-                loaded_info.append({"model": name, "vram_gb": model_vram, "do_not_evict": False})
-
-        available_after_eviction = gpu_free + evictable_vram
-        if available_after_eviction < vram_needed:
-            return {
-                "ok": False,
-                "error": "insufficient_vram",
-                "message": (f"{model} requires {vram_needed:.1f}GB, only {available_after_eviction:.1f}GB "
-                            f"available after eviction. {non_evictable_vram:.1f}GB held by non-evictable models."),
-                "vram_required_gb": vram_needed,
-                "vram_available_gb": available_after_eviction,
-                "non_evictable_gb": non_evictable_vram,
-                "loaded_models": loaded_info,
-            }
-
-        # Can evict, return warning
-        to_evict = [m["model"] for m in loaded_info if not m["do_not_evict"]]
+        scheduler_submission_rejected_total.labels(model=model, reason="insufficient_vram").inc()
         return {
-            "ok": True,
-            "warning": "eviction_required",
-            "message": f"Will evict {', '.join(to_evict)} to free VRAM for {model}",
-            "evicting": to_evict,
+            "ok": False,
+            "error": "insufficient_vram",
+            "message": f"{model} requires {vram_needed:.1f}GB, no runner can fit it after eviction",
+            "vram_required_gb": vram_needed,
         }

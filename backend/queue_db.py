@@ -141,6 +141,16 @@ async def get_running_jobs(pool: asyncpg.Pool, limit: int = 10) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+async def get_all_active_jobs(pool: asyncpg.Pool) -> list[dict]:
+    """Get all non-terminal jobs (queued, loading, running, waiting)."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT id, status, model FROM queue_jobs
+            WHERE status IN ('queued', 'running', 'loading_model', 'waiting_for_eviction')
+        """)
+    return [dict(r) for r in rows]
+
+
 async def count_app_queued_jobs(pool: asyncpg.Pool, app_id: int) -> int:
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""

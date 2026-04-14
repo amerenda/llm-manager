@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import socket
+import time
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -79,14 +80,20 @@ api_requests_total = Counter(
     ["endpoint", "method", "status"],
 )
 registered_apps_gauge = Gauge("llm_backend_registered_apps", "Number of registered apps")
+active_runners_gauge = Gauge("llm_backend_active_runners", "Number of active runners")
+runner_last_seen_seconds = Gauge(
+    "llm_backend_runner_last_seen_seconds", "Seconds since runner last heartbeat", ["runner"])
 
 # Queue metrics
 queue_jobs_submitted = Counter("llm_queue_jobs_submitted_total", "Total jobs submitted to queue", ["model", "app"])
 queue_jobs_completed = Counter("llm_queue_jobs_completed_total", "Total completed queue jobs", ["model", "status"])
 queue_depth_gauge = Gauge("llm_queue_depth", "Current queue depth")
 queue_active_jobs_gauge = Gauge("llm_queue_active_jobs", "Currently running jobs")
+queue_loading_jobs_gauge = Gauge("llm_queue_loading_jobs", "Jobs waiting for model load")
 queue_job_duration_seconds = Histogram("llm_queue_job_duration_seconds", "Job processing time", ["model"], buckets=[1, 5, 10, 30, 60, 120, 300])
 queue_job_wait_seconds = Histogram("llm_queue_job_wait_seconds", "Time job spent waiting in queue", ["model"], buckets=[0.5, 1, 5, 10, 30, 60, 120])
+queue_submission_errors_total = Counter(
+    "llm_queue_submission_errors_total", "Queue submission errors", ["reason"])
 
 
 def _inc_request(endpoint: str, method: str, status: int):
@@ -2003,6 +2010,27 @@ async def metrics_endpoint():
             queue_depth_gauge.set(len(pending))
             running = await queue_db.get_running_jobs(app.state.db)
             queue_active_jobs_gauge.set(len(running))
+        except Exception:
+            pass
+        try:
+            all_jobs = await queue_db.get_all_active_jobs(app.state.db)
+            loading = sum(1 for j in all_jobs if j.get("status") == "loading_model")
+            queue_loading_jobs_gauge.set(loading)
+        except Exception:
+            pass
+        try:
+            runners = await db.get_active_runners(app.state.db)
+            active_runners_gauge.set(len(runners))
+            now = time.time()
+            for r in runners:
+                ls = r.get("last_seen")
+                if ls:
+                    import datetime
+                    if isinstance(ls, datetime.datetime):
+                        age = now - ls.timestamp()
+                    else:
+                        age = 0
+                    runner_last_seen_seconds.labels(runner=r["hostname"]).set(round(age, 1))
         except Exception:
             pass
 
