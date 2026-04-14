@@ -1474,7 +1474,6 @@ async def list_apps():
         a_copy["allowed_categories"] = list(a_copy["allowed_categories"] or [])
         a_copy.setdefault("excluded_categories", [])
         a_copy["excluded_categories"] = list(a_copy["excluded_categories"] or [])
-        a_copy.setdefault("disable_thinking", False)
         a_copy["allowed_models"] = await db.get_app_allowed_models(app.state.db, a_copy["id"])
         result.append(a_copy)
     return result
@@ -1582,7 +1581,6 @@ class AppPermissionsRequest(BaseModel):
     allow_profile_switch: bool
     allowed_categories: Optional[list[str]] = None
     excluded_categories: Optional[list[str]] = None
-    disable_thinking: Optional[bool] = None
 
 
 @app.patch("/api/apps/{app_id}/permissions")
@@ -1592,7 +1590,6 @@ async def update_app_permissions_endpoint(app_id: int, req: AppPermissionsReques
     found = await db.update_app_permissions(
         app.state.db, app_id, req.allow_profile_switch,
         req.allowed_categories, req.excluded_categories,
-        req.disable_thinking,
     )
     if not found:
         raise HTTPException(404, "App not found")

@@ -187,7 +187,6 @@ async def init_db(pool: asyncpg.Pool) -> None:
             ("allowed_runner_ids", "'{}'"),
             ("allowed_categories", "'{}'"),
             ("excluded_categories", "'{}'"),
-            ("disable_thinking", "FALSE"),
         ]:
             col_type = (
                 "TEXT" if col == "status"
@@ -376,7 +375,6 @@ async def update_app_permissions(
     allow_profile_switch: bool,
     allowed_categories: Optional[list] = None,
     excluded_categories: Optional[list] = None,
-    disable_thinking: Optional[bool] = None,
 ) -> bool:
     """Update app permissions. Returns False if not found."""
     async with pool.acquire() as conn:
@@ -384,14 +382,12 @@ async def update_app_permissions(
             """UPDATE registered_apps
                SET allow_profile_switch = $1,
                    allowed_categories = COALESCE($3, allowed_categories),
-                   excluded_categories = COALESCE($4, excluded_categories),
-                   disable_thinking = COALESCE($5, disable_thinking)
+                   excluded_categories = COALESCE($4, excluded_categories)
                WHERE id = $2""",
             allow_profile_switch,
             app_id,
             allowed_categories,
             excluded_categories,
-            disable_thinking,
         )
     return result.endswith("1")
 

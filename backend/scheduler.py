@@ -413,30 +413,6 @@ class Scheduler:
                 break
             await self._run_job(job)
 
-    async def _should_disable_thinking(self, job: dict, model: str) -> bool:
-        """Check if thinking should be disabled for this job's app + model."""
-        import db as _db
-        app_id = job.get("app_id")
-        if not app_id:
-            return False
-        app = await _db.get_app_by_id(self.pool, app_id)
-        if not app or not app.get("disable_thinking"):
-            return False
-        settings = await queue_db.get_model_settings(self.pool, model)
-        categories = list(settings.get("categories") or [])
-        if not categories:
-            base = model.split(":")[0]
-            async with self.pool.acquire() as conn:
-                row = await conn.fetchrow(
-                    "SELECT categories FROM ollama_library_cache WHERE name = $1", base)
-            if row and row["categories"]:
-                cats = row["categories"]
-                if isinstance(cats, str):
-                    categories = json.loads(cats)
-                else:
-                    categories = list(cats)
-        return "thinking" in categories
-
     async def _run_job(self, job: dict):
         """Execute a single inference job (local or cloud)."""
         job_id = job["id"]
@@ -451,7 +427,7 @@ class Scheduler:
             if provider == ModelProvider.ANTHROPIC:
                 await self._run_cloud_job(job_id, model, request)
             else:
-                await self._run_local_job(job_id, model, request, job)
+                await self._run_local_job(job_id, model, request)
         except Exception as e:
             await queue_db.update_job_status(self.pool, job_id, "failed", error=str(e))
             logger.exception("Job %s error", job_id)
@@ -474,9 +450,8 @@ class Scheduler:
         logger.info("Job %s completed (model=%s, cloud, tokens=%d)",
                     job_id, model, usage.get("completion_tokens", 0))
 
-    async def _run_local_job(self, job_id: str, model: str, request: dict, job: dict | None = None):
+    async def _run_local_job(self, job_id: str, model: str, request: dict):
         """Execute a local inference job via runner agent."""
-        import re as _re
         client = await self._get_runner_for_model(model)
         kwargs = {}
         if "temperature" in request:
@@ -486,42 +461,24 @@ class Scheduler:
         if request.get("tools"):
             kwargs["tools"] = request["tools"]
 
-        messages = list(request.get("messages", []))
-        no_think = False
-        if job:
-            no_think = await self._should_disable_thinking(job, model)
-        if no_think and messages:
-            last = messages[-1]
-            messages[-1] = {**last, "content": last.get("content", "") + " /no_think"}
-
         t0 = time.time()
         try:
             result = await client.chat(
-                messages=messages,
+                messages=request.get("messages", []),
                 model=model,
                 stream=False,
                 **kwargs,
             )
             elapsed = time.time() - t0
             scheduler_job_inference_seconds.labels(model=model).observe(elapsed)
-
-            if no_think:
-                try:
-                    content = result["choices"][0]["message"]["content"]
-                    stripped = _re.sub(r"<think>.*?</think>", "", content, flags=_re.DOTALL).strip()
-                    result["choices"][0]["message"]["content"] = stripped
-                except (KeyError, IndexError):
-                    pass
-
             await queue_db.update_job_status(self.pool, job_id, "completed", result=result)
             usage = result.get("usage", {})
             prompt_tokens = usage.get("prompt_tokens", 0)
             completion_tokens = usage.get("completion_tokens", 0)
             scheduler_job_tokens_total.labels(model=model, type="prompt").inc(prompt_tokens)
             scheduler_job_tokens_total.labels(model=model, type="completion").inc(completion_tokens)
-            logger.info("Job %s completed (model=%s, tokens=%d, %.1fs%s)",
-                        job_id, model, completion_tokens, elapsed,
-                        ", no_think" if no_think else "")
+            logger.info("Job %s completed (model=%s, tokens=%d, %.1fs)",
+                        job_id, model, completion_tokens, elapsed)
         except Exception as e:
             scheduler_job_errors_total.labels(model=model, reason="inference_error").inc()
             error = f"Runner agent error: {e}"
