@@ -147,7 +147,7 @@ class LLMAgentClient:
 
     async def load_model(self, model: str, keep_alive: int = -1) -> dict:
         """Load a model into VRAM with the given keep_alive (seconds, -1=forever)."""
-        async with self._client(timeout=httpx.Timeout(30.0, read=120.0)) as c:
+        async with self._client(timeout=httpx.Timeout(30.0, read=600.0)) as c:
             r = await c.post(
                 f"{self.base_url}/v1/models/load",
                 json={"model": model, "keep_alive": keep_alive},

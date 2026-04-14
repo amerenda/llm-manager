@@ -1049,7 +1049,7 @@ async def load_model(req: LoadRequest):
     requests_total.labels(node=NODE, endpoint="/v1/models/load", model=req.model).inc()
     t0 = time.time()
     try:
-        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=120.0)) as c:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=600.0)) as c:
             r = await c.post(
                 f"{OLLAMA_URL}/api/generate",
                 json={"model": req.model, "prompt": "", "keep_alive": req.keep_alive},
