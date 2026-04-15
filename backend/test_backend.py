@@ -234,6 +234,20 @@ class TestModelsEndpoint:
         assert data == []
 
 
+class TestV1ModelsEndpoint:
+    def test_v1_models_openai_shape(self, unauthed_client):
+        """OpenAI-compatible model list endpoint used by Forge, OpenHands, etc."""
+        resp = unauthed_client.get("/v1/models")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["object"] == "list"
+        assert isinstance(data["data"], list)
+        for m in data["data"]:
+            assert m["object"] == "model"
+            assert "id" in m
+            assert "owned_by" in m
+
+
 class TestVramCheckEndpoint:
     def test_vram_check_single_model(self, client):
         resp = client.post("/api/vram-check", json={"models": ["qwen2.5:7b"]})

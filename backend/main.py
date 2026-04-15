@@ -1428,6 +1428,62 @@ async def proxy_chat_completions(request: Request, runner_id: Optional[int] = No
         raise _agent_unavailable(f"Runner error: {e}")
 
 
+@app.get("/v1/models")
+async def proxy_list_models(request: Request):
+    """OpenAI-compatible model list. Enumerates local models across active
+    runners plus enabled cloud models. Filtered by the calling app's
+    allowed-model patterns when an API key is provided."""
+    _inc_request("/v1/models", "GET", 200)
+    pool = app.state.db
+    model_ids: set[str] = set()
+
+    # Local models from active runners
+    try:
+        runners_list = await db.get_active_runners(pool)
+        for runner in runners_list:
+            try:
+                client = await _get_runner_client(pool, runner["id"])
+                result = await client.models()
+                for m in result.get("data", []):
+                    name = m.get("id", "")
+                    if name:
+                        model_ids.add(name)
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    # Enabled cloud models
+    try:
+        cloud_configs = await db.get_cloud_model_configs(pool)
+        for c in cloud_configs:
+            if c.get("enabled", True):
+                model_ids.add(c["model_id"])
+    except Exception:
+        pass
+
+    # Per-app filtering: if Bearer token present, hide models the app can't use
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        api_key = auth_header.removeprefix("Bearer ").strip()
+        allowed: list[str] = []
+        for name in sorted(model_ids):
+            if await db.check_model_allowed(pool, api_key, name):
+                allowed.append(name)
+        model_ids = set(allowed)
+
+    data = [
+        {
+            "id": name,
+            "object": "model",
+            "created": 0,
+            "owned_by": "llm-manager",
+        }
+        for name in sorted(model_ids)
+    ]
+    return {"object": "list", "data": data}
+
+
 @app.post("/v1/images/generations")
 async def proxy_image_generations(request: Request, runner_id: Optional[int] = None):
     body = await request.json()
