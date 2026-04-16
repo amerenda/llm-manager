@@ -6,6 +6,7 @@ LLM runners self-register via PSK instead of being polled.
 """
 
 import asyncio
+import json
 import logging
 import os
 import re
