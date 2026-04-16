@@ -1391,37 +1391,10 @@ async def proxy_chat_completions(request: Request, runner_id: Optional[int] = No
             _inc_request("/v1/chat/completions", "POST", 503)
             raise HTTPException(503, f"Cloud model error: {e}")
 
-    # ── Local model routing (Ollama) ─────────────────────────────────────
-    # Non-streaming: route through the queue so the scheduler handles model
-    # loading, VRAM management, and eviction.  Streaming: direct proxy to
-    # the runner for low-latency callers (HA voice, etc.).
-    if stream:
-        try:
-            client = await _get_runner_client(
-                app.state.db, runner_id,
-                allowed_runner_ids=app_allowed_runners or None,
-            )
-
-            async def _forward_stream():
-                stream_ctx = await client.chat(
-                    messages=body.get("messages", []),
-                    model=model,
-                    stream=True,
-                    **{k: v for k, v in body.items()
-                       if k not in ("model", "messages", "stream")},
-                )
-                async with stream_ctx as resp:
-                    async for chunk in resp.aiter_bytes():
-                        yield chunk
-
-            return StreamingResponse(_forward_stream(), media_type="text/event-stream")
-        except HTTPException:
-            raise
-        except Exception as e:
-            _inc_request("/v1/chat/completions", "POST", 503)
-            raise _agent_unavailable(f"Runner error: {e}")
-
-    # ── Queue-backed path (non-streaming) ───────────────────────────────
+    # ── Local model routing (Ollama) — all requests go through the queue ─
+    # The scheduler handles model loading, VRAM management, and eviction.
+    # For streaming callers the queue result is re-emitted as an OpenAI
+    # streaming response (single content chunk + [DONE]).
     import uuid as _uuid
 
     pool = app.state.db
@@ -1457,6 +1430,7 @@ async def proxy_chat_completions(request: Request, runner_id: Optional[int] = No
 
     # Poll until the scheduler completes the job (timeout after 10 min)
     deadline = time.time() + 600
+    result = None
     while time.time() < deadline:
         job = await queue_db.get_job(pool, job_id)
         if not job:
@@ -1465,17 +1439,45 @@ async def proxy_chat_completions(request: Request, runner_id: Optional[int] = No
         if status == "completed":
             result = job.get("result")
             if isinstance(result, str):
-                import json as _json
-                result = _json.loads(result)
-            return result
+                result = json.loads(result)
+            break
         if status in ("failed", "cancelled"):
             error = job.get("error", "Job failed")
             raise HTTPException(502, f"Inference failed: {error}")
         await asyncio.sleep(0.5)
 
-    # Timed out — cancel the job and return 504
-    await queue_db.update_job_status(pool, job_id, "cancelled", error="Proxy timeout")
-    raise HTTPException(504, "Inference timed out waiting for queue")
+    if result is None:
+        await queue_db.update_job_status(pool, job_id, "cancelled", error="Proxy timeout")
+        raise HTTPException(504, "Inference timed out waiting for queue")
+
+    if not stream:
+        return result
+
+    # Convert completed result into an OpenAI streaming response so
+    # streaming clients (Forge, etc.) can consume it unchanged.
+    async def _queue_to_stream():
+        choice = (result.get("choices") or [{}])[0]
+        message = choice.get("message", {})
+        chunk = {
+            "id": result.get("id", f"chatcmpl-{job_id}"),
+            "object": "chat.completion.chunk",
+            "created": result.get("created", int(time.time())),
+            "model": result.get("model", model),
+            "choices": [{
+                "index": 0,
+                "delta": {
+                    "role": message.get("role", "assistant"),
+                    "content": message.get("content", ""),
+                },
+                "finish_reason": choice.get("finish_reason", "stop"),
+            }],
+        }
+        if message.get("tool_calls"):
+            chunk["choices"][0]["delta"]["tool_calls"] = message["tool_calls"]
+        yield f"data: {json.dumps(chunk)}\n\n"
+        yield "data: [DONE]\n\n"
+
+    return StreamingResponse(_queue_to_stream(), media_type="text/event-stream")
 
 
 @app.get("/v1/models")
