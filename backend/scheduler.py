@@ -64,6 +64,9 @@ class Scheduler:
         self._running = False
         # Track loaded models: {model_name: {"loaded_at": float, "vram_gb": float, "runner_id": int}}
         self._loaded_models: dict[str, dict] = {}
+        # Models with a load in flight — prevents duplicate dispatch across iterations
+        # when a prior load is slow, or when sync transiently misses a runner.
+        self._loading_models: set[str] = set()
         # Cache: model -> runner_id (which runner has it downloaded)
         self._model_runner_cache: dict[str, int] = {}
 
@@ -196,6 +199,13 @@ class Scheduler:
                         batch = model_groups.pop(model)
                         await self._process_batch(model, batch)
 
+                # Skip models with a load already in flight — their jobs will be
+                # picked up next iteration once the load completes.
+                for model in list(model_groups.keys()):
+                    if model in self._loading_models:
+                        logger.debug("Skipping %s: load already in flight", model)
+                        model_groups.pop(model)
+
                 # Process remaining models (need loading)
                 any_failed = False
                 for model, batch in model_groups.items():
@@ -230,27 +240,41 @@ class Scheduler:
                 await asyncio.sleep(5)
 
     async def _sync_loaded_models(self):
-        """Sync loaded model list from all runner agents."""
+        """Sync loaded model list from all runner agents.
+
+        Only drops cached entries for runners we successfully polled. A transient
+        failure on one runner must not wipe the cache — doing so causes the
+        scheduler to re-dispatch loads for models that are already loaded.
+        """
         import db as _db
         try:
             runners = await _db.get_active_runners(self.pool)
-            current = {}
+            polled_runner_ids: set[int] = set()
+            fresh: dict[str, dict] = {}
             for r in runners:
                 try:
                     client = await self.get_runner_client(runner_id=r["id"])
                     status = await client.status()
-                    for m in status.get("loaded_ollama_models", []):
-                        name = m.get("name", "")
-                        vram_gb = m.get("size_gb", vram_for_model(name))
-                        current[name] = {
-                            "loaded_at": self._loaded_models.get(name, {}).get("loaded_at", time.time()),
-                            "vram_gb": vram_gb,
-                            "active_jobs": len(await queue_db.get_active_jobs_for_model(self.pool, name)),
-                            "runner_id": r["id"],
-                        }
                 except Exception:
                     continue
-            self._loaded_models = current
+                polled_runner_ids.add(r["id"])
+                for m in status.get("loaded_ollama_models", []):
+                    name = m.get("name", "")
+                    vram_gb = m.get("size_gb", vram_for_model(name))
+                    fresh[name] = {
+                        "loaded_at": self._loaded_models.get(name, {}).get("loaded_at", time.time()),
+                        "vram_gb": vram_gb,
+                        "active_jobs": len(await queue_db.get_active_jobs_for_model(self.pool, name)),
+                        "runner_id": r["id"],
+                    }
+            # Keep cached entries for runners we couldn't poll this cycle.
+            merged = {
+                name: info
+                for name, info in self._loaded_models.items()
+                if info.get("runner_id") not in polled_runner_ids
+            }
+            merged.update(fresh)
+            self._loaded_models = merged
         except Exception:
             logger.warning("Failed to sync loaded models from runner agents", exc_info=True)
 
@@ -281,27 +305,31 @@ class Scheduler:
         if model in self._loaded_models:
             return True
 
-        vram_needed = await self._vram_for_model(model)
-        gpu = await self._get_gpu_info()
+        self._loading_models.add(model)
+        try:
+            vram_needed = await self._vram_for_model(model)
+            gpu = await self._get_gpu_info()
 
-        # Check if model fits at all
-        if vram_needed > gpu["total"] and gpu["total"] > 0:
-            logger.error("Model %s needs %.1fGB but GPU has %.1fGB total",
-                         model, vram_needed, gpu["total"])
-            return False
+            # Check if model fits at all
+            if vram_needed > gpu["total"] and gpu["total"] > 0:
+                logger.error("Model %s needs %.1fGB but GPU has %.1fGB total",
+                             model, vram_needed, gpu["total"])
+                return False
 
-        # Check if we have free VRAM
-        if gpu["free"] >= vram_needed:
+            # Check if we have free VRAM
+            if gpu["free"] >= vram_needed:
+                return await self._load_model(model)
+
+            # Need to evict
+            vram_to_free = vram_needed - gpu["free"]
+            evicted = await self._evict_for_vram(vram_to_free)
+            if not evicted:
+                logger.error("Cannot free %.1fGB for model %s", vram_to_free, model)
+                return False
+
             return await self._load_model(model)
-
-        # Need to evict
-        vram_to_free = vram_needed - gpu["free"]
-        evicted = await self._evict_for_vram(vram_to_free)
-        if not evicted:
-            logger.error("Cannot free %.1fGB for model %s", vram_to_free, model)
-            return False
-
-        return await self._load_model(model)
+        finally:
+            self._loading_models.discard(model)
 
     async def _evict_for_vram(self, vram_needed: float) -> bool:
         """Evict models to free up VRAM. Returns True if enough was freed."""
@@ -354,6 +382,7 @@ class Scheduler:
         t0 = time.time()
         try:
             client = await self._get_runner_for_model(model)
+            runner_id = self._model_runner_cache.get(model)
             logger.info("Loading model %s", model)
             await client.load_model(model, keep_alive=-1)
             elapsed = time.time() - t0
@@ -361,6 +390,7 @@ class Scheduler:
                 "loaded_at": time.time(),
                 "vram_gb": vram_for_model(model),
                 "active_jobs": 0,
+                "runner_id": runner_id,
             }
             scheduler_model_load_total.labels(model=model, status="success").inc()
             scheduler_model_load_seconds.labels(model=model).observe(elapsed)
