@@ -1392,13 +1392,16 @@ async def proxy_chat_completions(request: Request, runner_id: Optional[int] = No
             raise HTTPException(503, f"Cloud model error: {e}")
 
     # ── Local model routing (Ollama) ─────────────────────────────────────
-    try:
-        client = await _get_runner_client(
-            app.state.db, runner_id,
-            allowed_runner_ids=app_allowed_runners or None,
-        )
+    # Non-streaming: route through the queue so the scheduler handles model
+    # loading, VRAM management, and eviction.  Streaming: direct proxy to
+    # the runner for low-latency callers (HA voice, etc.).
+    if stream:
+        try:
+            client = await _get_runner_client(
+                app.state.db, runner_id,
+                allowed_runner_ids=app_allowed_runners or None,
+            )
 
-        if stream:
             async def _forward_stream():
                 stream_ctx = await client.chat(
                     messages=body.get("messages", []),
@@ -1412,20 +1415,67 @@ async def proxy_chat_completions(request: Request, runner_id: Optional[int] = No
                         yield chunk
 
             return StreamingResponse(_forward_stream(), media_type="text/event-stream")
-        else:
-            result = await client.chat(
-                messages=body.get("messages", []),
-                model=model,
-                stream=False,
-                **{k: v for k, v in body.items()
-                   if k not in ("model", "messages", "stream")},
+        except HTTPException:
+            raise
+        except Exception as e:
+            _inc_request("/v1/chat/completions", "POST", 503)
+            raise _agent_unavailable(f"Runner error: {e}")
+
+    # ── Queue-backed path (non-streaming) ───────────────────────────────
+    import uuid as _uuid
+
+    pool = app.state.db
+    scheduler: Scheduler = app.state.scheduler
+
+    # Resolve app_id for queue tracking
+    app_id = None
+    if auth_header.startswith("Bearer "):
+        api_key = auth_header.removeprefix("Bearer ").strip()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT id FROM registered_apps WHERE api_key = $1 AND status = 'active'",
+                api_key,
             )
+        if row:
+            app_id = row["id"]
+
+    # Pre-check VRAM
+    check = await scheduler.check_submission(model)
+    if not check["ok"]:
+        raise HTTPException(422, check)
+
+    job_id = str(_uuid.uuid4())[:12]
+    queue_request = {
+        "messages": body.get("messages", []),
+    }
+    for key in ("temperature", "max_tokens", "tools", "top_p", "top_k",
+                "frequency_penalty", "presence_penalty", "stop"):
+        if key in body:
+            queue_request[key] = body[key]
+
+    await queue_db.insert_job(pool, job_id, None, app_id, model, queue_request, None)
+
+    # Poll until the scheduler completes the job (timeout after 10 min)
+    deadline = time.time() + 600
+    while time.time() < deadline:
+        job = await queue_db.get_job(pool, job_id)
+        if not job:
+            raise HTTPException(500, "Queue job disappeared")
+        status = job["status"]
+        if status == "completed":
+            result = job.get("result")
+            if isinstance(result, str):
+                import json as _json
+                result = _json.loads(result)
             return result
-    except HTTPException:
-        raise
-    except Exception as e:
-        _inc_request("/v1/chat/completions", "POST", 503)
-        raise _agent_unavailable(f"Runner error: {e}")
+        if status in ("failed", "cancelled"):
+            error = job.get("error", "Job failed")
+            raise HTTPException(502, f"Inference failed: {error}")
+        await asyncio.sleep(0.5)
+
+    # Timed out — cancel the job and return 504
+    await queue_db.update_job_status(pool, job_id, "cancelled", error="Proxy timeout")
+    raise HTTPException(504, "Inference timed out waiting for queue")
 
 
 @app.get("/v1/models")
