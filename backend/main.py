@@ -37,7 +37,14 @@ from db import (
 )
 from gpu import vram_for_model
 from llm_agent import LLMAgentClient
-from scheduler import Scheduler
+# Feature flag: SIMPLIFIED_SCHEDULER=1 uses the one-model-per-GPU scheduler
+# (plans/queue-one-model-per-gpu.md). Default off until UAT soak validates it.
+if os.getenv("SIMPLIFIED_SCHEDULER", "").lower() in ("1", "true", "yes"):
+    from scheduler_v2 import SimplifiedScheduler as Scheduler
+    _SCHEDULER_VARIANT = "simplified"
+else:
+    from scheduler import Scheduler
+    _SCHEDULER_VARIANT = "legacy"
 from queue_routes import router as queue_router, model_router
 from library_routes import router as library_router, safety_router
 from library import classify_models_batch, parse_param_count, parse_quantization, refresh_library_cache
@@ -180,6 +187,7 @@ async def lifespan(app: FastAPI):
         return await _get_runner_client(pool, runner_id=runner_id)
     scheduler = Scheduler(pool, get_runner, lock_conn=lock_conn if got_lock else None)
     app.state.scheduler = scheduler
+    logger.info("Scheduler variant: %s", _SCHEDULER_VARIANT)
 
     if DISABLE_SCHEDULER:
         logger.info("Scheduler disabled via DISABLE_SCHEDULER env var")

@@ -1,0 +1,183 @@
+"""
+Unit tests for the one-model-per-GPU scheduler (scheduler_v2).
+
+Focus: _pick_runner policy truth table and check_submission's new trivial
+shape. Swap and _run_job are exercised via integration; here we mock them.
+"""
+import asyncio
+import json
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from scheduler_v2 import SimplifiedScheduler, RunnerState
+
+
+def _run(coro):
+    return asyncio.get_event_loop().run_until_complete(coro)
+
+
+def _make_sched(runners=None):
+    pool = MagicMock()
+    get_client = AsyncMock()
+    sched = SimplifiedScheduler(pool, get_client)
+    if runners:
+        sched._runners = {r.runner_id: r for r in runners}
+    return sched
+
+
+# ── _pick_runner ─────────────────────────────────────────────────────────────
+
+class TestPickRunner:
+    def test_pins_win(self):
+        a = RunnerState(runner_id=1, hostname="a", gpu_total_gb=17, pinned_model="qwen3:14b")
+        b = RunnerState(runner_id=2, hostname="b", gpu_total_gb=24, current_model="qwen3:14b")
+        sched = _make_sched([a, b])
+        assert sched._pick_runner("qwen3:14b") is a
+
+    def test_pinned_busy_blocks_fallback(self):
+        # Pinned runner is busy → return None, DON'T steal capacity from another runner
+        a = RunnerState(runner_id=1, hostname="a", gpu_total_gb=17,
+                        pinned_model="qwen3:14b", in_flight_job_id="j1")
+        b = RunnerState(runner_id=2, hostname="b", gpu_total_gb=24)
+        sched = _make_sched([a, b])
+        assert sched._pick_runner("qwen3:14b") is None
+
+    def test_already_loaded_idle_wins_over_idle_empty(self):
+        a = RunnerState(runner_id=1, hostname="a", gpu_total_gb=17)  # empty
+        b = RunnerState(runner_id=2, hostname="b", gpu_total_gb=17, current_model="qwen3:14b")  # loaded
+        sched = _make_sched([a, b])
+        assert sched._pick_runner("qwen3:14b") is b
+
+    def test_busy_same_model_rejected(self):
+        # Runner on the right model but running another job for it → can't reuse
+        # (one-model-one-GPU serializes on the runner; wait).
+        a = RunnerState(runner_id=1, hostname="a", gpu_total_gb=17,
+                        current_model="qwen3:14b", in_flight_job_id="j1")
+        sched = _make_sched([a])
+        assert sched._pick_runner("qwen3:14b") is None
+
+    def test_idle_fits_picked_for_swap(self):
+        a = RunnerState(runner_id=1, hostname="a", gpu_total_gb=17, current_model="deepseek-r1:14b")
+        sched = _make_sched([a])
+        picked = sched._pick_runner("qwen3:14b")
+        assert picked is a  # will swap
+
+    def test_too_large_skipped(self):
+        a = RunnerState(runner_id=1, hostname="a", gpu_total_gb=8.6)  # small
+        sched = _make_sched([a])
+        # qwen3:70b → 40GB estimate > 8.6
+        assert sched._pick_runner("qwen3:70b") is None
+
+    def test_unknown_gpu_total_skipped(self):
+        # Runner whose gpu_total_gb=0 hasn't been reconciled yet — defensively skip
+        a = RunnerState(runner_id=1, hostname="a", gpu_total_gb=0)
+        sched = _make_sched([a])
+        assert sched._pick_runner("qwen3:14b") is None
+
+    def test_no_runners(self):
+        sched = _make_sched([])
+        assert sched._pick_runner("qwen3:14b") is None
+
+
+# ── check_submission ────────────────────────────────────────────────────────
+
+class TestCheckSubmission:
+    def test_cloud_models_always_ok(self):
+        sched = _make_sched([])
+        result = _run(sched.check_submission("claude-sonnet-4-5"))
+        assert result["ok"] is True
+
+    def test_fits_on_biggest_runner(self):
+        a = RunnerState(runner_id=1, hostname="a", gpu_total_gb=17)
+        sched = _make_sched([a])
+        result = _run(sched.check_submission("qwen3:14b"))
+        assert result["ok"] is True
+
+    def test_too_large_for_any(self):
+        a = RunnerState(runner_id=1, hostname="a", gpu_total_gb=8.6)
+        sched = _make_sched([a])
+        result = _run(sched.check_submission("qwen3:70b"))  # ~40GB estimate
+        assert result["ok"] is False
+        assert result["error"] == "model_too_large"
+        assert result["vram_available_gb"] == 8.6
+
+    def test_no_runners_defer(self):
+        """No runners visible and no cache → defer accept (let runtime sort it)."""
+        sched = _make_sched([])
+        import db as _db
+        _db.get_active_runners = AsyncMock(return_value=[])
+        result = _run(sched.check_submission("qwen3:14b"))
+        assert result["ok"] is True
+
+    def test_uses_db_capabilities_when_cache_empty(self):
+        """The non-scheduler replica has _runners empty — should fall back to DB row capabilities."""
+        sched = _make_sched([])
+        import db as _db
+        _db.get_active_runners = AsyncMock(return_value=[
+            {"id": 1, "hostname": "archlinux",
+             "capabilities": {"gpu_vram_total_bytes": 17_100_000_000}},
+        ])
+        result = _run(sched.check_submission("qwen3:14b"))
+        assert result["ok"] is True
+
+    def test_uses_db_capabilities_json_string(self):
+        """capabilities can come back as a JSON string from asyncpg depending on version."""
+        sched = _make_sched([])
+        import db as _db
+        _db.get_active_runners = AsyncMock(return_value=[
+            {"id": 1, "hostname": "a",
+             "capabilities": json.dumps({"gpu_vram_total_bytes": 17_100_000_000})},
+        ])
+        result = _run(sched.check_submission("qwen3:14b"))
+        assert result["ok"] is True
+
+    def test_prefers_in_memory_cache_over_db(self):
+        """If RunnerState has values, we should use them (they're fresher)."""
+        a = RunnerState(runner_id=1, hostname="a", gpu_total_gb=17)
+        sched = _make_sched([a])
+        # DB has different (stale) total — should be ignored
+        import db as _db
+        _db.get_active_runners = AsyncMock(return_value=[
+            {"id": 1, "hostname": "a",
+             "capabilities": {"gpu_vram_total_bytes": 1_000_000_000}},
+        ])
+        result = _run(sched.check_submission("qwen3:14b"))
+        assert result["ok"] is True
+
+
+# ── loaded_models property compat ────────────────────────────────────────────
+
+class TestLoadedModelsProperty:
+    def test_empty_when_no_runners_loaded(self):
+        a = RunnerState(runner_id=1, hostname="a", gpu_total_gb=17)
+        sched = _make_sched([a])
+        assert sched.loaded_models == {}
+
+    def test_returns_current_models(self):
+        a = RunnerState(runner_id=1, hostname="a", gpu_total_gb=17, current_model="qwen3:14b",
+                        model_loaded_at=1000.0)
+        b = RunnerState(runner_id=2, hostname="b", gpu_total_gb=8.6)
+        sched = _make_sched([a, b])
+        loaded = sched.loaded_models
+        assert "qwen3:14b" in loaded
+        assert loaded["qwen3:14b"]["runner_id"] == 1
+        assert loaded["qwen3:14b"]["loaded_at"] == 1000.0
+        assert loaded["qwen3:14b"]["runner_hostname"] == "a"
+
+
+# ── lifecycle ────────────────────────────────────────────────────────────────
+
+class TestLifecycle:
+    def test_start_stop(self):
+        sched = _make_sched([])
+        # Don't actually run the loop — it'll fail without a real pool
+        sched._running = True
+        sched._task = MagicMock()
+        sched._task.done = MagicMock(return_value=True)
+        sched.stop()
+        assert sched._running is False
+
+    def test_current_job_id_starts_none(self):
+        sched = _make_sched([])
+        assert sched.current_job_id is None
