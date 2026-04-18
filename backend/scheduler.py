@@ -565,12 +565,16 @@ class Scheduler:
 
         best_result = None
         max_gpu_total = 0
+        unreachable_count = 0
+        unreachable_hostnames: list[str] = []
 
         for r in runners:
             try:
                 client = await self.get_runner_client(runner_id=r["id"])
                 status = await client.status()
             except Exception as e:
+                unreachable_count += 1
+                unreachable_hostnames.append(r.get("hostname", f"id={r.get('id')}"))
                 logger.warning(
                     "check_submission: runner %s (id=%s) unreachable for model=%s: %s",
                     r.get("hostname"), r.get("id"), model, e,
@@ -642,7 +646,10 @@ class Scheduler:
         if max_gpu_total == 0:
             return {"ok": True}
 
-        if vram_needed > max_gpu_total:
+        # model_too_large only rejects if we were confident about the answer —
+        # i.e. every runner responded and none of them had a big enough GPU.
+        # An unreachable runner might have had the capacity.
+        if vram_needed > max_gpu_total and unreachable_count == 0:
             scheduler_submission_rejected_total.labels(model=model, reason="model_too_large").inc()
             return {
                 "ok": False,
@@ -650,6 +657,25 @@ class Scheduler:
                 "message": f"{model} requires {vram_needed:.1f}GB VRAM, largest GPU has {max_gpu_total:.1f}GB",
                 "vram_required_gb": vram_needed,
                 "vram_available_gb": max_gpu_total,
+            }
+
+        # If any runner was unreachable during this pre-check, we lacked the
+        # data to reject confidently. Accept optimistically — the scheduler's
+        # runtime eviction will re-evaluate with fresh state when the job is
+        # processed.
+        if unreachable_count > 0:
+            logger.info(
+                "check_submission: accepting model=%s optimistically — %d runner(s) unreachable: %s",
+                model, unreachable_count, ", ".join(unreachable_hostnames),
+            )
+            return {
+                "ok": True,
+                "warning": "some_runners_unreachable",
+                "message": (
+                    f"{unreachable_count} runner(s) unreachable during pre-check; "
+                    f"accepting {model} optimistically"
+                ),
+                "unreachable_runners": unreachable_hostnames,
             }
 
         scheduler_submission_rejected_total.labels(model=model, reason="insufficient_vram").inc()
