@@ -212,6 +212,19 @@ async def lifespan(app: FastAPI):
                 if acquired:
                     got_lock = True
                     scheduler.lock_conn = lock_conn
+                    # Recover jobs the previous lock holder may have orphaned
+                    # mid-swap/mid-run. Without this, jobs stuck in
+                    # 'loading_model' or 'running' are never picked up since
+                    # get_pending_jobs only returns 'queued' statuses.
+                    try:
+                        recovered = await queue_db.recover_stuck_jobs(pool)
+                        if recovered:
+                            logger.warning(
+                                "Recovered %d jobs stuck in loading_model/running → queued",
+                                recovered,
+                            )
+                    except Exception:
+                        logger.exception("recover_stuck_jobs failed on lock retry")
                     scheduler.start()
                     logger.info("Queue scheduler started (advisory lock acquired on retry)")
                     return
