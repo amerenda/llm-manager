@@ -207,6 +207,7 @@ async def init_db(pool: asyncpg.Pool) -> None:
         for col, definition in [
             ("enabled", "BOOLEAN NOT NULL DEFAULT TRUE"),
             ("auto_update", "BOOLEAN NOT NULL DEFAULT FALSE"),
+            ("pinned_model", "TEXT"),
         ]:
             try:
                 await conn.execute(
@@ -532,7 +533,7 @@ async def get_active_runners(pool: asyncpg.Pool) -> list[dict]:
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT id, hostname, address, port, capabilities, enabled, auto_update, last_seen, created_at
+            SELECT id, hostname, address, port, capabilities, enabled, auto_update, pinned_model, last_seen, created_at
             FROM llm_runners
             WHERE last_seen > NOW() - INTERVAL '90 seconds'
               AND enabled = TRUE
@@ -547,7 +548,7 @@ async def get_all_runners(pool: asyncpg.Pool) -> list[dict]:
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT id, hostname, address, port, capabilities, enabled, auto_update, last_seen, created_at
+            SELECT id, hostname, address, port, capabilities, enabled, auto_update, pinned_model, last_seen, created_at
             FROM llm_runners
             WHERE last_seen > NOW() - INTERVAL '90 seconds'
             ORDER BY hostname
@@ -576,12 +577,25 @@ async def set_runner_auto_update(pool: asyncpg.Pool, runner_id: int, auto_update
     return result.endswith("1")
 
 
+async def set_runner_pinned_model(
+    pool: asyncpg.Pool, runner_id: int, model: Optional[str]
+) -> bool:
+    """Pin (or unpin, if model is None) a runner to a specific model. A pinned
+    runner will never swap its loaded model. Returns False if runner not found."""
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "UPDATE llm_runners SET pinned_model = $1 WHERE id = $2",
+            model, runner_id,
+        )
+    return result.endswith("1")
+
+
 async def get_runner_by_id(pool: asyncpg.Pool, runner_id: int) -> Optional[dict]:
     """Return a runner by id, or None if not found."""
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            SELECT id, hostname, address, port, capabilities, enabled, auto_update, last_seen, created_at
+            SELECT id, hostname, address, port, capabilities, enabled, auto_update, pinned_model, last_seen, created_at
             FROM llm_runners
             WHERE id = $1
             """,

@@ -847,17 +847,26 @@ async def list_runners():
 class RunnerUpdateRequest(BaseModel):
     enabled: Optional[bool] = None
     auto_update: Optional[bool] = None
+    # pinned_model: dedicate a runner to a model — the scheduler (post-Phase 1)
+    # will never swap its loaded model. Pass "" or null to unpin.
+    # Sentinel "__unset__" means "leave unchanged."
+    pinned_model: Optional[str] = "__unset__"
 
 
 @app.patch("/api/runners/{runner_id}")
 async def update_runner(runner_id: int, req: RunnerUpdateRequest):
-    """Update runner settings (enable/disable, auto_update)."""
+    """Update runner settings (enable/disable, auto_update, pinned_model)."""
     if req.enabled is not None:
         found = await db.set_runner_enabled(app.state.db, runner_id, req.enabled)
         if not found:
             raise HTTPException(404, "Runner not found")
     if req.auto_update is not None:
         found = await db.set_runner_auto_update(app.state.db, runner_id, req.auto_update)
+        if not found:
+            raise HTTPException(404, "Runner not found")
+    if req.pinned_model != "__unset__":
+        model = req.pinned_model or None  # "" → unpin
+        found = await db.set_runner_pinned_model(app.state.db, runner_id, model)
         if not found:
             raise HTTPException(404, "Runner not found")
     return {"ok": True}

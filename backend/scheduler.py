@@ -48,6 +48,14 @@ scheduler_loop_iterations_total = Counter(
 scheduler_batch_size = Histogram(
     "llm_scheduler_batch_size", "Jobs per batch", ["model"],
     buckets=[1, 2, 3, 5, 10, 20])
+# Phase 0 scaffolding for "one model per GPU" scheduler rewrite. Exports the
+# currently-loaded model per runner (value is always 1 when set). Populated
+# from the existing _sync_loaded_models data — no scheduler behavior change.
+scheduler_runner_current_model = Gauge(
+    "llm_scheduler_runner_current_model",
+    "Model currently loaded on a runner (value=1). Absence = no model loaded.",
+    ["runner", "model"],
+)
 
 
 SCHEDULER_LOCK_ID = 900001  # Must match main.py
@@ -69,6 +77,9 @@ class Scheduler:
         self._loading_models: set[str] = set()
         # Cache: model -> runner_id (which runner has it downloaded)
         self._model_runner_cache: dict[str, int] = {}
+        # Tracks which (hostname, model) label combos are currently set on the
+        # scheduler_runner_current_model gauge, so we can remove stale series.
+        self._runner_model_gauge_labels: set[tuple[str, str]] = set()
 
     def start(self):
         if self._task is None or self._task.done():
@@ -250,7 +261,9 @@ class Scheduler:
         try:
             runners = await _db.get_active_runners(self.pool)
             polled_runner_ids: set[int] = set()
+            polled_runner_hostnames: set[str] = set()
             fresh: dict[str, dict] = {}
+            current_per_runner: list[tuple[str, str]] = []  # (hostname, model)
             for r in runners:
                 try:
                     client = await self.get_runner_client(runner_id=r["id"])
@@ -258,6 +271,7 @@ class Scheduler:
                 except Exception:
                     continue
                 polled_runner_ids.add(r["id"])
+                polled_runner_hostnames.add(r["hostname"])
                 for m in status.get("loaded_ollama_models", []):
                     name = m.get("name", "")
                     vram_gb = m.get("size_gb", vram_for_model(name))
@@ -267,6 +281,7 @@ class Scheduler:
                         "active_jobs": len(await queue_db.get_active_jobs_for_model(self.pool, name)),
                         "runner_id": r["id"],
                     }
+                    current_per_runner.append((r["hostname"], name))
             # Keep cached entries for runners we couldn't poll this cycle.
             merged = {
                 name: info
@@ -275,6 +290,24 @@ class Scheduler:
             }
             merged.update(fresh)
             self._loaded_models = merged
+
+            # Refresh the per-runner current-model gauge. Only touch series for
+            # runners we successfully polled — a transient unreachable shouldn't
+            # drop a runner's gauge and create false "no model loaded" readings.
+            fresh_series = set(current_per_runner)
+            stale = {
+                s for s in self._runner_model_gauge_labels
+                if s[0] in polled_runner_hostnames and s not in fresh_series
+            }
+            for hostname, model in stale:
+                try:
+                    scheduler_runner_current_model.remove(hostname, model)
+                except KeyError:
+                    pass
+                self._runner_model_gauge_labels.discard((hostname, model))
+            for hostname, model in fresh_series:
+                scheduler_runner_current_model.labels(runner=hostname, model=model).set(1)
+                self._runner_model_gauge_labels.add((hostname, model))
         except Exception:
             logger.warning("Failed to sync loaded models from runner agents", exc_info=True)
 
