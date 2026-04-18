@@ -537,7 +537,11 @@ class Scheduler:
             try:
                 client = await self.get_runner_client(runner_id=r["id"])
                 status = await client.status()
-            except Exception:
+            except Exception as e:
+                logger.warning(
+                    "check_submission: runner %s (id=%s) unreachable for model=%s: %s",
+                    r.get("hostname"), r.get("id"), model, e,
+                )
                 continue
 
             gpu_total = status.get("gpu_vram_total_gb", 0)
@@ -549,12 +553,24 @@ class Scheduler:
                 max_gpu_total = gpu_total
 
             if vram_needed > gpu_total:
+                logger.info(
+                    "check_submission: runner=%s model=%s too large (need=%.1f total=%.1f)",
+                    r.get("hostname"), model, vram_needed, gpu_total,
+                )
                 continue
 
             if model in loaded_models:
+                logger.info(
+                    "check_submission: runner=%s model=%s already loaded",
+                    r.get("hostname"), model,
+                )
                 return {"ok": True}
 
             if gpu_free >= vram_needed:
+                logger.info(
+                    "check_submission: runner=%s model=%s fits free (need=%.1f free=%.1f)",
+                    r.get("hostname"), model, vram_needed, gpu_free,
+                )
                 return {"ok": True}
 
             evictable_vram = 0
@@ -571,6 +587,13 @@ class Scheduler:
                     loaded_info.append({"model": name, "vram_gb": model_vram, "do_not_evict": False})
 
             available_after_eviction = gpu_free + evictable_vram
+            logger.info(
+                "check_submission: runner=%s model=%s need=%.1f total=%.1f used=%.1f free=%.1f "
+                "evictable=%.1f non_evictable=%.1f after_evict=%.1f loaded=%s",
+                r.get("hostname"), model, vram_needed, gpu_total, gpu_used, gpu_free,
+                evictable_vram, non_evictable_vram, available_after_eviction,
+                list(loaded_models.keys()),
+            )
             if available_after_eviction >= vram_needed:
                 to_evict = [m["model"] for m in loaded_info if not m["do_not_evict"]]
                 best_result = {
