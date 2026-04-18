@@ -586,6 +586,26 @@ class Scheduler:
             gpu_free = round(gpu_total - gpu_used, 1)
             loaded_models = {m["name"]: m.get("size_gb", 0) for m in status.get("loaded_ollama_models", [])}
 
+            # Inconsistent-state detection: the driver shows significant VRAM
+            # used but Ollama's loaded-models list is empty. Happens briefly
+            # during an unload/reload when the driver still holds the pages.
+            # We can't reason about eviction with this snapshot (evictable will
+            # compute to 0, causing a spurious insufficient_vram rejection),
+            # so treat the runner as unreachable for pre-check purposes — the
+            # unreachable-aware acceptance path then accepts optimistically
+            # and runtime eviction re-checks with fresh state.
+            VRAM_IDLE_THRESHOLD_GB = 1.5
+            if gpu_used > VRAM_IDLE_THRESHOLD_GB and not loaded_models:
+                unreachable_count += 1
+                hostname = r.get("hostname", f"id={r.get('id')}")
+                unreachable_hostnames.append(f"{hostname} (stale snapshot)")
+                logger.warning(
+                    "check_submission: runner %s inconsistent snapshot — "
+                    "gpu_used=%.1fGB but loaded=[]; treating as unreachable",
+                    hostname, gpu_used,
+                )
+                continue
+
             if gpu_total > max_gpu_total:
                 max_gpu_total = gpu_total
 
