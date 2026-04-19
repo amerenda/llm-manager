@@ -308,6 +308,15 @@ export function useApps() {
   })
 }
 
+export function useDeleteApp() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (app_id: number) =>
+      del<{ ok: boolean; app_id: number }>(`/api/apps/by-id/${app_id}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['apps'] }),
+  })
+}
+
 export function useRegisterApp() {
   const qc = useQueryClient()
   return useMutation({

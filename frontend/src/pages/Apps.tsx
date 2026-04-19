@@ -1,6 +1,6 @@
 import { useState } from 'react'
-import { AppWindow, Plus, Loader2, CheckCircle2, AlertCircle, Copy, Check, Shield, RefreshCw, Cpu, X, Cloud, Server } from 'lucide-react'
-import { useApps, useRegisterApp, useApproveApp, useUpdateAppPermissions, useUpdateAppAllowedModels, useModelList, useCloudModels, useRunners, useUpdateAppAllowedRunners, useUpdateAppCategories } from '../hooks/useBackend'
+import { AppWindow, Plus, Loader2, CheckCircle2, AlertCircle, Copy, Check, Shield, RefreshCw, Cpu, X, Cloud, Server, Trash2 } from 'lucide-react'
+import { useApps, useRegisterApp, useApproveApp, useUpdateAppPermissions, useUpdateAppAllowedModels, useModelList, useCloudModels, useRunners, useUpdateAppAllowedRunners, useUpdateAppCategories, useDeleteApp } from '../hooks/useBackend'
 import { StatusDot } from '../components/StatusDot'
 import type { RegisteredApp, Runner } from '../types'
 
@@ -489,6 +489,7 @@ export function Apps() {
   const register = useRegisterApp()
   const approve = useApproveApp()
   const updatePerms = useUpdateAppPermissions()
+  const deleteApp = useDeleteApp()
   const [name, setName] = useState('')
   const [url, setUrl] = useState('')
   const [generatedKey, setGeneratedKey] = useState<string | null>(null)
@@ -612,6 +613,21 @@ export function Apps() {
                         allowProfileSwitch={a.allow_profile_switch}
                       />
                       <RunnerAffinityEditor appId={a.id} currentRunnerIds={a.allowed_runner_ids ?? []} />
+                      <button
+                        onClick={() => {
+                          if (confirm(`Delete registered app "${a.name}"? Historical queue jobs are preserved (app_id becomes null), but its permissions and rate limits are removed. The app will need to re-register to come back.`)) {
+                            deleteApp.mutate(a.id)
+                          }
+                        }}
+                        disabled={deleteApp.isPending}
+                        title="Delete application"
+                        className="flex items-center gap-1 text-xs px-2 py-1 rounded-lg bg-gray-800 text-gray-500 border border-gray-700 hover:border-red-700 hover:text-red-400 hover:bg-red-950/30 disabled:opacity-40 transition-colors"
+                      >
+                        {deleteApp.isPending && deleteApp.variables === a.id
+                          ? <Loader2 className="w-3 h-3 animate-spin" />
+                          : <Trash2 className="w-3 h-3" />}
+                        Delete
+                      </button>
                     </div>
                   </td>
                 </tr>

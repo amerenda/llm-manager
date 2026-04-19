@@ -33,7 +33,7 @@ from pydantic import BaseModel
 import db
 from db import (
     init_db,
-    register_app, heartbeat_app, get_apps, deregister_app,
+    register_app, heartbeat_app, get_apps, deregister_app, deregister_app_by_id,
 )
 from gpu import vram_for_model
 from llm_agent import LLMAgentClient
@@ -1745,6 +1745,21 @@ async def remove_app(api_key: str):
         raise HTTPException(status_code=404, detail="App not found")
     _inc_request("/api/apps/delete", "DELETE", 200)
     return {"ok": True}
+
+
+@app.delete("/api/apps/by-id/{app_id}")
+async def remove_app_by_id(app_id: int):
+    """Id-keyed delete for the admin UI (which only has api_key_preview,
+    not the full key). No route collision with /api/apps/{api_key}:
+    api_keys are single path segments so `/apps/by-id/3` — two segments —
+    won't match the api_key pattern."""
+    if not app.state.db:
+        raise HTTPException(status_code=503, detail="Database not available")
+    removed = await deregister_app_by_id(app.state.db, app_id)
+    if not removed:
+        raise HTTPException(status_code=404, detail="App not found")
+    _inc_request("/api/apps/delete", "DELETE", 200)
+    return {"ok": True, "app_id": app_id}
 
 
 # ── App discovery ────────────────────────────────────────────────────────────

@@ -479,6 +479,19 @@ async def deregister_app(pool: asyncpg.Pool, api_key: str) -> bool:
     return result.endswith("1")
 
 
+async def deregister_app_by_id(pool: asyncpg.Pool, app_id: int) -> bool:
+    """Remove a registered app by numeric id. Used by the admin UI, which
+    only has the api_key_preview, not the full key. FKs from
+    app_allowed_models + app_rate_limits cascade; queue_jobs set app_id to
+    NULL so historical jobs survive."""
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM registered_apps WHERE id = $1",
+            app_id,
+        )
+    return result.endswith("1")
+
+
 # ── New: llm_runners ──────────────────────────────────────────────────────────
 
 async def register_runner(
