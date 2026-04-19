@@ -5,14 +5,27 @@ from typing import Optional
 
 # VRAM estimates in GB for known Ollama model tags
 MODEL_VRAM: dict[str, float] = {
+    # MoE models — VRAM based on active parameters, not total
+    "qwen3.6:35b-a3b": 8.0,
+    "qwen3.5:35b-a3b": 8.0,
+    "qwen3:30b-a3b": 8.0,
+    # Dense models
+    "qwen3:14b": 8.5,
+    "qwen3:8b": 5.0,
+    "qwen3.5:9b": 5.5,
     "qwen2.5:7b": 4.5,
     "qwen2.5:14b": 8.5,
     "qwen2.5:32b": 18.0,
     "qwen2.5-coder:7b": 4.5,
     "qwen2.5-coder:14b": 8.5,
+    "deepseek-r1:14b": 8.5,
+    "deepseek-r1:7b": 4.5,
+    "deepseek-r1:8b": 5.0,
+    "devstral-small-2:24b": 15.0,
     "dolphin-llama3:8b": 5.0,
     "dolphin-phi": 2.5,
     "dolphin-phi:latest": 2.5,
+    "llama3.1:8b": 5.0,
     "llama3.2:3b": 2.5,
     "llama3.2:1b": 1.5,
     "llama3:8b": 5.0,
@@ -21,6 +34,7 @@ MODEL_VRAM: dict[str, float] = {
     "phi3:mini": 2.5,
     "phi3:medium": 8.0,
     "gemma2:9b": 5.5,
+    "gemma2:27b": 16.0,
     "gemma2:2b": 2.0,
 }
 
