@@ -1440,6 +1440,11 @@ async def proxy_chat_completions(request: Request, runner_id: Optional[int] = No
         if not allowed:
             raise HTTPException(403, f"Model '{model}' is not allowed for this application")
         app_allowed_runners = await db.get_app_allowed_runners(app.state.db, api_key)
+        # Touch last_seen so the app shows as online
+        pool = app.state.db
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE registered_apps SET last_seen = NOW() WHERE api_key = $1", api_key)
 
     provider = detect_provider(model)
     _inc_request("/v1/chat/completions", "POST", 200)

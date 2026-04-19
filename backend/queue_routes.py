@@ -38,7 +38,8 @@ def _get_scheduler(request: Request) -> Scheduler:
 
 
 async def _resolve_app(request: Request, authorization: Optional[str]) -> Optional[int]:
-    """Resolve app_id from Bearer token. Returns None if no auth."""
+    """Resolve app_id from Bearer token. Returns None if no auth.
+    Also touches last_seen so the app shows as online in the UI."""
 
     if not authorization or not authorization.startswith("Bearer "):
         return None
@@ -49,6 +50,10 @@ async def _resolve_app(request: Request, authorization: Optional[str]) -> Option
             "SELECT id FROM registered_apps WHERE api_key = $1 AND status = 'active'", api_key)
     if not row:
         raise HTTPException(401, "Invalid API key")
+    # Touch last_seen — app is online if it's making API calls
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE registered_apps SET last_seen = NOW() WHERE id = $1", row["id"])
     return row["id"]
 
 
