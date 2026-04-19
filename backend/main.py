@@ -91,6 +91,11 @@ registered_apps_gauge = Gauge("llm_backend_registered_apps", "Number of register
 active_runners_gauge = Gauge("llm_backend_active_runners", "Number of active runners")
 runner_last_seen_seconds = Gauge(
     "llm_backend_runner_last_seen_seconds", "Seconds since runner last heartbeat", ["runner"])
+library_cache_age_seconds = Gauge(
+    "llm_library_cache_age_seconds",
+    "Seconds since the Ollama library cache was last successfully refreshed. "
+    "Alert if > 48h — the refresh CronJob has likely been failing silently.",
+)
 
 # Queue metrics
 queue_jobs_submitted = Counter("llm_queue_jobs_submitted_total", "Total jobs submitted to queue", ["model", "app"])
@@ -305,6 +310,7 @@ _PUBLIC_PREFIXES = (
     "/api/llm/",               # LLM status, models, load/unload (UI + ecdysis)
     "/api/ops",                # Background operations status
     "/api/profiles",           # Profile management
+    "/api/library/refresh",    # CronJob-triggered Ollama library refresh (no secrets)
 )
 
 
@@ -2259,6 +2265,14 @@ async def metrics_endpoint():
                     else:
                         age = 0
                     runner_last_seen_seconds.labels(runner=r["hostname"]).set(round(age, 1))
+        except Exception:
+            pass
+        try:
+            age_hours = await db.get_library_cache_age_hours(app.state.db)
+            # None means no refresh has ever been recorded — treat as very stale
+            # so an alert fires. Use a year as the sentinel.
+            age_seconds = age_hours * 3600 if age_hours is not None else 365 * 24 * 3600
+            library_cache_age_seconds.set(age_seconds)
         except Exception:
             pass
 
