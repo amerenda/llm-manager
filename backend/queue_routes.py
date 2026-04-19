@@ -52,6 +52,28 @@ async def _resolve_app(request: Request, authorization: Optional[str]) -> Option
     return row["id"]
 
 
+async def _priority_for_app(pool, app_id: Optional[int]) -> int:
+    """Map the calling app to a queue priority.
+
+    Apps whose name matches HIGH_PRIORITY_APPS (comma-separated env var) get
+    priority=1. Everything else gets 0. The age-bonus in get_pending_jobs
+    ensures priority=0 jobs don't starve — after 10 min of waiting they catch
+    up to a fresh priority=1 job.
+    """
+    import os
+    if app_id is None:
+        return 0
+    high = [s.strip().lower() for s in os.getenv("HIGH_PRIORITY_APPS", "").split(",") if s.strip()]
+    if not high:
+        return 0
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT name FROM registered_apps WHERE id = $1", app_id)
+    if not row:
+        return 0
+    return 1 if (row["name"] or "").lower() in high else 0
+
+
 def _model_passes_category_filter(
     model_categories: list,
     allowed: list,
@@ -113,10 +135,12 @@ async def submit_job(body: QueueJobRequest, request: Request,
         raise HTTPException(422, check)
 
     job_id = str(uuid.uuid4())[:12]
+    priority = await _priority_for_app(pool, app_id)
     await queue_db.insert_job(
         pool, job_id, None, app_id, body.model,
         body.model_dump(exclude={"model", "metadata"}),
         body.metadata,
+        priority=priority,
     )
 
     # Count position in queue
@@ -154,6 +178,9 @@ async def submit_batch(body: QueueBatchRequest, request: Request,
     if app_id is not None:
         _cat_perms = await queue_db.get_app_category_perms(pool, app_id)
 
+    # Resolve priority once per batch
+    priority = await _priority_for_app(pool, app_id)
+
     for job_req in body.jobs:
         # Category access check
         if _cat_perms and (_cat_perms["allowed_categories"] or _cat_perms["excluded_categories"]):
@@ -176,6 +203,7 @@ async def submit_batch(body: QueueBatchRequest, request: Request,
             pool, job_id, batch_id, app_id, job_req.model,
             job_req.model_dump(exclude={"model", "metadata"}),
             job_req.metadata,
+            priority=priority,
         )
         resp = QueueJobResponse(job_id=job_id, status="queued", model=job_req.model)
         if check.get("warning"):

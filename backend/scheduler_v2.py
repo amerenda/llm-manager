@@ -29,6 +29,7 @@ from prometheus_client import Counter, Histogram
 import queue_db
 from gpu import vram_for_model
 from cloud_providers import detect_provider, ModelProvider, anthropic_chat
+from queue_strategies import make_strategy, QueueStrategy
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +56,12 @@ scheduler_model_swap_seconds = Histogram(
 scheduler_job_wait_seconds = Histogram(
     "llm_scheduler_v2_job_wait_seconds",
     "Time a job spent queued before starting",
+    buckets=[1, 5, 10, 30, 60, 120, 300, 600],
+)
+scheduler_job_wait_by_app_seconds = Histogram(
+    "llm_scheduler_v2_job_wait_by_app_seconds",
+    "Time a job spent queued before starting, broken down by app",
+    ["app"],
     buckets=[1, 5, 10, 30, 60, 120, 300, 600],
 )
 scheduler_jobs_completed_total = Counter(
@@ -92,10 +99,12 @@ class SimplifiedScheduler:
         pool: asyncpg.Pool,
         get_runner_client: callable,
         lock_conn: Optional[asyncpg.Connection] = None,
+        strategy: Optional[QueueStrategy] = None,
     ):
         self.pool = pool
         self.get_runner_client = get_runner_client
         self.lock_conn = lock_conn
+        self.strategy: QueueStrategy = strategy or make_strategy()
 
         self._task: Optional[asyncio.Task] = None
         self._running = False
@@ -108,7 +117,10 @@ class SimplifiedScheduler:
         if self._task is None or self._task.done():
             self._running = True
             self._task = asyncio.create_task(self._loop())
-            logger.info("SimplifiedScheduler started (one-model-per-GPU, strict FIFO)")
+            logger.info(
+                "SimplifiedScheduler started (one-model-per-GPU, strategy=%s)",
+                self.strategy.name,
+            )
 
     def stop(self):
         self._running = False
@@ -269,7 +281,7 @@ class SimplifiedScheduler:
     # ── main loop ────────────────────────────────────────────────────────────
 
     async def _loop(self):
-        """Main scheduler loop. Strict FIFO over the queue."""
+        """Main scheduler loop. Dispatches batches chosen by the strategy."""
         await self._reconcile_runners()
         idle_counter = 0
         while self._running:
@@ -281,8 +293,8 @@ class SimplifiedScheduler:
 
                 await self._refresh_runners()
 
-                pending = await queue_db.get_pending_jobs(self.pool, limit=1)
-                if not pending:
+                batch = await self.strategy.next_jobs(self.pool)
+                if not batch:
                     await asyncio.sleep(1)
                     idle_counter += 1
                     if idle_counter > 3600:  # hourly cleanup
@@ -291,13 +303,16 @@ class SimplifiedScheduler:
                     continue
                 idle_counter = 0
 
-                job = pending[0]
-                model = job["model"]
+                head = batch[0]
+                model = head["model"]
                 provider = detect_provider(model)
 
                 if provider != ModelProvider.LOCAL:
-                    # Cloud: run inline, no runner needed
-                    await self._run_job(job, runner=None)
+                    # Cloud: batch isn't meaningful — run each inline.
+                    for job in batch:
+                        if not self._running:
+                            break
+                        await self._run_job(job, runner=None)
                     continue
 
                 runner = self._pick_runner(model)
@@ -306,19 +321,29 @@ class SimplifiedScheduler:
                     await asyncio.sleep(2)
                     continue
 
-                # Mark job as loading_model so clients see progress during swap
+                # Swap (if needed) then run every job in the batch against the
+                # now-loaded runner. Mark every job loading_model so clients
+                # see progress during the swap.
                 if runner.current_model != model:
-                    await queue_db.update_job_status(self.pool, job["id"], "loading_model")
+                    for job in batch:
+                        await queue_db.update_job_status(self.pool, job["id"], "loading_model")
                     ok = await self._swap_model(runner, model)
                     if not ok:
-                        await queue_db.update_job_status(
-                            self.pool, job["id"], "failed",
-                            error=f"Could not load {model} on {runner.hostname}",
-                        )
-                        scheduler_jobs_completed_total.labels(model=model, status="failed").inc()
+                        for job in batch:
+                            await queue_db.update_job_status(
+                                self.pool, job["id"], "failed",
+                                error=f"Could not load {model} on {runner.hostname}",
+                            )
+                            scheduler_jobs_completed_total.labels(model=model, status="failed").inc()
                         continue
 
-                await self._run_job(job, runner=runner)
+                if len(batch) > 1:
+                    logger.info("Running batch of %d jobs for %s on %s",
+                                len(batch), model, runner.hostname)
+                for job in batch:
+                    if not self._running:
+                        break
+                    await self._run_job(job, runner=runner)
 
             except asyncio.CancelledError:
                 break
@@ -468,6 +493,8 @@ class SimplifiedScheduler:
                 wait = time.time() - created_at.timestamp()
                 if wait > 0:
                     scheduler_job_wait_seconds.observe(wait)
+                    app_name = (job.get("app_name") or "unknown").lower()
+                    scheduler_job_wait_by_app_seconds.labels(app=app_name).observe(wait)
             except Exception:
                 pass
 

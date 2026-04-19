@@ -111,12 +111,24 @@ async def update_job_status(pool: asyncpg.Pool, job_id: str, status: str,
 
 
 async def get_pending_jobs(pool: asyncpg.Pool, limit: int = 100) -> list[dict]:
-    """Get queued jobs ordered by priority (desc) then created_at (asc)."""
+    """Get queued jobs ordered by effective priority (priority + age bonus)
+    then created_at.
+
+    The effective priority adds 1 point per 600s (10 min) of waiting. This
+    gives higher-priority apps a soft edge: a fresh priority=1 job beats a
+    fresh priority=0 job, but a priority=0 job that has waited 10 minutes
+    catches up, and one that has waited longer wins. Prevents starvation
+    without a separate age-bump pass.
+    """
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
-            SELECT * FROM queue_jobs
-            WHERE status IN ('queued', 'waiting_for_eviction')
-            ORDER BY priority DESC, created_at ASC
+            SELECT q.*, a.name AS app_name
+            FROM queue_jobs q
+            LEFT JOIN registered_apps a ON a.id = q.app_id
+            WHERE q.status IN ('queued', 'waiting_for_eviction')
+            ORDER BY
+                (q.priority + EXTRACT(EPOCH FROM (now() - q.created_at)) / 600) DESC,
+                q.created_at ASC
             LIMIT $1
         """, limit)
     return [dict(r) for r in rows]
