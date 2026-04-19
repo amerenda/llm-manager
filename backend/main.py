@@ -195,6 +195,9 @@ async def lifespan(app: FastAPI):
         recovered = await queue_db.recover_stuck_jobs(pool)
         if recovered:
             logger.warning("Recovered %d jobs stuck in loading_model/running → queued", recovered)
+        orphaned = await db.recover_stuck_ops(pool)
+        if orphaned:
+            logger.warning("Marked %d background ops as failed (orphaned by previous pod)", orphaned)
         scheduler.start()
         logger.info("Queue scheduler started (advisory lock acquired)")
     else:
@@ -225,6 +228,18 @@ async def lifespan(app: FastAPI):
                             )
                     except Exception:
                         logger.exception("recover_stuck_jobs failed on lock retry")
+                    # Same for background_ops (pull/update/sync): asyncio tasks
+                    # don't survive a pod restart, so any op still marked
+                    # 'running' from the previous pod is a zombie.
+                    try:
+                        orphaned = await db.recover_stuck_ops(pool)
+                        if orphaned:
+                            logger.warning(
+                                "Marked %d background ops as failed (orphaned by previous pod)",
+                                orphaned,
+                            )
+                    except Exception:
+                        logger.exception("recover_stuck_ops failed on lock retry")
                     scheduler.start()
                     logger.info("Queue scheduler started (advisory lock acquired on retry)")
                     return

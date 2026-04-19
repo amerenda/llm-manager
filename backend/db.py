@@ -1256,3 +1256,28 @@ async def delete_op(pool: asyncpg.Pool, op_id: str) -> bool:
             "DELETE FROM background_ops WHERE op_id = $1", op_id,
         )
     return result.endswith("1")
+
+
+async def recover_stuck_ops(pool: asyncpg.Pool) -> int:
+    """Mark any ops stuck in 'running' status as failed with an orphan note.
+
+    The in-process _do_pull / _do_update / _do_sync_pull tasks don't survive
+    a pod restart; if the pod dies mid-stream the op row is never updated and
+    sits 'running' forever (auto-expire only fires on completed/failed rows).
+    Called once on startup so stale running rows from the previous pod get
+    cleaned up. Returns the number of rows updated."""
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            """
+            UPDATE background_ops
+            SET status = 'failed',
+                error = 'Orphaned by scheduler pod restart. Please retry.',
+                updated_at = NOW()
+            WHERE status = 'running'
+            """
+        )
+    # result is like "UPDATE N"
+    try:
+        return int(result.split()[-1])
+    except (ValueError, IndexError):
+        return 0
