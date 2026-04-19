@@ -600,6 +600,15 @@ export function useOps(enabled = true) {
   })
 }
 
+export function useDismissOp() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (op_id: string) =>
+      del<{ ok: boolean; op_id: string }>(`/api/ops/${encodeURIComponent(op_id)}`),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['ops'] }),
+  })
+}
+
 // ── Library ──────────────────────────────────────────────────────────────────
 
 export function useLibrary(params: { search?: string; safety?: string; fits?: boolean; downloaded?: boolean; hasPulling?: boolean } = {}) {

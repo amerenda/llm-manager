@@ -1247,3 +1247,12 @@ async def get_op(pool: asyncpg.Pool, op_id: str) -> Optional[dict]:
             op_id,
         )
     return dict(row) if row else None
+
+
+async def delete_op(pool: asyncpg.Pool, op_id: str) -> bool:
+    """Remove an op record. Returns False if not found."""
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM background_ops WHERE op_id = $1", op_id,
+        )
+    return result.endswith("1")

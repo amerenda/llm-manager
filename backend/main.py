@@ -1075,6 +1075,23 @@ class LLMPullRequest(BaseModel):
     model: str
 
 
+def _extract_pull_error(last_status: str) -> Optional[str]:
+    """Parse the final NDJSON chunk from an Ollama /api/pull stream. When a
+    pull fails (e.g. manifest not found, auth error) Ollama closes the stream
+    with a line like `{"error": "..."}` — but the HTTP response is still 200,
+    so the async iterator never raises. This catches that case so the op can
+    be marked failed instead of silently "completed"."""
+    if not last_status:
+        return None
+    try:
+        parsed = json.loads(last_status)
+    except Exception:
+        return None
+    if isinstance(parsed, dict) and parsed.get("error"):
+        return str(parsed["error"])
+    return None
+
+
 @app.post("/api/llm/models/pull")
 async def llm_pull_model(req: LLMPullRequest, runner_id: Optional[int] = None):
     """Pull a model. Runs in background — returns immediately with operation ID."""
@@ -1116,7 +1133,13 @@ async def llm_pull_model(req: LLMPullRequest, runner_id: Optional[int] = None):
                 if now - last_write >= 1.0:
                     await db.update_op(pool, op_id, progress=last_status)
                     last_write = now
-            await db.update_op(pool, op_id, status="completed", progress=last_status)
+            err = _extract_pull_error(last_status)
+            if err:
+                await db.update_op(pool, op_id, status="failed",
+                                   progress=last_status, error=err)
+            else:
+                await db.update_op(pool, op_id, status="completed",
+                                   progress=last_status)
         except Exception as e:
             await db.update_op(pool, op_id, status="failed", error=str(e))
 
@@ -1146,7 +1169,13 @@ async def update_model(model: str, runner_id: Optional[int] = None):
                 if now - last_write >= 1.0:
                     await db.update_op(pool, op_id, progress=last_status)
                     last_write = now
-            await db.update_op(pool, op_id, status="completed", progress=last_status)
+            err = _extract_pull_error(last_status)
+            if err:
+                await db.update_op(pool, op_id, status="failed",
+                                   progress=last_status, error=err)
+            else:
+                await db.update_op(pool, op_id, status="completed",
+                                   progress=last_status)
         except Exception as e:
             await db.update_op(pool, op_id, status="failed", error=str(e))
 
@@ -1273,7 +1302,13 @@ async def sync_models():
                     if now - last_write >= 1.0:
                         await db.update_op(pool, oid, progress=last_status)
                         last_write = now
-                await db.update_op(pool, oid, status="completed", progress=last_status)
+                err = _extract_pull_error(last_status)
+                if err:
+                    await db.update_op(pool, oid, status="failed",
+                                       progress=last_status, error=err)
+                else:
+                    await db.update_op(pool, oid, status="completed",
+                                       progress=last_status)
             except Exception as e:
                 await db.update_op(pool, oid, status="failed", error=str(e))
 
@@ -1299,6 +1334,21 @@ async def get_operation(op_id: str):
     if op is None:
         raise HTTPException(404, "Operation not found")
     return op
+
+
+@app.delete("/api/ops/{op_id}")
+async def dismiss_operation(op_id: str):
+    """Dismiss (delete) a background operation record. Used by the UI to
+    clear completed/failed ops after the user has acknowledged them.
+    Refuses to delete ops still in 'running' status — those must finish
+    first to avoid orphaning a live pull."""
+    op = await db.get_op(app.state.db, op_id)
+    if op is None:
+        raise HTTPException(404, "Operation not found")
+    if op.get("status") == "running":
+        raise HTTPException(409, "Cannot dismiss a running operation")
+    await db.delete_op(app.state.db, op_id)
+    return {"ok": True, "op_id": op_id}
 
 
 @app.post("/api/llm/models/delete")

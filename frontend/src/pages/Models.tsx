@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Download, Trash2, Loader2, CheckCircle2, AlertCircle, Image, Layers, Cpu, Upload, Shield, ShieldOff, Play, Square, Search, RefreshCw, BookOpen, Cloud, Settings2, Power, RefreshCcw, Server, X } from 'lucide-react'
-import { usePullModel, useDeleteModel, useCheckpoints, useSwitchCheckpoint, useLlmStatus, useLoadModel, useUnloadFromVram, useStartComfyui, useStopComfyui, useLibrary, useRefreshLibrary, useCloudModels, useCloudStatus, useUpdateCloudModel, useCloudKeys, useStoreCloudKey, useDeleteCloudKey, useRunners, useSyncModels, useOps, useModelList, useUpdateModelSettings } from '../hooks/useBackend'
+import { usePullModel, useDeleteModel, useCheckpoints, useSwitchCheckpoint, useLlmStatus, useLoadModel, useUnloadFromVram, useStartComfyui, useStopComfyui, useLibrary, useRefreshLibrary, useCloudModels, useCloudStatus, useUpdateCloudModel, useCloudKeys, useStoreCloudKey, useDeleteCloudKey, useRunners, useSyncModels, useOps, useDismissOp, useModelList, useUpdateModelSettings } from '../hooks/useBackend'
 import type { LibraryModel, Runner } from '../types'
 import type { CloudModel, ModelInfo, StoredApiKey } from '../hooks/useBackend'
 
@@ -166,6 +166,8 @@ function InstalledModelsView({ runners, selectedRunner, selectedRunnerHostname }
   const [expandedModel, setExpandedModel] = useState<string | null>(null)
 
   const activeOps = (ops.data ?? []).filter(op => op.status === 'running')
+  const failedOps = (ops.data ?? []).filter(op => op.status === 'failed')
+  const dismissOp = useDismissOp()
   const allLoadedModels = status.data?.loaded_ollama_models ?? []
   const runnerStatuses = status.data?.runners ?? []
 
@@ -274,6 +276,38 @@ function InstalledModelsView({ runners, selectedRunner, selectedRunnerHostname }
               </div>
             )
           })}
+        </div>
+      )}
+
+      {/* Failed operations */}
+      {failedOps.length > 0 && (
+        <div className="bg-red-950/40 border border-red-900/60 rounded-xl p-4 space-y-2">
+          <p className="text-xs text-red-300 font-medium uppercase tracking-wide flex items-center gap-1.5">
+            <AlertCircle className="w-3.5 h-3.5" />
+            Failed ({failedOps.length})
+          </p>
+          {failedOps.map(op => (
+            <div key={op.op_id ?? op.model} className="flex items-start justify-between gap-3 text-xs">
+              <div className="min-w-0 flex-1">
+                <div className="text-gray-200 font-medium truncate">
+                  {op.type} · {op.model}
+                </div>
+                <div className="text-red-300/90 break-words mt-0.5">
+                  {op.error || op.progress || 'unknown error'}
+                </div>
+              </div>
+              {op.op_id && (
+                <button
+                  onClick={() => dismissOp.mutate(op.op_id!)}
+                  disabled={dismissOp.isPending}
+                  title="Dismiss"
+                  className="shrink-0 text-gray-500 hover:text-gray-300 disabled:opacity-40 p-1 rounded hover:bg-red-900/40"
+                >
+                  <X className="w-3.5 h-3.5" />
+                </button>
+              )}
+            </div>
+          ))}
         </div>
       )}
 
