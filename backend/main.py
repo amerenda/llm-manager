@@ -1327,16 +1327,18 @@ async def list_operations():
     return await db.get_ops(app.state.db)
 
 
-@app.get("/api/ops/{op_id}")
+@app.get("/api/ops/{op_id:path}")
 async def get_operation(op_id: str):
-    """Get status of a background operation."""
+    """Get status of a background operation. op_id uses :path matcher so
+    ids that include slashes (model names like MFDoom/deepseek-r1-...)
+    still route correctly once URL-decoded."""
     op = await db.get_op(app.state.db, op_id)
     if op is None:
         raise HTTPException(404, "Operation not found")
     return op
 
 
-@app.delete("/api/ops/{op_id}")
+@app.delete("/api/ops/{op_id:path}")
 async def dismiss_operation(op_id: str):
     """Dismiss (delete) a background operation record. Used by the UI to
     clear completed/failed ops after the user has acknowledged them.
