@@ -546,8 +546,14 @@ function LibraryBrowserSection({ selectedRunner, selectedRunnerHostname, allRunn
   allRunners: Runner[]
 }) {
   const modelList = useModelList()
-  const downloadedNames = new Set((modelList.data ?? []).map((m: { name: string }) => m.name))
-  const fitsMap = new Map((modelList.data ?? []).map((m: { name: string; fits: boolean }) => [m.name, m.fits]))
+  // Scope downloaded-ness to the selected runner. /api/models is fleet-wide
+  // and returns every runner's models; without this filter a model downloaded
+  // only on archlinux would light up green on the murderbot tab too.
+  const scopedModelEntries = (modelList.data ?? []).filter(
+    m => selectedRunner === undefined || (m.runners ?? []).some(r => r.runner_id === selectedRunner)
+  )
+  const downloadedNames = new Set(scopedModelEntries.map((m: { name: string }) => m.name))
+  const fitsMap = new Map(scopedModelEntries.map((m: { name: string; fits: boolean }) => [m.name, m.fits]))
   const [search, setSearch] = useState('')
   const [safety, setSafety] = useState<string>('safe')
   const [fitsOnly, setFitsOnly] = useState(true)
