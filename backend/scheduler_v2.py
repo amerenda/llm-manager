@@ -291,11 +291,22 @@ class SimplifiedScheduler:
     # ── main loop ────────────────────────────────────────────────────────────
 
     async def _loop(self):
-        """Main scheduler loop. Dispatches batches chosen by the strategy."""
+        """Main scheduler loop. Picks batches via the strategy and hands each
+        one off to a background task so the loop never blocks on inference.
+
+        Without backgrounding, one busy runner serialized work across the whole
+        fleet — queued jobs for different models sat waiting until the current
+        runner's chat call returned, even when other runners were idle. Each
+        batch runs sequentially on its assigned runner (Ollama is serial
+        anyway); parallelism is only across runners."""
         await self._reconcile_runners()
         idle_counter = 0
+        active_tasks: set[asyncio.Task] = set()
         while self._running:
             try:
+                # Reap completed dispatch tasks so the set doesn't grow unbounded
+                active_tasks = {t for t in active_tasks if not t.done()}
+
                 if not await self._verify_lock():
                     logger.warning("Lost scheduler advisory lock — stopping")
                     self._running = False
@@ -318,48 +329,85 @@ class SimplifiedScheduler:
                 provider = detect_provider(model)
 
                 if provider != ModelProvider.LOCAL:
-                    # Cloud: batch isn't meaningful — run each inline.
+                    # Cloud jobs don't need a runner — dispatch each as its own
+                    # background task so they run in parallel.
                     for job in batch:
-                        if not self._running:
-                            break
-                        await self._run_job(job, runner=None)
+                        t = asyncio.create_task(self._run_job(job, runner=None))
+                        active_tasks.add(t)
                     continue
 
                 runner = self._pick_runner(model)
                 if runner is None:
-                    # No runner ready right now — wait briefly before retrying.
+                    # No runner idle right now (all busy or draining). Wait a
+                    # beat, try again. Background tasks keep running.
                     await asyncio.sleep(2)
                     continue
 
-                # Swap (if needed) then run every job in the batch against the
-                # now-loaded runner. Mark every job loading_model so clients
-                # see progress during the swap.
-                if runner.current_model != model:
+                # Eagerly mark the runner busy with the first job in the batch
+                # so the very next loop iteration's _pick_runner skips it.
+                runner.in_flight_job_id = head["id"]
+
+                # If we're about to swap, mark the jobs loading_model now so
+                # they don't stay "queued" while the task handles the swap.
+                swap_needed = runner.current_model != model
+                if swap_needed:
                     for job in batch:
                         await queue_db.update_job_status(self.pool, job["id"], "loading_model")
-                    ok = await self._swap_model(runner, model)
-                    if not ok:
-                        for job in batch:
-                            await queue_db.update_job_status(
-                                self.pool, job["id"], "failed",
-                                error=f"Could not load {model} on {runner.hostname}",
-                            )
-                            scheduler_jobs_completed_total.labels(model=model, status="failed").inc()
-                        continue
 
-                if len(batch) > 1:
-                    logger.info("Running batch of %d jobs for %s on %s",
-                                len(batch), model, runner.hostname)
-                for job in batch:
-                    if not self._running:
-                        break
-                    await self._run_job(job, runner=runner)
+                task = asyncio.create_task(
+                    self._dispatch_batch(runner, batch, swap_needed)
+                )
+                active_tasks.add(task)
 
             except asyncio.CancelledError:
                 break
             except Exception:
                 logger.exception("Scheduler loop error")
                 await asyncio.sleep(5)
+
+    async def _dispatch_batch(
+        self,
+        runner: RunnerState,
+        batch: list[dict],
+        swap_needed: bool,
+    ) -> None:
+        """Run a batch of jobs sequentially on a specific runner. Swaps the
+        model first if needed. Runs as a background task so the scheduler loop
+        can continue picking up work for other runners.
+
+        Ownership contract: runner.in_flight_job_id was set to batch[0]['id']
+        by the caller before we started. This function is responsible for
+        clearing it (via _run_job's finally) and for marking any unrun jobs
+        failed if the swap breaks."""
+        model = batch[0]["model"]
+        try:
+            if swap_needed:
+                ok = await self._swap_model(runner, model)
+                if not ok:
+                    for job in batch:
+                        await queue_db.update_job_status(
+                            self.pool, job["id"], "failed",
+                            error=f"Could not load {model} on {runner.hostname}",
+                        )
+                        scheduler_jobs_completed_total.labels(model=model, status="failed").inc()
+                    return
+
+            if len(batch) > 1:
+                logger.info("Running batch of %d jobs for %s on %s",
+                            len(batch), model, runner.hostname)
+            for job in batch:
+                if not self._running:
+                    break
+                await self._run_job(job, runner=runner)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("dispatch_batch failed on %s for %s", runner.hostname, model)
+        finally:
+            # _run_job clears in_flight_job_id in its own finally, but if the
+            # swap failed we never entered _run_job — clear it here defensively.
+            if runner.in_flight_job_id is not None:
+                runner.in_flight_job_id = None
 
     # ── routing ──────────────────────────────────────────────────────────────
 
