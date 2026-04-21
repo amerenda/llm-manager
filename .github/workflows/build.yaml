@@ -81,7 +81,7 @@ jobs:
           fi
 
   build-amd64:
-    name: Build amd64
+    name: Build amd64 (${{ matrix.component }})
     needs: [changes, test, set-tag]
     if: |
       always() &&
@@ -90,34 +90,50 @@ jobs:
       (needs.test.result == 'success' || needs.test.result == 'skipped') &&
       (needs.changes.outputs.backend == 'true' || needs.changes.outputs.frontend == 'true' || needs.changes.outputs.agent == 'true')
     runs-on: arc-runner-set
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component: backend
+            dockerfile: backend/Dockerfile
+            context: .
+            build_args: ""
+          - component: frontend
+            dockerfile: frontend/Dockerfile
+            context: frontend
+            build_args: ""
+          - component: agent
+            dockerfile: agent/Dockerfile
+            context: agent
+            build_args: "--build-arg AGENT_VERSION=${TAG}"
     env:
       TAG: ${{ needs.set-tag.outputs.tag }}
     steps:
+      - name: Check if build needed
+        id: check
+        run: |
+          case "${{ matrix.component }}" in
+            backend)  CHANGED="${{ needs.changes.outputs.backend }}" ;;
+            frontend) CHANGED="${{ needs.changes.outputs.frontend }}" ;;
+            agent)    CHANGED="${{ needs.changes.outputs.agent }}" ;;
+          esac
+          echo "skip=$([[ "$CHANGED" == "true" ]] && echo false || echo true)" >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@v6
+        if: steps.check.outputs.skip != 'true'
 
       - name: Login to Docker Hub
+        if: steps.check.outputs.skip != 'true'
         run: echo "${DOCKERHUB_TOKEN}" | docker login -u "${DOCKERHUB_USERNAME}" --password-stdin
 
-      - name: Build and push backend (amd64)
-        if: needs.changes.outputs.backend == 'true'
+      - name: Build and push ${{ matrix.component }} (amd64)
+        if: steps.check.outputs.skip != 'true'
         run: |
-          docker build -t "${IMAGE}:backend-${TAG}-amd64" -f backend/Dockerfile .
-          docker push "${IMAGE}:backend-${TAG}-amd64"
-
-      - name: Build and push frontend (amd64)
-        if: needs.changes.outputs.frontend == 'true'
-        run: |
-          docker build -t "${IMAGE}:frontend-${TAG}-amd64" -f frontend/Dockerfile frontend
-          docker push "${IMAGE}:frontend-${TAG}-amd64"
-
-      - name: Build and push agent (amd64)
-        if: needs.changes.outputs.agent == 'true'
-        run: |
-          docker build --build-arg AGENT_VERSION="${TAG}" -t "${IMAGE}:agent-${TAG}-amd64" -f agent/Dockerfile agent
-          docker push "${IMAGE}:agent-${TAG}-amd64"
+          docker build ${{ matrix.build_args }} -t "${IMAGE}:${{ matrix.component }}-${TAG}-amd64" -f ${{ matrix.dockerfile }} ${{ matrix.context }}
+          docker push "${IMAGE}:${{ matrix.component }}-${TAG}-amd64"
 
       - name: Build and push agent-amd (amd64 only)
-        if: needs.changes.outputs.agent == 'true'
+        if: steps.check.outputs.skip != 'true' && matrix.component == 'agent'
         run: |
           docker build --build-arg AGENT_VERSION="${TAG}" -t "${IMAGE}:agent-amd-${TAG}" -t "${IMAGE}:agent-amd-latest" -f agent/Dockerfile.amd agent
           docker push "${IMAGE}:agent-amd-${TAG}"
