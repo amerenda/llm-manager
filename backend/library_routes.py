@@ -71,7 +71,18 @@ async def browse_library(
     fits: Optional[bool] = None,  # true = only models that fit
     downloaded: Optional[bool] = None,  # true = only downloaded
     sort: Optional[str] = "name",  # name | pulls | vram
+    runner_id: Optional[int] = None,  # scope everything to this runner
 ):
+    """Browse the Ollama library.
+
+    When runner_id is set, everything scopes to that runner:
+      - downloaded / downloaded_on / outdated_on reflect ONLY that runner
+      - fits / fits_on use only that runner's VRAM
+      - community models (downloaded on that runner but not in catalog)
+        are NOT added here; caller uses /api/library/community?runner_id=...
+        for those.
+    When runner_id is None, behavior is the existing fleet-wide aggregate.
+    """
     pool = _get_pool(request)
 
     # Ensure cache exists
@@ -94,6 +105,8 @@ async def browse_library(
     per_runner_digests: dict[str, dict[str, str]] = {}
     try:
         runners = await db.get_active_runners(pool)
+        if runner_id is not None:
+            runners = [r for r in runners if r["id"] == runner_id]
         for r in runners:
             hostname = r["hostname"]
             per_runner_downloads[hostname] = set()
@@ -276,21 +289,98 @@ async def refresh_cache(request: Request):
     return result
 
 
+@router.get("/community")
+async def community_models(
+    request: Request,
+    runner_id: Optional[int] = None,
+):
+    """Models downloaded on a runner that aren't in the Ollama library
+    catalog — community / user-namespaced / local models (e.g.
+    MFDoom/deepseek-r1-tool-calling:... or imported from hf.co/...).
+
+    Catalog scrape only covers ollama.com/library/*, so anything else
+    never shows up in /api/library. This endpoint fills the gap: reads
+    each runner's capabilities.downloaded_models, filters out anything
+    whose base name appears in the catalog, returns what's left with
+    runner+digest+outdated info.
+    """
+    pool = _get_pool(request)
+    catalog_names = {m["name"] for m in await db.get_library_models(pool, search=None)}
+
+    runners = await db.get_active_runners(pool)
+    if runner_id is not None:
+        runners = [r for r in runners if r["id"] == runner_id]
+
+    # Build remote digest cache for outdated comparison
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT model_name, digest FROM ollama_remote_manifests WHERE digest != ''"
+        )
+        remote_digests = {r["model_name"]: r["digest"] for r in rows}
+
+    # Aggregate by tag across runners
+    tag_info: dict[str, dict] = {}
+    for r in runners:
+        caps = r.get("capabilities") or {}
+        if isinstance(caps, str):
+            import json as _j
+            try:
+                caps = _j.loads(caps)
+            except Exception:
+                caps = {}
+        for entry in (caps.get("downloaded_models") or []):
+            if not isinstance(entry, dict):
+                continue
+            tag = entry.get("name")
+            if not tag:
+                continue
+            # Base name is everything before the first `:` (tag separator).
+            # If it matches a catalog entry, skip — handled by /api/library.
+            base = tag.split(":", 1)[0]
+            if base in catalog_names:
+                continue
+            t = tag_info.setdefault(tag, {
+                "name": tag,
+                "downloaded_on": [],
+                "outdated_on": [],
+                "size_bytes": entry.get("size_bytes", 0),
+                "digest": entry.get("digest", ""),
+            })
+            if r["hostname"] not in t["downloaded_on"]:
+                t["downloaded_on"].append(r["hostname"])
+            # Outdated detection
+            rdig = remote_digests.get(tag)
+            ldig = entry.get("digest", "")
+            if rdig and ldig and _norm_digest(rdig) != _norm_digest(ldig):
+                if r["hostname"] not in t["outdated_on"]:
+                    t["outdated_on"].append(r["hostname"])
+
+    return {"models": sorted(tag_info.values(), key=lambda m: m["name"])}
+
+
 @router.post("/refresh-remote-digests")
-async def refresh_remote_digests_endpoint(request: Request, force: bool = False):
+async def refresh_remote_digests_endpoint(
+    request: Request,
+    force: bool = False,
+    runner_id: Optional[int] = None,
+):
     """Re-check each currently-downloaded tag against registry.ollama.ai
     and store the remote digest. Library view's `outdated_on` reads from
     this cache.
 
     force=false (default): tags with a successful cache entry newer than 1h
-    are skipped to avoid hammering the registry. Perfect for the CronJob.
+      are skipped to avoid hammering the registry. Perfect for the CronJob.
     force=true: re-fetch every tag. Use from the UI button when the user
-    explicitly asks.
+      explicitly asks.
+    runner_id=X: only refresh tags downloaded on that runner. Unset =
+      fleet-wide.
     """
     from library import refresh_remote_manifests
     pool = _get_pool(request)
-    tags: set[str] = set()
     runners = await db.get_active_runners(pool)
+    if runner_id is not None:
+        runners = [r for r in runners if r["id"] == runner_id]
+    tags: set[str] = set()
     for r in runners:
         caps = r.get("capabilities") or {}
         if isinstance(caps, str):
@@ -304,7 +394,8 @@ async def refresh_remote_digests_endpoint(request: Request, force: bool = False)
             if name:
                 tags.add(name)
     if not tags:
-        return {"status": "idle", "message": "No downloaded models on any runner"}
+        scope = f"runner {runner_id}" if runner_id else "any runner"
+        return {"status": "idle", "message": f"No downloaded models on {scope}"}
     min_age = 0 if force else 3600
     result = await refresh_remote_manifests(pool, sorted(tags), min_age_seconds=min_age)
     return {"status": "ok", **result, "tags_checked": len(tags)}
@@ -348,25 +439,30 @@ async def force_update_model(name: str, request: Request, runner_id: Optional[in
 
 
 @router.post("/update-outdated")
-async def update_outdated_models(request: Request):
+async def update_outdated_models(
+    request: Request,
+    runner_id: Optional[int] = None,
+    refresh: bool = True,
+):
     """Re-pull every downloaded tag whose local digest differs from the
-    cached remote digest. Returns the list of pulls kicked off.
+    cached remote digest.
 
-    Does NOT refresh remote digests first — call /refresh-remote-digests
-    before this for a full freshness pass. (Separated so a batch update
-    doesn't double-hit registry.ollama.ai.)"""
+    refresh=True (default): call refresh_remote_manifests(min_age=1h)
+      first so the cache is warm. Recent entries are skipped — cheap on
+      repeat calls, correct when the cache is empty.
+    refresh=False: compare against current cache, no registry hits.
+    runner_id=X: only scan that runner's downloaded_models and only
+      pull on that runner. Unset = fleet-wide.
+    """
+    from library import refresh_remote_manifests
     pool = _get_pool(request)
-    # Load remote digests
-    async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT model_name, digest FROM ollama_remote_manifests WHERE digest != ''"
-        )
-        remote = {r["model_name"]: r["digest"] for r in rows}
-    if not remote:
-        return {"status": "idle", "message": "No remote digests cached — run /refresh-remote-digests first"}
 
-    kicked: list[dict] = []
+    # Build the set of tags in scope (so auto-refresh only hits what we'll compare)
     runners = await db.get_active_runners(pool)
+    if runner_id is not None:
+        runners = [r for r in runners if r["id"] == runner_id]
+    scope_tags: set[str] = set()
+    per_runner_models: dict[int, list[dict]] = {}
     for r in runners:
         caps = r.get("capabilities") or {}
         if isinstance(caps, str):
@@ -375,23 +471,54 @@ async def update_outdated_models(request: Request):
                 caps = _j.loads(caps)
             except Exception:
                 caps = {}
-        for entry in (caps.get("downloaded_models") or []):
-            if not isinstance(entry, dict):
-                continue
+        models = [m for m in (caps.get("downloaded_models") or []) if isinstance(m, dict)]
+        per_runner_models[r["id"]] = models
+        for m in models:
+            if m.get("name"):
+                scope_tags.add(m["name"])
+
+    if refresh and scope_tags:
+        # 1h min_age skip keeps this cheap — already-fresh entries aren't re-fetched
+        await refresh_remote_manifests(pool, sorted(scope_tags), min_age_seconds=3600)
+
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT model_name, digest FROM ollama_remote_manifests WHERE digest != ''"
+        )
+        remote = {r["model_name"]: r["digest"] for r in rows}
+
+    kicked: list[dict] = []
+    skipped_no_remote: int = 0
+    up_to_date: int = 0
+    hostname_by_id = {r["id"]: r["hostname"] for r in runners}
+    for rid, models in per_runner_models.items():
+        host = hostname_by_id.get(rid, str(rid))
+        for entry in models:
             tag = entry.get("name")
             local_digest = entry.get("digest")
             remote_digest = remote.get(tag)
-            if not tag or not local_digest or not remote_digest:
+            if not tag or not local_digest:
+                continue
+            if not remote_digest:
+                # Remote never resolved (404 on registry, network blip, etc.)
+                skipped_no_remote += 1
                 continue
             if _norm_digest(local_digest) == _norm_digest(remote_digest):
-                continue  # up-to-date
-            # Stale copy — pull on THIS runner so the local blob is refreshed.
+                up_to_date += 1
+                continue
             try:
-                resp = await _pull_on_runner(request, r["id"], tag)
-                kicked.append({"runner": r["hostname"], "model": tag, "op_id": resp.get("op_id")})
+                resp = await _pull_on_runner(request, rid, tag)
+                kicked.append({"runner": host, "model": tag, "op_id": resp.get("op_id")})
             except Exception as e:
-                kicked.append({"runner": r["hostname"], "model": tag, "error": str(e)})
-    return {"status": "ok", "pulls": kicked, "count": len(kicked)}
+                kicked.append({"runner": host, "model": tag, "error": str(e)})
+    return {
+        "status": "ok",
+        "pulls": kicked,
+        "count": len(kicked),
+        "up_to_date": up_to_date,
+        "skipped_no_remote": skipped_no_remote,
+        "scope": f"runner {runner_id}" if runner_id else "fleet",
+    }
 
 
 @router.get("/{name}")

@@ -253,6 +253,12 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             logger.warning("Could not register with backend at startup: %s", e)
 
+    # Fire an eager heartbeat immediately so the backend has fresh state
+    # (downloaded_models, loaded_models, GPU counters) right after register,
+    # instead of waiting up to 30s for the periodic loop's first tick. The
+    # library UI was showing stale "downloaded on runnerX" info for that
+    # first half-minute after every install/restart.
+    asyncio.create_task(_heartbeat_once())
     heartbeat_task = asyncio.create_task(_heartbeat_loop())
     yield
     heartbeat_task.cancel()
@@ -294,36 +300,43 @@ async def _build_capabilities() -> dict:
     return caps
 
 
+async def _heartbeat_once():
+    """One heartbeat POST. Silently skips if not yet registered or no backend.
+    Extracted so both the periodic loop and the eager post-register call go
+    through the same code path."""
+    if not _RUNNER_ID or not BACKEND_URL:
+        return
+    # Auto-rotate TLS cert if expiring within 30 days
+    try:
+        _ensure_tls_cert(_DETECTED_IP)
+    except Exception:
+        pass
+    try:
+        caps = await _build_capabilities()
+        async with httpx.AsyncClient(timeout=5) as c:
+            resp = await c.post(
+                f"{BACKEND_URL}/api/runners/heartbeat",
+                json={"runner_id": _RUNNER_ID, "capabilities": caps},
+                headers={"X-Agent-PSK": AGENT_PSK} if AGENT_PSK else {},
+            )
+            try:
+                data = resp.json()
+                if data.get("update_to") and data["update_to"] != AGENT_VERSION:
+                    if data.get("auto_update"):
+                        logger.info("Auto-updating: %s -> %s", AGENT_VERSION, data["update_to"])
+                        asyncio.create_task(_self_update(data["update_to"]))
+                    else:
+                        logger.info("Update available: %s -> %s (manual trigger required)", AGENT_VERSION, data["update_to"])
+            except Exception:
+                pass
+    except Exception as e:
+        logger.debug("Heartbeat failed: %s", e)
+
+
 async def _heartbeat_loop():
     while True:
         await asyncio.sleep(30)
-        if not _RUNNER_ID or not BACKEND_URL:
-            continue
-        # Auto-rotate TLS cert if expiring within 30 days
-        try:
-            _ensure_tls_cert(_DETECTED_IP)
-        except Exception:
-            pass
-        try:
-            caps = await _build_capabilities()
-            async with httpx.AsyncClient(timeout=5) as c:
-                resp = await c.post(
-                    f"{BACKEND_URL}/api/runners/heartbeat",
-                    json={"runner_id": _RUNNER_ID, "capabilities": caps},
-                    headers={"X-Agent-PSK": AGENT_PSK} if AGENT_PSK else {},
-                )
-                try:
-                    data = resp.json()
-                    if data.get("update_to") and data["update_to"] != AGENT_VERSION:
-                        if data.get("auto_update"):
-                            logger.info("Auto-updating: %s -> %s", AGENT_VERSION, data["update_to"])
-                            asyncio.create_task(_self_update(data["update_to"]))
-                        else:
-                            logger.info("Update available: %s -> %s (manual trigger required)", AGENT_VERSION, data["update_to"])
-                except Exception:
-                    pass
-        except Exception as e:
-            logger.debug("Heartbeat failed: %s", e)
+        await _heartbeat_once()
 
 
 _updating = False
