@@ -79,6 +79,38 @@ class TestPickRunner:
         sched = _make_sched([])
         assert sched._pick_runner("qwen3:14b") is None
 
+    def test_draining_runner_skipped(self):
+        # Only runner is draining → no one to pick, even if it's idle and has the model loaded
+        a = RunnerState(runner_id=1, hostname="a", gpu_total_gb=17,
+                        current_model="qwen3:14b", draining=True)
+        sched = _make_sched([a])
+        assert sched._pick_runner("qwen3:14b") is None
+
+    def test_draining_runner_skipped_fallback_to_other(self):
+        # One draining runner has the model, another non-draining idle → pick the non-draining
+        a = RunnerState(runner_id=1, hostname="a", gpu_total_gb=17,
+                        current_model="qwen3:14b", draining=True)
+        b = RunnerState(runner_id=2, hostname="b", gpu_total_gb=24)
+        sched = _make_sched([a, b])
+        assert sched._pick_runner("qwen3:14b") is b  # will swap b to qwen3:14b
+
+    def test_draining_pinned_blocks_new_work(self):
+        # Pinned but draining → don't fall through to other runners (admin intent wins)
+        a = RunnerState(runner_id=1, hostname="a", gpu_total_gb=17,
+                        pinned_model="qwen3:14b", draining=True)
+        b = RunnerState(runner_id=2, hostname="b", gpu_total_gb=24)
+        sched = _make_sched([a, b])
+        assert sched._pick_runner("qwen3:14b") is None
+
+    def test_draining_allows_inflight_to_finish(self):
+        # A draining runner with an in-flight job is NOT picked for new work.
+        # (The in-flight job itself runs to completion via _run_job — this test
+        # only asserts the "no new work" half; the other half is structural.)
+        a = RunnerState(runner_id=1, hostname="a", gpu_total_gb=17,
+                        current_model="qwen3:14b", in_flight_job_id="j1", draining=True)
+        sched = _make_sched([a])
+        assert sched._pick_runner("qwen3:14b") is None
+
 
 # ── check_submission ────────────────────────────────────────────────────────
 

@@ -352,7 +352,7 @@ export function useUpdateAppAllowedRunners() {
 export function useUpdateRunner() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: ({ runnerId, ...body }: { runnerId: number; enabled?: boolean; auto_update?: boolean }) =>
+    mutationFn: ({ runnerId, ...body }: { runnerId: number; enabled?: boolean; auto_update?: boolean; draining?: boolean; pinned_model?: string | null }) =>
       patch<{ ok: boolean }>(`/api/runners/${runnerId}`, body),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['runners'] })

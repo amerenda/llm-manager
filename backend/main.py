@@ -882,8 +882,20 @@ async def set_target_version(req: SetTargetVersionRequest):
 
 @app.get("/api/runners")
 async def list_runners():
-    """Return all recent runners (including disabled) for UI display."""
-    return await db.get_all_runners(app.state.db)
+    """Return all recent runners (including disabled) for UI display.
+
+    Enriches each row with live scheduler state (current_model,
+    in_flight_job_id) when this pod is the scheduler-holding pod. The
+    non-scheduler replica returns those fields as None — the UI polls
+    the scheduler pod often enough that it picks up the right state."""
+    rows = await db.get_all_runners(app.state.db)
+    scheduler = getattr(app.state, "scheduler", None)
+    runner_state = getattr(scheduler, "_runners", {}) if scheduler else {}
+    for r in rows:
+        rs = runner_state.get(r["id"])
+        r["current_model"] = rs.current_model if rs else None
+        r["in_flight_job_id"] = rs.in_flight_job_id if rs else None
+    return rows
 
 
 class RunnerUpdateRequest(BaseModel):
@@ -893,11 +905,15 @@ class RunnerUpdateRequest(BaseModel):
     # will never swap its loaded model. Pass "" or null to unpin.
     # Sentinel "__unset__" means "leave unchanged."
     pinned_model: Optional[str] = "__unset__"
+    # draining: graceful takedown flag. True = scheduler stops assigning new
+    # jobs to this runner; in-flight job runs to completion. False = resume
+    # normal scheduling. Persists in llm_runners.draining.
+    draining: Optional[bool] = None
 
 
 @app.patch("/api/runners/{runner_id}")
 async def update_runner(runner_id: int, req: RunnerUpdateRequest):
-    """Update runner settings (enable/disable, auto_update, pinned_model)."""
+    """Update runner settings (enable/disable, auto_update, pinned_model, draining)."""
     if req.enabled is not None:
         found = await db.set_runner_enabled(app.state.db, runner_id, req.enabled)
         if not found:
@@ -909,6 +925,10 @@ async def update_runner(runner_id: int, req: RunnerUpdateRequest):
     if req.pinned_model != "__unset__":
         model = req.pinned_model or None  # "" → unpin
         found = await db.set_runner_pinned_model(app.state.db, runner_id, model)
+        if not found:
+            raise HTTPException(404, "Runner not found")
+    if req.draining is not None:
+        found = await db.set_runner_draining(app.state.db, runner_id, req.draining)
         if not found:
             raise HTTPException(404, "Runner not found")
     return {"ok": True}

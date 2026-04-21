@@ -83,6 +83,11 @@ class RunnerState:
     pinned_model: Optional[str] = None
     model_loaded_at: Optional[float] = None
     in_flight_job_id: Optional[str] = None
+    # Draining: admin has asked the runner to stop accepting new work. The
+    # current in-flight job (if any) finishes normally; new jobs skip this
+    # runner. The flag persists in llm_runners.draining; it clears only when
+    # an admin explicitly un-drains.
+    draining: bool = False
 
     @property
     def is_idle(self) -> bool:
@@ -200,6 +205,7 @@ class SimplifiedScheduler:
                 runner_id=r["id"],
                 hostname=r["hostname"],
                 pinned_model=r.get("pinned_model"),
+                draining=bool(r.get("draining")),
             )
             # Seed gpu_total_gb from capabilities (populated by agent heartbeat)
             caps = r.get("capabilities") or {}
@@ -258,6 +264,7 @@ class SimplifiedScheduler:
                     runner_id=r["id"],
                     hostname=r["hostname"],
                     pinned_model=r.get("pinned_model"),
+                    draining=bool(r.get("draining")),
                 )
                 # Try to poll for initial state
                 try:
@@ -275,8 +282,11 @@ class SimplifiedScheduler:
                         rs.gpu_total_gb = round(total_bytes / 1e9, 2)
                 self._runners[r["id"]] = rs
             else:
-                # Update pinned_model (may have been changed via API)
+                # Update mutable admin-controlled flags (changed via API).
+                # current_model and in_flight_job_id are scheduler-owned —
+                # don't touch those.
                 rs.pinned_model = r.get("pinned_model")
+                rs.draining = bool(r.get("draining"))
 
     # ── main loop ────────────────────────────────────────────────────────────
 
@@ -359,21 +369,28 @@ class SimplifiedScheduler:
         Policy:
           1. Pinned runner for this model → use if idle; if busy, return None
              (don't fall through — a pinned runner's jobs must go to it).
-          2. Any non-pinned idle runner already on this model.
-          3. Any non-pinned idle runner that can fit the model (swap).
+             Pinned + draining: don't route new work here — admin intent wins.
+          2. Any non-pinned, non-draining idle runner already on this model.
+          3. Any non-pinned, non-draining idle runner that can fit the model (swap).
           4. None.
+
+        In all cases, a runner marked `draining` is excluded from new work.
+        Its current in-flight job (if any) is unaffected; it finishes and the
+        runner goes idle with draining=True, still excluded.
         """
-        # 1. Pinned match
+        # 1. Pinned match (skip draining pinned runners — wait for drain to clear)
         pinned = [r for r in self._runners.values() if r.pinned_model == model]
         if pinned:
             for r in pinned:
+                if r.draining:
+                    continue
                 if r.is_idle:
                     return r
-            return None  # pinned but busy — wait
+            return None  # pinned but busy or draining — wait
 
         # 2. Already-loaded + idle
         for r in self._runners.values():
-            if r.pinned_model is not None:
+            if r.pinned_model is not None or r.draining:
                 continue
             if r.current_model == model and r.is_idle:
                 return r
@@ -381,7 +398,7 @@ class SimplifiedScheduler:
         # 3. Idle + fits
         need = vram_for_model(model)
         for r in self._runners.values():
-            if r.pinned_model is not None:
+            if r.pinned_model is not None or r.draining:
                 continue
             if not r.is_idle:
                 continue

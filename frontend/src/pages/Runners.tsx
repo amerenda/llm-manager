@@ -150,6 +150,28 @@ function RunnerDetail({ runner, target }: { runner: Runner; target: string }) {
           <span className="text-xs text-gray-400">Enabled</span>
         </label>
 
+        {/* Drain — stop scheduling new jobs; let in-flight finish */}
+        {isGpu && (
+          <label className="flex items-center gap-1.5 cursor-pointer" title="Stop assigning new jobs to this runner. The current in-flight job finishes normally. Use before restarting Ollama or doing maintenance.">
+            <input
+              type="checkbox"
+              checked={runner.draining === true}
+              onChange={() => update.mutate({ runnerId: runner.id, draining: !runner.draining })}
+              disabled={update.isPending}
+              className="w-3.5 h-3.5 rounded border-gray-600 bg-gray-800 text-amber-500 focus:ring-amber-500 focus:ring-offset-0 cursor-pointer"
+            />
+            <span className="text-xs text-gray-400">
+              Drain
+              {runner.draining && runner.in_flight_job_id && (
+                <span className="ml-1 text-amber-400">(job {runner.in_flight_job_id.slice(0, 8)} running)</span>
+              )}
+              {runner.draining && !runner.in_flight_job_id && (
+                <span className="ml-1 text-amber-400">(drained)</span>
+              )}
+            </span>
+          </label>
+        )}
+
         {/* Flush VRAM + Restart Ollama — GPU runners only */}
         {isGpu && (
           <div className="ml-auto flex items-center gap-1.5">

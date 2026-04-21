@@ -55,6 +55,11 @@ export interface Runner {
   port: number
   enabled: boolean
   auto_update: boolean
+  pinned_model?: string | null
+  draining?: boolean
+  // Scheduler-live fields (populated only by the scheduler-holding pod)
+  current_model?: string | null
+  in_flight_job_id?: string | null
   capabilities: {
     // GPU runner fields
     gpu_vram_total_bytes?: number
