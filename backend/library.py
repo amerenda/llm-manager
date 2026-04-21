@@ -283,7 +283,10 @@ async def ensure_model_tags(pool: asyncpg.Pool, model_name: str) -> list[dict]:
 
 # ── Remote manifest digest lookup (for "update available" detection) ────────
 
-async def fetch_remote_manifest_digest(model_tag: str) -> tuple[str, Optional[str]]:
+async def fetch_remote_manifest_digest(
+    model_tag: str,
+    max_retries: int = 2,
+) -> tuple[str, Optional[str]]:
     """Return (digest, error) for a model:tag from registry.ollama.ai.
 
     Handles both library models (`qwen3.5:9b` → `library/qwen3.5:9b`) and
@@ -292,6 +295,8 @@ async def fetch_remote_manifest_digest(model_tag: str) -> tuple[str, Optional[st
     Uses HEAD on the manifest endpoint so we get the content digest via the
     `Docker-Content-Digest` header without downloading the manifest body.
     Accepts the Ollama-specific manifest media type in addition to OCI.
+
+    Retries with exponential backoff on 429 (rate limit) and 5xx.
     """
     # Split off tag
     if ":" in model_tag:
@@ -310,34 +315,92 @@ async def fetch_remote_manifest_digest(model_tag: str) -> tuple[str, Optional[st
                   "application/vnd.ollama.image.manifest+json, "
                   "application/json",
     }
-    try:
-        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as c:
-            # HEAD gives us the digest header without the body
-            r = await c.head(url, headers=headers)
-            if r.status_code == 404:
-                return "", "not found"
-            if r.status_code >= 400:
-                return "", f"HTTP {r.status_code}"
-            digest = r.headers.get("Docker-Content-Digest") or r.headers.get("docker-content-digest") or ""
-            if not digest:
-                # Some registries don't send the header on HEAD — fall back to GET
-                r = await c.get(url, headers=headers)
-                digest = r.headers.get("Docker-Content-Digest", "")
-                if not digest and r.status_code == 200:
-                    # Last resort: compute digest ourselves from the manifest JSON
-                    import hashlib
-                    digest = "sha256:" + hashlib.sha256(r.content).hexdigest()
-            return digest, None
-    except Exception as e:
-        return "", str(e)
+
+    backoff = 1.0  # seconds — doubles on each retry
+    for attempt in range(max_retries + 1):
+        try:
+            async with httpx.AsyncClient(timeout=15, follow_redirects=True) as c:
+                r = await c.head(url, headers=headers)
+                # 429 Too Many Requests, 503 Service Unavailable → back off
+                if r.status_code in (429, 503) and attempt < max_retries:
+                    # Honor Retry-After header if provided
+                    retry_after = r.headers.get("Retry-After")
+                    delay = float(retry_after) if retry_after and retry_after.isdigit() else backoff
+                    logger.info("Registry %s on %s — backing off %.1fs (attempt %d/%d)",
+                                r.status_code, model_tag, delay, attempt + 1, max_retries + 1)
+                    await asyncio.sleep(delay)
+                    backoff *= 2
+                    continue
+                if r.status_code == 404:
+                    return "", "not found"
+                if r.status_code >= 400:
+                    return "", f"HTTP {r.status_code}"
+                digest = r.headers.get("Docker-Content-Digest") or r.headers.get("docker-content-digest") or ""
+                if not digest:
+                    # Some registries don't send the header on HEAD — fall back to GET
+                    r = await c.get(url, headers=headers)
+                    digest = r.headers.get("Docker-Content-Digest", "")
+                    if not digest and r.status_code == 200:
+                        # Last resort: compute digest ourselves from the manifest JSON
+                        import hashlib
+                        digest = "sha256:" + hashlib.sha256(r.content).hexdigest()
+                return digest, None
+        except Exception as e:
+            if attempt >= max_retries:
+                return "", str(e)
+            logger.info("Registry request failed (%s) — retrying in %.1fs", e, backoff)
+            await asyncio.sleep(backoff)
+            backoff *= 2
+    return "", "max retries exceeded"
 
 
-async def refresh_remote_manifests(pool: asyncpg.Pool, model_names: list[str]) -> dict:
+async def refresh_remote_manifests(
+    pool: asyncpg.Pool,
+    model_names: list[str],
+    min_age_seconds: int = 3600,
+    inter_request_delay: float = 0.25,
+) -> dict:
     """Fetch remote manifest digests for each model:tag and cache in
-    ollama_remote_manifests. Returns {checked: N, errors: M}."""
+    ollama_remote_manifests.
+
+    Rate-limit aware:
+    - Skips tags checked successfully within the last min_age_seconds
+      (default 1h) so repeated calls are cheap.
+    - Sleeps inter_request_delay between requests to avoid bursts.
+    - fetch_remote_manifest_digest itself retries with exponential backoff
+      on 429/503.
+
+    Returns {checked, errors, skipped}."""
+    if not model_names:
+        return {"checked": 0, "errors": 0, "skipped": 0}
+
+    # Fetch current cache state to decide which tags to skip
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT model_name, digest, error,
+                   EXTRACT(EPOCH FROM (NOW() - checked_at))::int AS age_sec
+            FROM ollama_remote_manifests
+            WHERE model_name = ANY($1::text[])
+            """,
+            list(set(model_names)),
+        )
+    cached = {r["model_name"]: r for r in rows}
+
     checked = 0
     errors = 0
-    for name in sorted(set(model_names)):
+    skipped = 0
+    unique_names = sorted(set(model_names))
+    for i, name in enumerate(unique_names):
+        row = cached.get(name)
+        # Skip recently-successful entries — re-fetch only if old, missing, or errored
+        if row and row["age_sec"] < min_age_seconds and row["digest"] and not row["error"]:
+            skipped += 1
+            continue
+
+        if i > 0:
+            await asyncio.sleep(inter_request_delay)
+
         digest, err = await fetch_remote_manifest_digest(name)
         async with pool.acquire() as conn:
             await conn.execute(
@@ -355,8 +418,12 @@ async def refresh_remote_manifests(pool: asyncpg.Pool, model_names: list[str]) -
             errors += 1
         else:
             checked += 1
-    logger.info("Remote manifests refreshed: %d checked, %d errors", checked, errors)
-    return {"checked": checked, "errors": errors}
+
+    logger.info(
+        "Remote manifests refreshed: %d checked, %d errors, %d skipped (cached)",
+        checked, errors, skipped,
+    )
+    return {"checked": checked, "errors": errors, "skipped": skipped}
 
 
 async def classify_model(pool: asyncpg.Pool, model_name: str) -> str:

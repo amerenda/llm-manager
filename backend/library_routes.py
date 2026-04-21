@@ -261,11 +261,16 @@ async def refresh_cache(request: Request):
 
 
 @router.post("/refresh-remote-digests")
-async def refresh_remote_digests_endpoint(request: Request):
+async def refresh_remote_digests_endpoint(request: Request, force: bool = False):
     """Re-check each currently-downloaded tag against registry.ollama.ai
     and store the remote digest. Library view's `outdated_on` reads from
-    this cache. Safe to call on-demand — polls only tags actually downloaded
-    on a runner."""
+    this cache.
+
+    force=false (default): tags with a successful cache entry newer than 1h
+    are skipped to avoid hammering the registry. Perfect for the CronJob.
+    force=true: re-fetch every tag. Use from the UI button when the user
+    explicitly asks.
+    """
     from library import refresh_remote_manifests
     pool = _get_pool(request)
     tags: set[str] = set()
@@ -284,7 +289,8 @@ async def refresh_remote_digests_endpoint(request: Request):
                 tags.add(name)
     if not tags:
         return {"status": "idle", "message": "No downloaded models on any runner"}
-    result = await refresh_remote_manifests(pool, sorted(tags))
+    min_age = 0 if force else 3600
+    result = await refresh_remote_manifests(pool, sorted(tags), min_age_seconds=min_age)
     return {"status": "ok", **result, "tags_checked": len(tags)}
 
 

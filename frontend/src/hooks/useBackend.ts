@@ -654,8 +654,9 @@ export function useDismissOp() {
 export function useRefreshRemoteDigests() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: () => post<{ status: string; checked?: number; errors?: number; tags_checked?: number; message?: string }>(
-      '/api/library/refresh-remote-digests', {}),
+    mutationFn: () => post<{ status: string; checked?: number; errors?: number; skipped?: number; tags_checked?: number; message?: string }>(
+      // User-initiated → force=true bypasses the 1h cache so the click feels live
+      '/api/library/refresh-remote-digests?force=true', {}),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['library'] }),
   })
 }
