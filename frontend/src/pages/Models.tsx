@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Download, Trash2, Loader2, CheckCircle2, AlertCircle, Image, Layers, Cpu, Upload, Shield, ShieldOff, Play, Square, Search, RefreshCw, BookOpen, Cloud, Settings2, Power, RefreshCcw, Server, X } from 'lucide-react'
-import { usePullModel, useDeleteModel, useCheckpoints, useSwitchCheckpoint, useLlmStatus, useLoadModel, useUnloadFromVram, useStartComfyui, useStopComfyui, useLibrary, useRefreshLibrary, useRefreshRemoteDigests, useUpdateOutdatedModels, useForceUpdateModel, useCloudModels, useCloudStatus, useUpdateCloudModel, useCloudKeys, useStoreCloudKey, useDeleteCloudKey, useRunners, useSyncModels, useOps, useDismissOp, useModelList, useUpdateModelSettings } from '../hooks/useBackend'
+import { usePullModel, useDeleteModel, useCheckpoints, useSwitchCheckpoint, useLlmStatus, useLoadModel, useUnloadFromVram, useStartComfyui, useStopComfyui, useLibrary, useRefreshLibrary, useRefreshRemoteDigests, useUpdateOutdatedModels, useForceUpdateModel, useCommunityModels, useCloudModels, useCloudStatus, useUpdateCloudModel, useCloudKeys, useStoreCloudKey, useDeleteCloudKey, useRunners, useSyncModels, useOps, useDismissOp, useModelList, useUpdateModelSettings } from '../hooks/useBackend'
 import type { LibraryModel, Runner } from '../types'
 import type { CloudModel, ModelInfo, StoredApiKey } from '../hooks/useBackend'
 
@@ -569,6 +569,10 @@ function LibraryBrowserSection({ selectedRunner, selectedRunnerHostname, allRunn
     fits: fitsOnly || undefined,
     downloaded: hideDownloaded ? false : undefined,
     hasPulling: pullingOps.length > 0,
+    // Scope the entire library view to the selected runner — downloaded_on,
+    // outdated_on, fits_on all reflect ONLY that runner. When unset,
+    // fleet-wide behavior.
+    runner_id: selectedRunner,
   })
 
   const rawModels = (library.data?.models ?? []).filter(
@@ -619,10 +623,20 @@ function LibraryBrowserSection({ selectedRunner, selectedRunnerHostname, allRunn
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <BookOpen className="w-4 h-4 text-brand-400" />
-          <h2 className="text-base font-semibold text-gray-200">Ollama Library</h2>
+          <h2 className="text-base font-semibold text-gray-200">
+            {selectedRunner !== undefined
+              ? `Ollama Library — ${selectedRunnerHostname ?? 'runner'}`
+              : 'Ollama Library'}
+          </h2>
           <span className="text-xs text-gray-600">{library.data?.total ?? 0} models</span>
         </div>
-        <LibraryToolbar cacheAge={cacheAge} onRefreshCatalog={() => refresh.mutate()} refreshCatalogPending={refresh.isPending} />
+        <LibraryToolbar
+          cacheAge={cacheAge}
+          onRefreshCatalog={() => refresh.mutate()}
+          refreshCatalogPending={refresh.isPending}
+          selectedRunner={selectedRunner}
+          selectedRunnerHostname={selectedRunnerHostname}
+        />
       </div>
 
       {/* Legend */}
@@ -632,6 +646,10 @@ function LibraryBrowserSection({ selectedRunner, selectedRunnerHostname, allRunn
         <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-yellow-500" /> Downloaded, won't fit</span>
         <span className="flex items-center gap-1"><span className="w-2 h-2 rounded-full bg-red-500" /> Won't fit</span>
       </div>
+
+      {/* Community / custom models — downloaded tags not in the library catalog */}
+      <CommunityModelsSection selectedRunner={selectedRunner} selectedRunnerHostname={selectedRunnerHostname} />
+
 
       {/* Filters */}
       <div className="flex gap-2 flex-wrap">
@@ -749,42 +767,36 @@ function LibraryBrowserSection({ selectedRunner, selectedRunnerHostname, allRunn
                       <p className={`text-xs text-gray-500 mt-1 ${isExpanded ? '' : 'line-clamp-1'}`}>{m.description}</p>
                     )}
                     {!isExpanded && (
-                      <div className="flex items-center gap-3 mt-2 flex-wrap">
+                      <div className="space-y-2 mt-2">
                         {m.parameter_sizes.length > 0 && (
-                          <div className="flex gap-1 flex-wrap">
-                            {m.parameter_sizes.slice(0, 6).map(s => {
-                              const sizeModel = `${m.name}:${s}`
-                              const isDownloaded = downloadedNames.has(sizeModel) || downloadedNames.has(`${m.name}:latest`)
-                              const sizeFits = m.size_info?.[s]?.fits ?? fitsMap.get(sizeModel) ?? m.fits
-                              // Green: downloaded. Yellow: downloaded but doesn't fit. Blue: available, fits. Red: won't fit.
-                              const badgeClass = isDownloaded && sizeFits
-                                ? 'bg-green-900/30 text-green-400'
-                                : isDownloaded && !sizeFits
-                                ? 'bg-yellow-900/30 text-yellow-400'
-                                : !isDownloaded && sizeFits
-                                ? 'bg-blue-900/30 text-blue-400'
-                                : 'bg-red-900/30 text-red-400'
-                              return <span key={s} className={`text-[10px] px-1.5 py-0.5 rounded ${badgeClass}`}>{s}</span>
-                            })}
-                            {m.parameter_sizes.length > 6 && (
-                              <span className="text-[10px] text-gray-600">+{m.parameter_sizes.length - 6} more</span>
-                            )}
-                          </div>
+                          <LibraryTagGrid
+                            model={m}
+                            downloadedNames={downloadedNames}
+                            fitsMap={fitsMap}
+                            allRunners={allRunners}
+                            selectedRunner={selectedRunner}
+                            selectedRunnerHostname={selectedRunnerHostname}
+                            onPull={handlePull}
+                            pullPending={pull.isPending}
+                            isModelPulling={isModelPulling}
+                            getModelOpStatus={getModelOpStatus}
+                          />
                         )}
-                        <span className="text-[10px] text-gray-600">~{m.vram_estimate_gb}GB VRAM</span>
-                        {m.pulls && <span className="text-[10px] text-gray-600">{m.pulls} pulls</span>}
-                        {m.categories.includes('tools') && (
-                          <span className="text-[10px] bg-emerald-900/30 text-emerald-400 px-1.5 py-0.5 rounded">tools</span>
-                        )}
-                        {m.categories.includes('vision') && (
-                          <span className="text-[10px] bg-violet-900/30 text-violet-400 px-1.5 py-0.5 rounded">vision</span>
-                        )}
-                        {m.categories.includes('thinking') && (
-                          <span className="text-[10px] bg-cyan-900/30 text-cyan-400 px-1.5 py-0.5 rounded">thinking</span>
-                        )}
-                        {m.categories.includes('embedding') && (
-                          <span className="text-[10px] bg-gray-800 text-gray-400 px-1.5 py-0.5 rounded">embedding</span>
-                        )}
+                        <div className="flex items-center gap-3 flex-wrap">
+                          {m.pulls && <span className="text-[10px] text-gray-600">{m.pulls} pulls</span>}
+                          {m.categories.includes('tools') && (
+                            <span className="text-[10px] bg-emerald-900/30 text-emerald-400 px-1.5 py-0.5 rounded">tools</span>
+                          )}
+                          {m.categories.includes('vision') && (
+                            <span className="text-[10px] bg-violet-900/30 text-violet-400 px-1.5 py-0.5 rounded">vision</span>
+                          )}
+                          {m.categories.includes('thinking') && (
+                            <span className="text-[10px] bg-cyan-900/30 text-cyan-400 px-1.5 py-0.5 rounded">thinking</span>
+                          )}
+                          {m.categories.includes('embedding') && (
+                            <span className="text-[10px] bg-gray-800 text-gray-400 px-1.5 py-0.5 rounded">embedding</span>
+                          )}
+                        </div>
                       </div>
                     )}
                   </div>
@@ -1251,7 +1263,10 @@ export function Models() {
           </button>
         </div>
 
-        {tab === 'local' && runnerList.length >= 2 && (
+        {/* Sync Models is a fleet-level action — hide it when a specific
+            runner is selected. Per-runner work happens via the library
+            section's Update outdated / Force update buttons. */}
+        {tab === 'local' && runnerList.length >= 2 && selectedRunner === undefined && (
           <button
             onClick={async () => {
               setSyncMsg(null)
@@ -1328,6 +1343,218 @@ export function Models() {
 }
 
 
+// ── LibraryTagGrid ──────────────────────────────────────────────────────
+// Bigger, tappable per-tag buttons on the collapsed library card. Replaces
+// the old inline pill badges that were read-only info. Each tag shows state
+// (3-bucket: downloaded / outdated / available), size, and hover/click-to-
+// pull when appropriate.
+//
+// Click behavior:
+//   - Not downloaded + fits → pulls to selected runner (or first-fit runner)
+//   - Downloaded → no-op (force-update + delete live in expanded detail to
+//     avoid accidental clicks during browsing)
+//   - Not downloaded + won't fit → disabled with tooltip
+
+function LibraryTagGrid({
+  model,
+  downloadedNames,
+  fitsMap,
+  allRunners,
+  selectedRunner,
+  selectedRunnerHostname,
+  onPull,
+  pullPending,
+  isModelPulling,
+  getModelOpStatus,
+}: {
+  model: LibraryModel
+  downloadedNames: Set<string>
+  fitsMap: Map<string, boolean>
+  allRunners: Runner[]
+  selectedRunner?: number
+  selectedRunnerHostname?: string
+  onPull: (model: string, runnerId?: number) => void
+  pullPending: boolean
+  isModelPulling: (m: string) => boolean
+  getModelOpStatus: (m: string) => { status: 'running' | 'completed' | 'failed'; error?: string } | null
+}) {
+  return (
+    <div className="flex gap-1.5 flex-wrap">
+      {model.parameter_sizes.map(s => {
+        const tag = `${model.name}:${s}`
+        const isDownloaded = downloadedNames.has(tag) || downloadedNames.has(`${model.name}:latest`)
+        const fits = model.size_info?.[s]?.fits ?? fitsMap.get(tag) ?? model.fits
+        const isOutdated = (model.outdated_on ?? []).length > 0 && isDownloaded
+        const vramGb = model.size_info?.[s]?.vram_gb
+        const pulling = isModelPulling(tag)
+        const op = getModelOpStatus(tag)
+
+        // State-driven styling (3 buckets + fit modifier)
+        let tone: string
+        let icon: React.ReactNode = null
+        let stateLabel = ''
+        if (pulling) {
+          tone = 'bg-amber-900/30 text-amber-400 border-amber-800/60'
+          icon = <Loader2 className="w-3 h-3 animate-spin" />
+          stateLabel = 'pulling'
+        } else if (op?.status === 'failed') {
+          tone = 'bg-red-900/30 text-red-400 border-red-800/60'
+          icon = <AlertCircle className="w-3 h-3" />
+          stateLabel = 'failed'
+        } else if (isDownloaded && isOutdated) {
+          tone = 'bg-amber-900/30 text-amber-400 border-amber-800/60'
+          icon = <AlertCircle className="w-3 h-3" />
+          stateLabel = 'update'
+        } else if (isDownloaded && fits) {
+          tone = 'bg-green-900/30 text-green-400 border-green-800/60'
+          icon = <CheckCircle2 className="w-3 h-3" />
+          stateLabel = 'installed'
+        } else if (isDownloaded && !fits) {
+          tone = 'bg-yellow-900/30 text-yellow-400 border-yellow-800/60'
+          icon = <AlertCircle className="w-3 h-3" />
+          stateLabel = "won't fit"
+        } else if (!isDownloaded && fits) {
+          tone = 'bg-blue-900/30 text-blue-400 hover:bg-blue-800/50 border-blue-800/60 cursor-pointer'
+          icon = <Download className="w-3 h-3" />
+          stateLabel = 'pull'
+        } else {
+          tone = 'bg-gray-800/60 text-gray-500 border-gray-700 cursor-not-allowed'
+          icon = <X className="w-3 h-3" />
+          stateLabel = "won't fit"
+        }
+
+        const canPull = !isDownloaded && fits && !pulling
+        const title = [
+          tag,
+          vramGb ? `~${vramGb}GB VRAM` : null,
+          isDownloaded ? `downloaded on ${(model.downloaded_on ?? []).join(', ') || '?'}` : null,
+          isOutdated ? `update available on ${(model.outdated_on ?? []).join(', ')}` : null,
+          canPull && selectedRunnerHostname ? `click to pull to ${selectedRunnerHostname}` :
+          canPull ? 'click to pull' : null,
+        ].filter(Boolean).join(' · ')
+
+        const onClick = (e: React.MouseEvent) => {
+          e.stopPropagation()
+          if (!canPull) return
+          if (selectedRunner !== undefined) {
+            onPull(tag, selectedRunner)
+            return
+          }
+          // No scope — pick first runner that fits
+          const runner = allRunners.find(r => (model.fits_on ?? []).some(f => f.runner === r.hostname))
+          onPull(tag, runner?.id)
+        }
+
+        return (
+          <button
+            key={s}
+            type="button"
+            onClick={onClick}
+            disabled={!canPull || pullPending}
+            title={title}
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border text-xs font-medium transition-colors ${tone} ${!canPull ? 'disabled:opacity-100' : ''}`}
+          >
+            {icon}
+            <span className="font-mono">{s}</span>
+            {vramGb !== undefined && (
+              <span className="text-[10px] opacity-70">{vramGb}GB</span>
+            )}
+            <span className="text-[10px] opacity-70">· {stateLabel}</span>
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+
+// ── Community / custom models ───────────────────────────────────────────
+// Tags downloaded on a runner that aren't in the Ollama library catalog
+// (e.g. MFDoom/*, hf.co/*, user imports). Catalog scrape only covers
+// ollama.com/library so these never show in the main grid.
+//
+// Renders as a collapsible section above the main library cards. Shows
+// per-tag size + runners + "update available" + delete + force-update
+// (same capabilities as a library card, just with minimal metadata).
+
+function CommunityModelsSection({
+  selectedRunner,
+  selectedRunnerHostname,
+}: {
+  selectedRunner?: number
+  selectedRunnerHostname?: string
+}) {
+  const community = useCommunityModels(selectedRunner)
+  const forceUpdate = useForceUpdateModel()
+  const deleteModel = useDeleteModel()
+  const models = community.data?.models ?? []
+  if (models.length === 0) return null
+  return (
+    <div className="bg-gray-900/60 border border-gray-800 rounded-xl p-4 space-y-2">
+      <div className="flex items-center justify-between">
+        <p className="text-xs text-gray-400 font-medium uppercase tracking-wide">
+          Community / custom models
+          {selectedRunnerHostname && <span className="ml-2 text-gray-600 normal-case"> on {selectedRunnerHostname}</span>}
+          <span className="ml-2 text-gray-600 normal-case">· {models.length}</span>
+        </p>
+        <span className="text-[10px] text-gray-600">Downloaded but not in the Ollama library catalog</span>
+      </div>
+      <div className="space-y-1">
+        {models.map(m => {
+          const sizeGb = m.size_bytes ? (m.size_bytes / 1e9).toFixed(1) : null
+          const outdated = m.outdated_on.length > 0
+          return (
+            <div key={m.name} className="flex items-center justify-between gap-2 text-xs bg-gray-950/40 border border-gray-800 rounded-lg px-3 py-2">
+              <div className="min-w-0 flex-1">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-gray-200 font-mono truncate">{m.name}</span>
+                  {sizeGb && <span className="text-[10px] text-gray-500">{sizeGb} GB</span>}
+                  <span className="flex items-center gap-0.5 text-[10px] text-green-400">
+                    <CheckCircle2 className="w-2.5 h-2.5" />
+                    {m.downloaded_on.join(', ')}
+                  </span>
+                  {outdated && (
+                    <span className="flex items-center gap-0.5 text-[10px] text-amber-400" title={`Outdated on: ${m.outdated_on.join(', ')}`}>
+                      <AlertCircle className="w-2.5 h-2.5" /> update available
+                    </span>
+                  )}
+                </div>
+              </div>
+              <div className="flex items-center gap-1 shrink-0">
+                <button
+                  onClick={() => {
+                    if (!window.confirm(`Force re-pull ${m.name}?`)) return
+                    forceUpdate.mutate({ model: m.name, runner_id: selectedRunner })
+                  }}
+                  disabled={forceUpdate.isPending}
+                  title={`Force re-pull ${m.name}`}
+                  className="flex items-center gap-1 text-[10px] bg-gray-800 hover:bg-gray-700 text-gray-300 px-2 py-1 rounded transition-colors disabled:opacity-40"
+                >
+                  <RefreshCcw className="w-2.5 h-2.5" />
+                  {outdated ? 'Update' : 'Re-pull'}
+                </button>
+                <button
+                  onClick={() => {
+                    const where = selectedRunnerHostname ?? m.downloaded_on.join(', ')
+                    if (!window.confirm(`Delete ${m.name} from ${where}? This removes the blobs from disk.`)) return
+                    deleteModel.mutate({ model: m.name, runner_id: selectedRunner })
+                  }}
+                  disabled={deleteModel.isPending}
+                  title="Delete from runner"
+                  className="flex items-center gap-1 text-[10px] bg-gray-800 hover:bg-red-900/50 hover:text-red-300 text-gray-400 px-2 py-1 rounded transition-colors disabled:opacity-40"
+                >
+                  <Trash2 className="w-2.5 h-2.5" />
+                </button>
+              </div>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+
 // ── Force-update single model ───────────────────────────────────────────
 // Tiny inline button for the expanded library detail — re-pulls a specific
 // `model:tag` regardless of local state. Used on downloaded variants.
@@ -1375,21 +1602,26 @@ function LibraryToolbar({
   cacheAge,
   onRefreshCatalog,
   refreshCatalogPending,
+  selectedRunner,
+  selectedRunnerHostname,
 }: {
   cacheAge: number
   onRefreshCatalog: () => void
   refreshCatalogPending: boolean
+  selectedRunner?: number
+  selectedRunnerHostname?: string
 }) {
   const refreshRemote = useRefreshRemoteDigests()
   const updateOutdated = useUpdateOutdatedModels()
   const [msg, setMsg] = useState<string | null>(null)
+  const scopeSuffix = selectedRunnerHostname ? ` on ${selectedRunnerHostname}` : ''
   return (
     <div className="flex items-center gap-3">
       {msg && <span className="text-[10px] text-gray-500">{msg}</span>}
       <button
         onClick={() => {
           setMsg(null)
-          refreshRemote.mutate(undefined, {
+          refreshRemote.mutate({ runner_id: selectedRunner }, {
             onSuccess: d => setMsg(
               d.status === 'idle'
                 ? 'No downloaded models to check'
@@ -1400,19 +1632,20 @@ function LibraryToolbar({
         }}
         disabled={refreshRemote.isPending}
         className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-300 disabled:opacity-40 transition-colors"
-        title="Ask registry.ollama.ai for the current manifest digest of each downloaded tag"
+        title={`Ask registry.ollama.ai for the current manifest digest of each downloaded tag${scopeSuffix}`}
       >
         {refreshRemote.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
-        Check for updates
+        Check for updates{scopeSuffix}
       </button>
       <button
         onClick={() => {
-          if (!window.confirm('Pull every tag whose local digest differs from the remote? This could take a while for large models.')) return
+          const where = selectedRunnerHostname ?? 'every runner'
+          if (!window.confirm(`Pull every outdated tag on ${where}? Backend auto-refreshes digests first. This could take a while for large models.`)) return
           setMsg(null)
-          updateOutdated.mutate(undefined, {
+          updateOutdated.mutate({ runner_id: selectedRunner }, {
             onSuccess: d => setMsg(
-              d.status === 'idle'
-                ? d.message || 'No remote digests cached — click "Check for updates" first'
+              d.count === 0
+                ? `No outdated tags (${d.up_to_date ?? 0} up-to-date${d.skipped_no_remote ? `, ${d.skipped_no_remote} unknown-remote` : ''})`
                 : `Started ${d.count} pull${d.count === 1 ? '' : 's'}`
             ),
             onError: e => setMsg(`Error: ${(e as Error).message}`),
@@ -1420,10 +1653,10 @@ function LibraryToolbar({
         }}
         disabled={updateOutdated.isPending}
         className="flex items-center gap-1 text-xs text-amber-400 hover:text-amber-300 disabled:opacity-40 transition-colors"
-        title="Pull every model whose local digest differs from the cached remote digest"
+        title={`Pull every model whose local digest differs from the cached remote digest${scopeSuffix}`}
       >
         {updateOutdated.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Upload className="w-3 h-3" />}
-        Update outdated
+        Update outdated{scopeSuffix}
       </button>
       <button
         onClick={onRefreshCatalog}

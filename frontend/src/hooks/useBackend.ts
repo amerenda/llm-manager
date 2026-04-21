@@ -654,9 +654,15 @@ export function useDismissOp() {
 export function useRefreshRemoteDigests() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: () => post<{ status: string; checked?: number; errors?: number; skipped?: number; tags_checked?: number; message?: string }>(
-      // User-initiated → force=true bypasses the 1h cache so the click feels live
-      '/api/library/refresh-remote-digests?force=true', {}),
+    // User-initiated → force=true bypasses the 1h cache so the click feels live.
+    // runner_id optional: when present the refresh only touches tags downloaded
+    // on that runner.
+    mutationFn: ({ runner_id }: { runner_id?: number } = {}) => {
+      const qs = new URLSearchParams({ force: 'true' })
+      if (runner_id != null) qs.set('runner_id', String(runner_id))
+      return post<{ status: string; checked?: number; errors?: number; skipped?: number; tags_checked?: number; message?: string }>(
+        `/api/library/refresh-remote-digests?${qs.toString()}`, {})
+    },
     onSuccess: () => qc.invalidateQueries({ queryKey: ['library'] }),
   })
 }
@@ -664,8 +670,16 @@ export function useRefreshRemoteDigests() {
 export function useUpdateOutdatedModels() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: () => post<{ status: string; pulls: Array<{ runner: string; model: string; op_id?: string; error?: string }>; count: number; message?: string }>(
-      '/api/library/update-outdated', {}),
+    // Backend auto-refreshes digests first (refresh=true is the default) so a
+    // lone click always produces a correct result. runner_id scopes both the
+    // refresh and the pulls.
+    mutationFn: ({ runner_id }: { runner_id?: number } = {}) => {
+      const qs = new URLSearchParams()
+      if (runner_id != null) qs.set('runner_id', String(runner_id))
+      const q = qs.toString() ? `?${qs.toString()}` : ''
+      return post<{ status: string; pulls: Array<{ runner: string; model: string; op_id?: string; error?: string }>; count: number; up_to_date?: number; skipped_no_remote?: number; scope?: string; message?: string }>(
+        `/api/library/update-outdated${q}`, {})
+    },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['library'] })
       qc.invalidateQueries({ queryKey: ['ops'] })
@@ -690,17 +704,39 @@ export function useForceUpdateModel() {
 
 // ── Library ──────────────────────────────────────────────────────────────────
 
-export function useLibrary(params: { search?: string; safety?: string; fits?: boolean; downloaded?: boolean; hasPulling?: boolean } = {}) {
+export function useLibrary(params: { search?: string; safety?: string; fits?: boolean; downloaded?: boolean; hasPulling?: boolean; runner_id?: number } = {}) {
   const qs = new URLSearchParams()
   if (params.search) qs.set('search', params.search)
   if (params.safety) qs.set('safety', params.safety)
   if (params.fits !== undefined) qs.set('fits', String(params.fits))
   if (params.downloaded !== undefined) qs.set('downloaded', String(params.downloaded))
+  if (params.runner_id != null) qs.set('runner_id', String(params.runner_id))
   const query = qs.toString()
   return useQuery<{ models: LibraryModel[]; total: number; cache_age_hours: number; runners: string[] }>({
     queryKey: ['library', query],
     queryFn: () => get(`/api/library${query ? `?${query}` : ''}`),
     refetchInterval: params.hasPulling ? 5_000 : false,
+  })
+}
+
+// Models downloaded on a runner (or fleet-wide) that aren't in the Ollama
+// library catalog — community / user-namespaced tags like MFDoom/..., hf.co/...
+export interface CommunityModel {
+  name: string
+  downloaded_on: string[]
+  outdated_on: string[]
+  size_bytes: number
+  digest: string
+}
+
+export function useCommunityModels(runner_id?: number) {
+  const qs = new URLSearchParams()
+  if (runner_id != null) qs.set('runner_id', String(runner_id))
+  const query = qs.toString()
+  return useQuery<{ models: CommunityModel[] }>({
+    queryKey: ['community-models', query],
+    queryFn: () => get(`/api/library/community${query ? `?${query}` : ''}`),
+    refetchInterval: 15_000,
   })
 }
 
