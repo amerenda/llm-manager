@@ -167,13 +167,24 @@ stop_host_ollama() {
         log "Host Ollama stopped. (Re-enable later with: sudo systemctl enable --now ollama)"
     fi
 
-    # Port conflict check — covers non-systemd Ollamas (docker run without compose, bare binary, etc.)
+    # Port conflict check — covers non-systemd Ollamas (docker run without
+    # compose, bare binary, etc.)
     if curl -sf http://localhost:11434/api/tags >/dev/null 2>&1; then
-        # Is it already a Docker container named 'ollama' (our own target)?
-        if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx ollama; then
-            log "Docker container 'ollama' is already running — will be recreated with new config."
+        # Is it already a Docker container named 'ollama'? If so, remove it so
+        # compose can create a fresh one with the new env. Just "restart" or
+        # "compose up" can't change env on an existing container, and compose
+        # refuses to create over the name conflict.
+        if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx ollama; then
+            log "Removing existing 'ollama' container so compose can recreate it..."
+            docker rm -f ollama >/dev/null 2>&1 || true
         else
             die "Port 11434 is still in use after stopping systemd. Stop whatever is listening and re-run."
+        fi
+    else
+        # Port is free but a stopped ollama container may linger with the name
+        if docker ps -a --format '{{.Names}}' 2>/dev/null | grep -qx ollama; then
+            log "Removing stopped 'ollama' container so compose can recreate it..."
+            docker rm -f ollama >/dev/null 2>&1 || true
         fi
     fi
 }
