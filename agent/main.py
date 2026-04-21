@@ -279,8 +279,36 @@ async def _register_retry_loop():
         delay = min(delay * 2, 300.0)
 
 
+def _check_ollama_compose_managed() -> None:
+    """Warn loudly if the `ollama` container exists but isn't compose-managed
+    under the same project as this agent. Symptom of a pre-migration orphan
+    container: UI-driven tunable edits write to ollama.env but the running
+    container was started with a different env/mounts and ignores the file.
+    Seen on murderbot 2026-04-21 — ollama was pinned to /home/alex/.ollama
+    while compose expected /opt/ollama; agent rewrites did nothing."""
+    if not _DOCKER_OK or not OLLAMA_CONTAINER:
+        return
+    try:
+        c = _docker.containers.get(OLLAMA_CONTAINER)
+    except Exception:
+        logger.info("Ollama container %r not found — compose will create it.", OLLAMA_CONTAINER)
+        return
+    labels = c.attrs.get("Config", {}).get("Labels") or {}
+    project = labels.get("com.docker.compose.project")
+    if project != "agent":
+        logger.error(
+            "Ollama container %r is NOT compose-managed (project=%r). "
+            "UI tunable edits will NOT take effect. "
+            "Fix: `docker rm -f %s && docker compose --profile %s up -d ollama` "
+            "from %s",
+            OLLAMA_CONTAINER, project or "<none>", OLLAMA_CONTAINER,
+            COMPOSE_PROFILE or "<profile>", COMPOSE_DIR or "<compose dir>",
+        )
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _check_ollama_compose_managed()
     ok = await _register_once()
     if not ok:
         # Background retry — the periodic heartbeat loop already skips when

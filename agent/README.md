@@ -1,114 +1,138 @@
-# LLM Agent (llm-runner)
+# LLM Agent (`llm-runner`)
 
-Runs on the GPU host machine (murderbot). Wraps Ollama and ComfyUI, exposes an authenticated HTTP API on port **8090** plus Prometheus metrics. Self-registers with the llm-manager backend on startup.
+Runs on every GPU host in the fleet. Wraps an Ollama container plus (optionally) ComfyUI, exposes an mTLS/PSK-authenticated HTTP API on port **8090** with Prometheus metrics, and self-registers with the llm-manager backend.
+
+Ollama is **always compose-managed** by this agent — host-managed Ollama is not supported. The Models page in the UI edits `ollama.env` and triggers a container recreate via the agent; that round-trip only works when compose owns the Ollama container.
 
 ## Prerequisites
 
-- Docker with [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)
-- Ollama running on the host at `localhost:11434`
-- ComfyUI running via docker compose at `/home/alex/claude/projects/image/`
-- Models at `/opt/models/checkpoints/`, `/opt/models/lora/`, `/opt/models/vae/`
+- Docker + Docker Compose plugin
+- One supported GPU:
+  - NVIDIA with [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)
+  - AMD with `/dev/kfd` + `/dev/dri` present (ROCm)
+- Agent PSK from Bitwarden: `llm-manager-agent-psk`
 
-## Setup
-
-### 1. Create `.env` file
-
-```bash
-cp agent/.env.example agent/.env
-```
-
-Edit `.env`:
-```
-LLM_MANAGER_AGENT_PSK=<value from Bitwarden: llm-manager-agent-psk>
-BACKEND_URL=http://llm-manager-backend.llm-manager.svc.cluster.local:8081
-AGENT_ADDRESS=http://murderbot.amer.home:8090
-```
-
-The PSK must match the value stored in Bitwarden and synced to the backend pod via ExternalSecret.
-
-### 2. Start
+## Install
 
 ```bash
 cd agent/
-docker compose up -d
+LLM_AGENT_PSK=<psk> bash install.sh
 ```
 
-Or run the install script (sets up systemd auto-start):
-```bash
-bash install.sh
-```
+What it does:
+1. Detects GPU vendor, sets compose profile (`nvidia` or `amd`).
+2. Stops any host Ollama (systemd or standalone `docker run`) and removes the container so compose can create a fresh, labeled one.
+3. Creates `/opt/ollama/models` (or `$MODEL_STORAGE_PATH` override) owned by the install user.
+4. Writes `.env` with the PSK, backend URL, compose dir/profile, and `OLLAMA_MODELS_PATH` (single source of truth for the models directory).
+5. Copies `ollama.env.example` → `ollama.env`. All tunables stay commented out; the UI writes into this file.
+6. `docker compose --profile <vendor> up -d` starts both `llm-agent` and `ollama`.
 
-### 3. Verify
+Useful flags:
 
-```bash
-curl http://localhost:8090/health
-# {"ok": true, "node": "murderbot", "ollama": true, "comfyui": false}
+| Flag | Purpose |
+|---|---|
+| `--update` / `-u` | Re-pull agent image, preserve config |
+| `--psk <value>` | Rotate PSK in existing `.env` |
+| `--model-storage <path>` | Override `OLLAMA_MODELS_PATH` |
+| `--migrate` | Stop + disable host systemd `ollama.service` without prompting |
+| `--ollama-tag <tag>` | Pin a different Ollama image tag |
 
-docker logs -f llm-agent
-# Should show: Registered with backend as runner_id=1
-```
+`--managed-ollama` and `--host-ollama` are accepted for backward compatibility but ignored — Ollama is always compose-managed now.
 
-## PSK Authentication
+## Models directory — single source of truth
 
-All endpoints except `/health` and `/metrics` require the header:
+`OLLAMA_MODELS_PATH` in `agent/.env` is **the** knob. It drives:
+
+- the Ollama container bind mount (`${OLLAMA_MODELS_PATH}:/root/.ollama/models`)
+- the agent's `OLLAMA_MODELS` env (used by future pull-size estimates)
+- `MODEL_STORAGE_PATH` (the agent's mirror of the same path)
+
+Default: `/opt/ollama/models`. Change it by editing `.env` and running `docker compose --profile <vendor> up -d --force-recreate ollama`.
+
+The agent logs a loud error at startup if it finds an `ollama` container that isn't labeled `com.docker.compose.project=agent` — that's the "pre-migration orphan" state where UI edits silently do nothing.
+
+## Ollama tunables
+
+Every value the UI can set (`OLLAMA_NUM_CTX`, `OLLAMA_FLASH_ATTENTION`, `OLLAMA_KV_CACHE_TYPE`, `OLLAMA_KEEP_ALIVE`, etc.) lives in `ollama.env`, loaded by the Ollama service via compose's `env_file`. The agent:
+
+1. Rewrites `ollama.env` with the new values.
+2. Calls `docker compose -f <compose.yaml> --profile <profile> up -d --force-recreate ollama`.
+3. Waits for `/api/tags` to come back.
+
+`.env` (agent credentials + paths) is intentionally **not** touched by the UI — mixing the two files was what motivated the split.
+
+## PSK auth
+
+All endpoints except `/health` and `/metrics` require header:
+
 ```
 X-Agent-PSK: <psk>
 ```
 
-The backend pod sends this automatically when proxying requests.
+The backend pod injects this via the `agent-psk` ExternalSecret. To rotate:
 
-## PSK Rotation
+1. Update `llm-manager-agent-psk` in Bitwarden.
+2. Force-sync the ExternalSecret: `kubectl annotate externalsecret agent-psk -n llm-manager force-sync=$(date +%s)`.
+3. Per host: `bash install.sh --psk <new>` then `docker compose --profile <vendor> restart llm-agent`.
 
-1. Update the value in Bitwarden (`llm-manager-agent-psk`)
-2. ExternalSecret refreshes the k8s secret within 1 hour (or force: `kubectl annotate externalsecret agent-psk -n llm-manager force-sync=$(date +%s)`)
-3. Update `.env` on each GPU host and restart: `docker compose restart`
-
-## Environment variables
+## Environment variables (`.env`)
 
 | Variable | Default | Description |
 |---|---|---|
-| `LLM_MANAGER_AGENT_PSK` | _(empty)_ | Pre-shared key for backend auth. If empty, auth is disabled (dev only) |
-| `BACKEND_URL` | _(empty)_ | Backend URL for self-registration. If empty, registration is skipped |
-| `AGENT_ADDRESS` | `http://<hostname>:8090` | Externally-reachable address of this agent |
-| `OLLAMA_URL` | `http://host.docker.internal:11434` | Ollama base URL |
-| `COMFYUI_URL` | `http://host.docker.internal:8188` | ComfyUI base URL |
-| `COMFYUI_OUTPUT_DIR` | `/outputs` | Path inside container to ComfyUI outputs |
+| `LLM_MANAGER_AGENT_PSK` | *(required)* | PSK for backend auth |
+| `BACKEND_URL` | `https://llm-manager-backend.amer.dev` | Backend base URL |
+| `AGENT_ADDRESS` | *(auto-detected)* | Externally reachable `http://<ip>:8090`. Override if auto-detect picks the wrong NIC |
+| `COMPOSE_DIR` | *(set by install.sh)* | Host path to this directory (needed for agent self-update) |
+| `COMPOSE_PROFILE` | *(set by install.sh)* | `nvidia` or `amd` |
+| `OLLAMA_MODELS_PATH` | `/opt/ollama/models` | Models directory (bind-mounted into Ollama) |
+| `MODEL_STORAGE_PATH` | same as above | Agent's view of the same path |
+| `AGENT_IMAGE_TAG` | `latest` | Pinned agent image tag (rewritten on self-update) |
+| `OLLAMA_IMAGE_TAG` | `0.21.0` | NVIDIA Ollama tag |
+| `OLLAMA_AMD_IMAGE_TAG` | `0.21.0-rocm` | AMD Ollama tag |
+| `HSA_OVERRIDE_GFX_VERSION` | *(AMD only)* | Forces a ROCm GFX version (e.g. `11.0.0` for RDNA 4) |
+| `VIDEO_GID`, `RENDER_GID` | *(AMD only)* | Host numeric GIDs for `/dev/dri` perms |
 
-## API Reference
-
-All requests (except `/health` and `/metrics`) require header `X-Agent-PSK: <psk>`.
-
-### `GET /health`
-```json
-{"ok": true, "node": "murderbot", "ollama": true, "comfyui": true}
-```
-
-### `GET /v1/status`
-Full system status: GPU VRAM, CPU, memory, loaded Ollama models, ComfyUI checkpoint list.
-
-### `GET /v1/models`
-OpenAI-compatible model list.
-
-### `POST /v1/chat/completions`
-OpenAI-compatible chat endpoint. Supports streaming.
-
-### `POST /v1/images/generations`
-Generate an image via ComfyUI.
-
-### `POST /v1/models/pull`
-Pull an Ollama model. Streams NDJSON progress.
-
-### `DELETE /v1/models/{model}`
-Unload a model from VRAM.
-
-### `POST /v1/comfyui/checkpoint`
-Switch the active ComfyUI checkpoint.
-
-### `GET /metrics`
-Prometheus text format metrics (no PSK required).
-
-## Logs
+## Verify
 
 ```bash
-docker logs -f llm-agent
+# mTLS health (install.sh already fingerprinted the backend)
+curl -sk https://localhost:8090/health
+# {"ok":true,"node":"murderbot","ollama":true,"comfyui":true}
+
+# Ollama is compose-managed
+docker inspect ollama --format '{{index .Config.Labels "com.docker.compose.project"}}'
+# agent
+
+# Mount matches OLLAMA_MODELS_PATH
+docker inspect ollama --format '{{(index .Mounts 0).Source}}'
+# /opt/ollama/models
+
+# Agent startup log should NOT contain:
+#   "Ollama container 'ollama' is NOT compose-managed"
+docker logs llm-agent 2>&1 | grep -i 'not compose-managed' || echo "ok"
 ```
+
+## Day-2 ops
+
+| | Command |
+|---|---|
+| Logs | `docker logs -f llm-agent` / `docker logs -f ollama` |
+| Stop | `docker compose --profile <vendor> down` |
+| Restart agent only | `docker compose --profile <vendor> up -d --no-deps --force-recreate llm-agent` |
+| Restart Ollama (apply tunable changes) | `docker compose --profile <vendor> up -d --force-recreate ollama` |
+| Update agent image | `bash install.sh --update` (or UI auto-update) |
+
+## API
+
+All routes except `/health` and `/metrics` require `X-Agent-PSK`.
+
+- `GET /health` — quick liveness (no PSK)
+- `GET /v1/status` — GPU, memory, loaded/downloaded models, ComfyUI checkpoints
+- `GET /v1/models` — OpenAI-compatible model list
+- `POST /v1/chat/completions` — OpenAI-compatible chat (streaming supported)
+- `POST /v1/images/generations` — ComfyUI image generation
+- `POST /v1/models/pull` — Ollama pull, streams NDJSON progress
+- `DELETE /v1/models/{model}` — unload from VRAM
+- `POST /v1/ollama/restart` — restart Ollama container (clears stuck VRAM)
+- `POST /v1/ollama/config` — rewrite `ollama.env` + recreate container
+- `GET /metrics` — Prometheus (no PSK)

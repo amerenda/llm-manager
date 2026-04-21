@@ -1,17 +1,20 @@
 # llm-agent + Ollama — GPU monitoring and LLM inference on a host.
 #
-# Profiles (pick one):
-#   nvidia       — llm-agent only (host-managed Ollama)
-#   amd          — llm-agent-amd only (host-managed Ollama)
-#   nvidia-full  — llm-agent + Ollama container (docker-managed, tunable via UI)
-#   amd-full     — llm-agent-amd + Ollama-ROCm container
+# Every profile includes the Ollama container (managed mode). Host-managed
+# Ollama is no longer supported: tunables are edited in the UI, which
+# requires the agent to control the container lifecycle.
+#
+# Profiles:
+#   nvidia  / nvidia-full — llm-agent + Ollama (CUDA)
+#   amd     / amd-full    — llm-agent-amd + Ollama-ROCm
+#   (the -full aliases exist for compat with existing .env files)
 #
 # install.sh picks the right profile. Direct usage:
-#   docker compose --profile nvidia-full up -d    # recommended for new installs
+#   docker compose --profile nvidia up -d
 #
 # Env:
 #   .env         — agent credentials + paths (PSK, BACKEND_URL, COMPOSE_DIR, OLLAMA_MODELS_PATH, HSA_OVERRIDE_GFX_VERSION)
-#   ollama.env   — Ollama runtime tunables the UI will edit (NUM_CTX, FLASH_ATTENTION, KV_CACHE_TYPE, ...)
+#   ollama.env   — Ollama runtime tunables the UI edits (NUM_CTX, FLASH_ATTENTION, KV_CACHE_TYPE, ...)
 
 services:
   llm-agent:
@@ -72,11 +75,12 @@ services:
       - ${COMPOSE_DIR:-.}:/host-compose
 
   # ── Docker-managed Ollama ────────────────────────────────────────────────
-  # Only started with -full profiles. Tunables come from ollama.env so the
-  # agent can rewrite them without touching agent credentials in .env.
+  # Included in every nvidia/amd profile. Tunables come from ollama.env so
+  # the agent can rewrite them (via UI edits) without touching agent
+  # credentials in .env, then recreate the container to apply.
 
   ollama:
-    profiles: ["nvidia-full"]
+    profiles: ["nvidia", "nvidia-full"]
     image: ollama/ollama:${OLLAMA_IMAGE_TAG:-0.21.0}
     container_name: ollama
     network_mode: host
@@ -97,7 +101,7 @@ services:
               capabilities: [gpu]
 
   ollama-amd:
-    profiles: ["amd-full"]
+    profiles: ["amd", "amd-full"]
     image: ollama/ollama:${OLLAMA_AMD_IMAGE_TAG:-0.21.0-rocm}
     container_name: ollama
     network_mode: host

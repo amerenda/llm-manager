@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# install.sh — Set up the llm-agent (and optionally a docker-managed Ollama)
-# on a GPU host.
+# install.sh — Set up the llm-agent and a docker-managed Ollama on a GPU host.
+#
+# Ollama always runs as a compose-managed container. Host-managed Ollama is
+# not supported: tunables are edited in the UI, which requires the agent to
+# control the container lifecycle.
 #
 # Prerequisites:
 #   - Docker + Docker Compose plugin installed
-#   - (Legacy mode) Ollama already running on the host at localhost:11434
-#   - (Managed mode, default for new installs) No Ollama running, or a
-#     systemd ollama.service we can safely take over
+#   - Either no Ollama running, or a systemd/standalone Ollama we can take
+#     over (install.sh stops it and removes the container if needed)
 #
 # Tested on Arch and Debian; expected to work on any modern systemd distro.
 # AMD/NVIDIA GPU is auto-detected.
@@ -16,8 +18,6 @@
 #   --psk <value>         Rotate the agent PSK in the existing .env
 #   --model-storage <p>   Path where Ollama models live (bind-mounted)
 #   --install-dir <p>     Install into a directory other than the script dir
-#   --managed-ollama      Run Ollama in Docker (default for fresh installs)
-#   --host-ollama         Skip Docker Ollama; expect Ollama on localhost:11434
 #   --migrate             Stop & disable host systemd ollama.service without prompting
 #   --ollama-tag <t>      Override Ollama image tag (default: 0.21.0 / 0.21.0-rocm)
 #   -h, --help
@@ -32,7 +32,6 @@ INSTALL_DIR="$SCRIPT_DIR"
 UPDATE_ONLY=false
 NEW_PSK=""
 MODEL_STORAGE=""
-MANAGED_OLLAMA=""     # empty=auto, true, false
 MIGRATE=false
 OLLAMA_TAG=""
 
@@ -53,8 +52,9 @@ while [[ $# -gt 0 ]]; do
         --model-storage=*) MODEL_STORAGE="${1#--model-storage=}"; shift ;;
         --install-dir) INSTALL_DIR="$2"; shift 2 ;;
         --install-dir=*) INSTALL_DIR="${1#--install-dir=}"; shift ;;
-        --managed-ollama) MANAGED_OLLAMA=true; shift ;;
-        --host-ollama) MANAGED_OLLAMA=false; shift ;;
+        --managed-ollama|--host-ollama)
+            echo "[warn] $1 is deprecated — Ollama is always compose-managed now. Ignoring." >&2
+            shift ;;
         --migrate) MIGRATE=true; shift ;;
         --ollama-tag) OLLAMA_TAG="$2"; shift 2 ;;
         --ollama-tag=*) OLLAMA_TAG="${1#--ollama-tag=}"; shift ;;
@@ -116,31 +116,16 @@ else
     die "No GPU detected. The agent requires a GPU for VRAM monitoring."
 fi
 
-# ── Decide managed vs host Ollama ────────────────────────────────────────────
-# Default rules:
-#   - If .env doesn't exist (fresh install) → managed Ollama
-#   - If .env exists (existing agent) → host Ollama unless --managed-ollama is passed
-# --managed-ollama / --host-ollama override.
+# ── Compose profile + Ollama image tag ───────────────────────────────────────
+# Ollama is always managed by compose. Profile name matches GPU vendor; the
+# old -full aliases are still valid in compose.yaml for existing .env files.
 
-if [[ -z "$MANAGED_OLLAMA" ]]; then
-    if [[ -f "$ENV_FILE" ]]; then
-        MANAGED_OLLAMA=false
-    else
-        MANAGED_OLLAMA=true
-    fi
-fi
-
-if "$MANAGED_OLLAMA"; then
-    log "Mode: managed Ollama (Docker)"
-    case "$GPU_VENDOR" in
-        nvidia) PROFILE="nvidia-full" ;;
-        amd)    PROFILE="amd-full" ;;
-    esac
-    [[ -z "$OLLAMA_TAG" ]] && OLLAMA_TAG="$([[ $GPU_VENDOR == amd ]] && echo $DEFAULT_OLLAMA_TAG_AMD || echo $DEFAULT_OLLAMA_TAG_NVIDIA)"
-else
-    log "Mode: host-managed Ollama"
-    PROFILE="$GPU_VENDOR"
-fi
+case "$GPU_VENDOR" in
+    nvidia) PROFILE="nvidia" ;;
+    amd)    PROFILE="amd" ;;
+esac
+[[ -z "$OLLAMA_TAG" ]] && OLLAMA_TAG="$([[ $GPU_VENDOR == amd ]] && echo $DEFAULT_OLLAMA_TAG_AMD || echo $DEFAULT_OLLAMA_TAG_NVIDIA)"
+log "Mode: managed Ollama (compose profile: $PROFILE)"
 
 # ── Handle existing host Ollama ──────────────────────────────────────────────
 # If we're switching to managed Ollama, the host's systemd or port-11434
@@ -189,14 +174,7 @@ stop_host_ollama() {
     fi
 }
 
-if "$MANAGED_OLLAMA"; then
-    stop_host_ollama
-elif ! "$UPDATE_ONLY"; then
-    if ! curl -sf http://localhost:11434/api/tags >/dev/null 2>&1; then
-        die "Ollama is not running on localhost:11434 and --host-ollama was chosen. Start Ollama or rerun with --managed-ollama."
-    fi
-    log "Host Ollama is running."
-fi
+stop_host_ollama
 
 # ── Models path resolution ──────────────────────────────────────────────────
 # Priority: --model-storage → MODEL_STORAGE_PATH env → existing .env →
@@ -340,29 +318,26 @@ if [[ "$GPU_VENDOR" == "amd" ]]; then
 fi
 
 # Pin the Ollama image tag in .env so re-runs and `compose up` inherit it
-if "$MANAGED_OLLAMA"; then
-    if [[ "$GPU_VENDOR" == "amd" ]]; then
-        key="OLLAMA_AMD_IMAGE_TAG"
-    else
-        key="OLLAMA_IMAGE_TAG"
-    fi
-    if grep -q "^${key}=" "$ENV_FILE"; then
-        sed -i "s|^${key}=.*|${key}=${OLLAMA_TAG}|" "$ENV_FILE"
-    else
-        echo "${key}=${OLLAMA_TAG}" >> "$ENV_FILE"
-    fi
-    log "Pinned Ollama image: ollama/ollama:${OLLAMA_TAG}"
+if [[ "$GPU_VENDOR" == "amd" ]]; then
+    key="OLLAMA_AMD_IMAGE_TAG"
+else
+    key="OLLAMA_IMAGE_TAG"
 fi
+if grep -q "^${key}=" "$ENV_FILE"; then
+    sed -i "s|^${key}=.*|${key}=${OLLAMA_TAG}|" "$ENV_FILE"
+else
+    echo "${key}=${OLLAMA_TAG}" >> "$ENV_FILE"
+fi
+log "Pinned Ollama image: ollama/ollama:${OLLAMA_TAG}"
 
-# ── Configure ollama.env (managed mode only) ─────────────────────────────────
+# ── Configure ollama.env ─────────────────────────────────────────────────────
+# Tunables the UI will edit (NUM_CTX, FLASH_ATTENTION, KV_CACHE_TYPE, ...).
 
-if "$MANAGED_OLLAMA"; then
-    if [[ ! -f "$OLLAMA_ENV_FILE" ]]; then
-        log "Creating ollama.env from ollama.env.example (all defaults commented out)."
-        cp "$INSTALL_DIR/ollama.env.example" "$OLLAMA_ENV_FILE"
-    else
-        log "Preserving existing ollama.env tunings."
-    fi
+if [[ ! -f "$OLLAMA_ENV_FILE" ]]; then
+    log "Creating ollama.env from ollama.env.example (all defaults commented out)."
+    cp "$INSTALL_DIR/ollama.env.example" "$OLLAMA_ENV_FILE"
+else
+    log "Preserving existing ollama.env tunings."
 fi
 
 # ── Pull and start ──────────────────────────────────────────────────────────
@@ -401,19 +376,17 @@ else
     warn "Agent didn't respond after 60s. Check: docker logs llm-agent"
 fi
 
-if "$MANAGED_OLLAMA"; then
-    log "Waiting for Ollama..."
-    for _ in $(seq 1 30); do
-        if curl -sf http://localhost:11434/api/tags >/dev/null 2>&1; then
-            log "Ollama is up!"
-            break
-        fi
-        echo -n "."
-        sleep 2
-    done
-    if ! curl -sf http://localhost:11434/api/tags >/dev/null 2>&1; then
-        warn "Ollama didn't respond after 60s. Check: docker logs ollama"
+log "Waiting for Ollama..."
+for _ in $(seq 1 30); do
+    if curl -sf http://localhost:11434/api/tags >/dev/null 2>&1; then
+        log "Ollama is up!"
+        break
     fi
+    echo -n "."
+    sleep 2
+done
+if ! curl -sf http://localhost:11434/api/tags >/dev/null 2>&1; then
+    warn "Ollama didn't respond after 60s. Check: docker logs ollama"
 fi
 
 # ── Summary ──────────────────────────────────────────────────────────────────
@@ -423,10 +396,10 @@ log "Done! (GPU: $GPU_VENDOR, profile: $PROFILE, install dir: $INSTALL_DIR)"
 echo ""
 echo "  Health:   curl -sk https://localhost:8090/health"
 echo "  Logs:     docker logs -f llm-agent"
-if "$MANAGED_OLLAMA"; then
-    echo "  Ollama:   docker logs -f ollama"
-    echo "  Tunings:  edit $OLLAMA_ENV_FILE then rerun: docker compose -f $COMPOSE_FILE --profile $PROFILE up -d --force-recreate ollama"
-fi
+echo "  Ollama:   docker logs -f ollama"
+echo "  Tunings:  edit in the llm-manager UI (Models page → Ollama settings)."
+echo "            Manual edit fallback: $OLLAMA_ENV_FILE"
+echo "            then: docker compose -f $COMPOSE_FILE --profile $PROFILE up -d --force-recreate ollama"
 echo "  Stop:     cd $INSTALL_DIR && docker compose --profile $PROFILE down"
 echo "  Restart:  cd $INSTALL_DIR && docker compose --profile $PROFILE restart"
 echo ""
