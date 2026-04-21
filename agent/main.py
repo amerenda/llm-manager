@@ -228,37 +228,72 @@ comfyui_running_gauge = Gauge("llm_agent_comfyui_running", "ComfyUI running (0/1
 from contextlib import asynccontextmanager
 
 
+async def _register_once() -> bool:
+    """Attempt a single registration. Returns True if successful, False on
+    any failure. Sets _RUNNER_ID on success. Kept separate so it can be
+    retried from a background task when the first attempt fails."""
+    global _RUNNER_ID
+    if not BACKEND_URL or not AGENT_ADDRESS:
+        return False
+    try:
+        caps = await _build_capabilities()
+        caps["tls_cert"] = _read_cert_pem()
+        caps["tls_fingerprint"] = _cert_fingerprint()
+        async with httpx.AsyncClient(timeout=10) as c:
+            r = await c.post(
+                f"{BACKEND_URL}/api/runners/register",
+                json={
+                    "hostname": NODE,
+                    "address": AGENT_ADDRESS,
+                    "port": int(AGENT_ADDRESS.rsplit(":", 1)[-1]) if ":" in AGENT_ADDRESS.rsplit("/", 1)[-1] else 8090,
+                    "capabilities": caps,
+                },
+                headers={"X-Agent-PSK": AGENT_PSK} if AGENT_PSK else {},
+            )
+            r.raise_for_status()
+            _RUNNER_ID = r.json()["runner_id"]
+            logger.info("Registered with backend as runner_id=%d (address=%s)", _RUNNER_ID, AGENT_ADDRESS)
+            return True
+    except Exception as e:
+        logger.warning("Could not register with backend: %s", e)
+        return False
+
+
+async def _register_retry_loop():
+    """Keep retrying registration until it succeeds. Runs as a background
+    task when the startup attempt fails — otherwise the agent would sit
+    forever with _RUNNER_ID=None and no heartbeat (observed on murderbot
+    during a backend rollout: register hit a 502, then the agent was
+    invisible to the backend until someone manually restarted it).
+
+    Backoff starts at 5s, doubles up to 5min, then stays there. Stops as
+    soon as _RUNNER_ID is set."""
+    delay = 5.0
+    while _RUNNER_ID is None:
+        await asyncio.sleep(delay)
+        ok = await _register_once()
+        if ok:
+            # Fire an immediate heartbeat so the backend sees fresh state now
+            asyncio.create_task(_heartbeat_once())
+            return
+        delay = min(delay * 2, 300.0)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _RUNNER_ID
-    if BACKEND_URL and AGENT_ADDRESS:
-        try:
-            caps = await _build_capabilities()
-            caps["tls_cert"] = _read_cert_pem()
-            caps["tls_fingerprint"] = _cert_fingerprint()
-            async with httpx.AsyncClient(timeout=10) as c:
-                r = await c.post(
-                    f"{BACKEND_URL}/api/runners/register",
-                    json={
-                        "hostname": NODE,
-                        "address": AGENT_ADDRESS,
-                        "port": int(AGENT_ADDRESS.rsplit(":", 1)[-1]) if ":" in AGENT_ADDRESS.rsplit("/", 1)[-1] else 8090,
-                        "capabilities": caps,
-                    },
-                    headers={"X-Agent-PSK": AGENT_PSK} if AGENT_PSK else {},
-                )
-                r.raise_for_status()
-                _RUNNER_ID = r.json()["runner_id"]
-                logger.info("Registered with backend as runner_id=%d (address=%s)", _RUNNER_ID, AGENT_ADDRESS)
-        except Exception as e:
-            logger.warning("Could not register with backend at startup: %s", e)
+    ok = await _register_once()
+    if not ok:
+        # Background retry — the periodic heartbeat loop already skips when
+        # _RUNNER_ID is None, but without this loop the agent never recovers.
+        asyncio.create_task(_register_retry_loop())
 
     # Fire an eager heartbeat immediately so the backend has fresh state
     # (downloaded_models, loaded_models, GPU counters) right after register,
     # instead of waiting up to 30s for the periodic loop's first tick. The
     # library UI was showing stale "downloaded on runnerX" info for that
     # first half-minute after every install/restart.
-    asyncio.create_task(_heartbeat_once())
+    if ok:
+        asyncio.create_task(_heartbeat_once())
     heartbeat_task = asyncio.create_task(_heartbeat_loop())
     yield
     heartbeat_task.cancel()
