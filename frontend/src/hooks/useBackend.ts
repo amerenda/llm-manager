@@ -361,6 +361,37 @@ export function useUpdateRunner() {
   })
 }
 
+// ── Ollama runtime settings (per-runner) ──────────────────────────────────
+
+export interface OllamaSettingsResponse {
+  settings: Record<string, string>
+  allowlist: Record<string, 'int' | 'bool' | 'enum' | 'duration' | 'str'>
+  env_file: string
+}
+
+export function useOllamaSettings(runnerId: number | null, enabled = true) {
+  return useQuery<OllamaSettingsResponse>({
+    queryKey: ['ollama-settings', runnerId],
+    queryFn: () => get(`/api/llm/runners/${runnerId}/ollama-settings`),
+    enabled: enabled && runnerId != null,
+    refetchInterval: false,
+  })
+}
+
+export function useUpdateOllamaSettings() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ runnerId, settings }: { runnerId: number; settings: Record<string, string> }) =>
+      put<{ ok: boolean; applied: Record<string, string>; message: string }>(
+        `/api/llm/runners/${runnerId}/ollama-settings`, { settings }),
+    onSuccess: (_d, v) => {
+      qc.invalidateQueries({ queryKey: ['ollama-settings', v.runnerId] })
+      qc.invalidateQueries({ queryKey: ['runners'] })
+      qc.invalidateQueries({ queryKey: ['llm-status'] })
+    },
+  })
+}
+
 export function useRunnerStatus(runnerId: number | null) {
   return useQuery<RunnerStatus>({
     queryKey: ['runner-status', runnerId],

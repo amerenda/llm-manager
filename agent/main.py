@@ -1207,6 +1207,282 @@ async def restart_ollama():
         raise HTTPException(500, f"Failed to restart Ollama: {e}")
 
 
+# ── Ollama runtime settings (server-level env vars) ──────────────────────────
+#
+# Tunables the UI is allowed to set. The agent rewrites ollama.env on the
+# host-mounted compose dir, then recreates the ollama container via docker-py
+# (not docker compose — agent image has no docker CLI). On recreate, the
+# container's image, network mode, restart policy, mounts, devices, and GPU
+# reservations are preserved; only the env vars change.
+
+_OLLAMA_SETTINGS_ALLOWLIST = {
+    # key → (type, validator or None)
+    "OLLAMA_NUM_CTX":            ("int", lambda v: 1 <= int(v) <= 1_048_576),
+    "OLLAMA_FLASH_ATTENTION":    ("bool", None),          # "0" / "1" / "true" / "false"
+    "OLLAMA_KV_CACHE_TYPE":      ("enum", {"f16", "q8_0", "q4_0"}),
+    "OLLAMA_NUM_GPU":            ("int", lambda v: 0 <= int(v) <= 999),
+    "OLLAMA_NUM_PARALLEL":       ("int", lambda v: 1 <= int(v) <= 64),
+    "OLLAMA_MAX_LOADED_MODELS":  ("int", lambda v: 1 <= int(v) <= 64),
+    "OLLAMA_KEEP_ALIVE":         ("duration", None),      # "30s", "5m", "2h", "-1"
+    "OLLAMA_MAX_QUEUE":          ("int", lambda v: 1 <= int(v) <= 65535),
+    "OLLAMA_HOST":               ("str", None),           # "127.0.0.1:11434" etc
+}
+
+_OLLAMA_ENV_FILE = "/host-compose/ollama.env"
+
+
+def _normalize_bool(v) -> str:
+    """Return '1' or '0' for truthy / falsy input. Raises ValueError on garbage."""
+    s = str(v).strip().lower()
+    if s in ("1", "true", "yes", "on"):
+        return "1"
+    if s in ("0", "false", "no", "off", ""):
+        return "0"
+    raise ValueError(f"not a boolean: {v!r}")
+
+
+def _validate_ollama_setting(key: str, value) -> str:
+    """Validate key+value against the allowlist. Returns the stringified value
+    ready to write to ollama.env. Raises ValueError on invalid input."""
+    if key not in _OLLAMA_SETTINGS_ALLOWLIST:
+        raise ValueError(f"unknown setting: {key}")
+    kind, rule = _OLLAMA_SETTINGS_ALLOWLIST[key]
+    if value is None or value == "":
+        return ""  # empty = unset (comment out)
+    if kind == "int":
+        try:
+            iv = int(value)
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"{key} must be an integer, got {value!r}") from e
+        if rule and not rule(iv):
+            raise ValueError(f"{key}={iv} is out of range")
+        return str(iv)
+    if kind == "bool":
+        return _normalize_bool(value)
+    if kind == "enum":
+        s = str(value).strip()
+        if s not in rule:
+            raise ValueError(f"{key} must be one of {sorted(rule)}, got {value!r}")
+        return s
+    if kind == "duration":
+        s = str(value).strip()
+        if s == "-1":
+            return s
+        import re
+        if not re.fullmatch(r"\d+(ms|s|m|h)", s):
+            raise ValueError(f"{key} must be a duration (e.g. 30s, 5m, 2h) or -1, got {value!r}")
+        return s
+    # str: pass through with light sanity
+    s = str(value).strip()
+    if "\n" in s or "\r" in s:
+        raise ValueError(f"{key} contains a newline")
+    return s
+
+
+def _parse_env_file(path: str) -> dict:
+    """Parse a simple shell-style env file. Returns {key: value}. Comments
+    and blank lines are dropped. Keys outside the allowlist are dropped too
+    (prevents leaking unrelated env into the UI)."""
+    result = {}
+    try:
+        with open(path, "r") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                if "=" not in line:
+                    continue
+                k, v = line.split("=", 1)
+                k = k.strip()
+                # Strip matching quotes from value
+                v = v.strip()
+                if len(v) >= 2 and v[0] == v[-1] and v[0] in ("'", '"'):
+                    v = v[1:-1]
+                if k in _OLLAMA_SETTINGS_ALLOWLIST:
+                    result[k] = v
+    except FileNotFoundError:
+        pass
+    return result
+
+
+def _write_env_file(path: str, settings: dict) -> None:
+    """Rewrite ollama.env preserving the commented-out template and setting
+    only keys with non-empty values. Keys with empty value are commented out."""
+    # Known order for stability
+    ordered_keys = list(_OLLAMA_SETTINGS_ALLOWLIST.keys())
+    lines = [
+        "# Ollama server-level runtime tunables (managed by llm-manager).",
+        "# Edit via the Runners page in the UI, not by hand — the agent will",
+        "# overwrite this file when settings are applied.",
+        "",
+    ]
+    for key in ordered_keys:
+        val = settings.get(key, "")
+        if val == "" or val is None:
+            lines.append(f"# {key}=")
+        else:
+            lines.append(f"{key}={val}")
+    # Ensure parent dir exists (docker-compose dir is bind-mounted from host)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        f.write("\n".join(lines) + "\n")
+    os.replace(tmp, path)
+
+
+def _recreate_ollama_container(new_env: dict) -> None:
+    """Stop + remove the existing ollama container, then recreate it with the
+    same image/mounts/devices/GPU config but a new env dict.
+
+    Preserves: image, NetworkMode, RestartPolicy, Binds (volumes), Devices,
+    DeviceRequests (nvidia GPU), GroupAdd (amd video/render groups), PortBindings.
+    Only the env (PATH, OLLAMA_HOST, HSA_OVERRIDE_GFX_VERSION + allowlisted
+    tunables) changes.
+
+    Raises RuntimeError with a message on failure — caller should surface it.
+    """
+    if not _DOCKER_OK:
+        raise RuntimeError("Docker not available inside agent container")
+
+    try:
+        inspect = _docker.api.inspect_container(OLLAMA_CONTAINER)
+    except docker_lib.errors.NotFound as e:
+        raise RuntimeError(f"container {OLLAMA_CONTAINER!r} not found") from e
+
+    cfg = inspect.get("Config") or {}
+    host = inspect.get("HostConfig") or {}
+    image = cfg.get("Image")
+
+    # Preserve env vars that belong to the runtime (not user tunables).
+    preserve = {"PATH", "OLLAMA_HOST", "HSA_OVERRIDE_GFX_VERSION",
+                "NVIDIA_VISIBLE_DEVICES", "NVIDIA_DRIVER_CAPABILITIES",
+                "LANG", "LC_ALL", "HOME"}
+    existing_env = {}
+    for item in (cfg.get("Env") or []):
+        if "=" in item:
+            k, v = item.split("=", 1)
+            if k in preserve:
+                existing_env[k] = v
+    # Override/augment with the user's new tunables
+    merged_env = {**existing_env, **new_env}
+
+    kwargs = dict(
+        image=image,
+        name=OLLAMA_CONTAINER,
+        detach=True,
+        environment=merged_env,
+        network_mode=host.get("NetworkMode") or "host",
+        restart_policy=host.get("RestartPolicy") or {"Name": "unless-stopped"},
+    )
+
+    binds = host.get("Binds") or []
+    if binds:
+        # docker-py accepts the same "src:dst[:opts]" string format
+        kwargs["volumes"] = binds
+
+    # Device list (AMD /dev/kfd + /dev/dri mounts)
+    devices = host.get("Devices") or []
+    if devices:
+        kwargs["devices"] = [
+            f"{d['PathOnHost']}:{d['PathInContainer']}:{d.get('CgroupPermissions', 'rwm')}"
+            for d in devices
+        ]
+
+    # GPU requests (NVIDIA)
+    drequests = host.get("DeviceRequests") or []
+    if drequests:
+        kwargs["device_requests"] = [
+            docker_lib.types.DeviceRequest(
+                driver=d.get("Driver") or "",
+                count=d.get("Count", -1),
+                device_ids=d.get("DeviceIDs") or [],
+                capabilities=d.get("Capabilities") or [],
+                options=d.get("Options") or {},
+            )
+            for d in drequests
+        ]
+
+    group_add = host.get("GroupAdd") or []
+    if group_add:
+        kwargs["group_add"] = group_add
+
+    # Stop + remove old. Timeout keeps Ollama's HTTP handler graceful.
+    try:
+        old = _docker.containers.get(OLLAMA_CONTAINER)
+        old.stop(timeout=15)
+        old.remove(force=True)
+    except docker_lib.errors.NotFound:
+        pass
+
+    # Pull image if missing (image tag may have been updated)
+    try:
+        _docker.images.get(image)
+    except docker_lib.errors.ImageNotFound:
+        logger.info("Pulling %s before recreate", image)
+        _docker.images.pull(image)
+
+    _docker.containers.run(**kwargs)
+
+
+@app.get("/v1/ollama/settings")
+async def get_ollama_settings():
+    """Read the current ollama.env tunings + show which keys are controllable."""
+    settings = _parse_env_file(_OLLAMA_ENV_FILE)
+    return {
+        "settings": settings,
+        "allowlist": {k: v[0] for k, v in _OLLAMA_SETTINGS_ALLOWLIST.items()},
+        "env_file": _OLLAMA_ENV_FILE,
+    }
+
+
+class OllamaSettingsRequest(BaseModel):
+    # Only keys in _OLLAMA_SETTINGS_ALLOWLIST are accepted; others rejected.
+    # Values may be str/int/bool — normalized server-side.
+    settings: dict
+
+
+@app.put("/v1/ollama/settings")
+async def put_ollama_settings(req: OllamaSettingsRequest):
+    """Validate, write ollama.env, then recreate the ollama container so the
+    new env takes effect."""
+    if not _DOCKER_OK:
+        raise HTTPException(503, "Docker not available inside agent container")
+
+    # Validate + normalize every incoming value first; bail before touching disk.
+    normalized: dict = {}
+    for k, v in (req.settings or {}).items():
+        try:
+            normalized[k] = _validate_ollama_setting(k, v)
+        except ValueError as e:
+            raise HTTPException(400, f"{k}: {e}")
+
+    # Keep any currently-set keys the caller didn't include (partial updates).
+    # Caller can explicitly clear a key by passing empty string.
+    current = _parse_env_file(_OLLAMA_ENV_FILE)
+    merged = {**current, **normalized}
+    # Drop empty-string values from the container env (they mean "unset"),
+    # but keep them commented-out in the file for visibility.
+    container_env = {k: v for k, v in merged.items() if v != ""}
+
+    # Write new file first (on disk), then recreate. If recreate fails, the
+    # file is still the desired state — user can fix and re-apply.
+    _write_env_file(_OLLAMA_ENV_FILE, merged)
+
+    try:
+        _recreate_ollama_container(container_env)
+    except RuntimeError as e:
+        raise HTTPException(500, f"Wrote ollama.env but failed to recreate container: {e}")
+    except Exception as e:
+        logger.exception("recreate failed")
+        raise HTTPException(500, f"Wrote ollama.env but failed to recreate container: {e}")
+
+    return {
+        "ok": True,
+        "applied": container_env,
+        "message": f"Ollama restarted with {len(container_env)} tuning(s).",
+    }
+
+
 @app.get("/metrics")
 async def metrics():
     # Update gauges before scrape

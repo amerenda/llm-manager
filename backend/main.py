@@ -1979,6 +1979,36 @@ async def restart_runner_ollama(runner_id: int):
     return result
 
 
+@app.get("/api/llm/runners/{runner_id}/ollama-settings")
+async def get_runner_ollama_settings(runner_id: int):
+    """Read a runner's Ollama tunables (contents of ollama.env)."""
+    _inc_request(f"/api/llm/runners/{runner_id}/ollama-settings", "GET", 200)
+    client = await _get_runner_client(app.state.db, runner_id)
+    return await client.get_ollama_settings()
+
+
+class OllamaSettingsUpdateRequest(BaseModel):
+    settings: dict
+
+
+@app.put("/api/llm/runners/{runner_id}/ollama-settings")
+async def put_runner_ollama_settings(runner_id: int, req: OllamaSettingsUpdateRequest):
+    """Apply new Ollama tunables and recreate the container. Strongly suggest
+    draining the runner first — the recreate interrupts any in-flight job."""
+    _inc_request(f"/api/llm/runners/{runner_id}/ollama-settings", "PUT", 200)
+    client = await _get_runner_client(app.state.db, runner_id)
+    try:
+        return await client.put_ollama_settings(req.settings or {})
+    except httpx.HTTPStatusError as e:
+        # Propagate the agent's error message — usually a validation error
+        # from its allowlist (e.g. "OLLAMA_KV_CACHE_TYPE must be one of ...")
+        try:
+            detail = e.response.json().get("detail", str(e))
+        except Exception:
+            detail = str(e)
+        raise HTTPException(e.response.status_code, detail)
+
+
 # ── Profiles ──────────────────────────────────────────────────────────────────
 
 class ProfileCreateRequest(BaseModel):

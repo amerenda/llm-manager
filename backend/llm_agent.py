@@ -196,6 +196,25 @@ class LLMAgentClient:
             r.raise_for_status()
             return r.json()
 
+    async def get_ollama_settings(self) -> dict:
+        """Read the runner's ollama.env tunables."""
+        async with self._client(timeout=httpx.Timeout(10.0)) as c:
+            r = await c.get(f"{self.base_url}/v1/ollama/settings", headers=self._headers)
+            r.raise_for_status()
+            return r.json()
+
+    async def put_ollama_settings(self, settings: dict) -> dict:
+        """Apply ollama.env tunables on the runner. Rewrites the file + recreates
+        the ollama container. Allow up to 2 min — image pull + container boot."""
+        async with self._client(timeout=httpx.Timeout(10.0, read=120.0)) as c:
+            r = await c.put(
+                f"{self.base_url}/v1/ollama/settings",
+                json={"settings": settings},
+                headers=self._headers,
+            )
+            r.raise_for_status()
+            return r.json()
+
     # ── Agent management ───────────────────────────────────────────────────────
 
     async def trigger_update(self, target_version: str) -> dict:

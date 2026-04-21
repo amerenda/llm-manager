@@ -1,6 +1,6 @@
-import { useState } from 'react'
-import { Server, Cpu, HardDrive, MemoryStick, Volume2, RefreshCw, Power, Upload, AlertCircle, ChevronDown, ChevronRight, Play, Loader2, Zap } from 'lucide-react'
-import { useRunners, useUpdateRunner, useAgentTargetVersion, useSetAgentTargetVersion, useRunnerStatus, useTriggerRunnerUpdate, useFlushRunnerVram, useRestartOllama } from '../hooks/useBackend'
+import { useEffect, useState } from 'react'
+import { Server, Cpu, HardDrive, MemoryStick, Volume2, RefreshCw, Power, Upload, AlertCircle, ChevronDown, ChevronRight, Play, Loader2, Zap, Settings2, CheckCircle2 } from 'lucide-react'
+import { useRunners, useUpdateRunner, useAgentTargetVersion, useSetAgentTargetVersion, useRunnerStatus, useTriggerRunnerUpdate, useFlushRunnerVram, useRestartOllama, useOllamaSettings, useUpdateOllamaSettings } from '../hooks/useBackend'
 import { StatusDot } from '../components/StatusDot'
 import type { Runner } from '../types'
 
@@ -214,6 +214,9 @@ function RunnerDetail({ runner, target }: { runner: Runner; target: string }) {
         <p className="text-xs text-amber-400 mt-1">{flushMsg}</p>
       )}
 
+      {/* Ollama tunables — GPU runners only */}
+      {isGpu && <OllamaSettingsPanel runner={runner} />}
+
       {/* Version management */}
       <div className="border-t border-gray-800 pt-3 space-y-2">
         <p className="text-xs text-gray-500 font-medium uppercase tracking-wide">Agent Version</p>
@@ -407,6 +410,134 @@ export function Runners() {
               </div>
             )
           })}
+        </div>
+      )}
+    </div>
+  )
+}
+
+
+// ── Ollama tunables panel ────────────────────────────────────────────────
+// Per-runner form that reads /api/llm/runners/{id}/ollama-settings, lets the
+// admin edit allow-listed Ollama env vars, and applies them. Applying writes
+// ollama.env on the host and recreates the Ollama container — ~5–15s of
+// downtime. Strong recommendation to drain the runner first; the panel shows
+// a warning when an in-flight job is present.
+
+const OLLAMA_FIELD_HELP: Record<string, { label: string; placeholder: string; hint: string }> = {
+  OLLAMA_NUM_CTX:           { label: 'Context window',        placeholder: '2048',             hint: 'Tokens per request. Larger = more VRAM.' },
+  OLLAMA_FLASH_ATTENTION:   { label: 'Flash attention',       placeholder: '1 / 0',            hint: 'Usually a large speedup + VRAM reduction on supported GPUs.' },
+  OLLAMA_KV_CACHE_TYPE:     { label: 'KV cache quantization', placeholder: 'f16 / q8_0 / q4_0', hint: 'Requires flash attention. q8_0 halves KV VRAM at tiny quality cost.' },
+  OLLAMA_NUM_GPU:           { label: 'GPU layers',            placeholder: 'all',              hint: 'Layers offloaded to GPU. 0 = CPU-only. Blank = all that fit.' },
+  OLLAMA_NUM_PARALLEL:      { label: 'Parallel slots',        placeholder: '1',                hint: 'Concurrent requests per loaded model.' },
+  OLLAMA_MAX_LOADED_MODELS: { label: 'Max loaded models',     placeholder: '1',                hint: 'Keep at 1 — the scheduler does one-model-per-GPU.' },
+  OLLAMA_KEEP_ALIVE:        { label: 'Keep-alive',            placeholder: '5m',               hint: 'How long to keep a model in VRAM after last use. -1 = forever.' },
+  OLLAMA_MAX_QUEUE:         { label: 'Max queued requests',   placeholder: '512',              hint: 'Past this, Ollama rejects with 503.' },
+  OLLAMA_HOST:              { label: 'Listen address',        placeholder: '127.0.0.1:11434',  hint: 'Leave as-is unless you know why.' },
+}
+
+function OllamaSettingsPanel({ runner }: { runner: Runner }) {
+  const [open, setOpen] = useState(false)
+  const { data, isLoading, error, refetch } = useOllamaSettings(runner.id, open)
+  const update = useUpdateOllamaSettings()
+  const [draft, setDraft] = useState<Record<string, string>>({})
+  const [msg, setMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
+
+  // Seed the draft from server whenever we open or the server value changes.
+  useEffect(() => {
+    if (data?.settings) setDraft(data.settings)
+  }, [data])
+
+  const dirty = data ? JSON.stringify(draft) !== JSON.stringify(data.settings) : false
+  const keys = data ? Object.keys(data.allowlist) : []
+
+  return (
+    <div className="border-t border-gray-800 pt-3">
+      <button
+        onClick={() => setOpen(o => !o)}
+        className="w-full flex items-center gap-2 text-xs text-gray-400 hover:text-gray-200"
+      >
+        {open ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+        <Settings2 className="w-3 h-3" />
+        <span className="font-medium uppercase tracking-wide">Ollama Tunables</span>
+        {runner.in_flight_job_id && open && (
+          <span className="ml-auto text-amber-400 flex items-center gap-1">
+            <AlertCircle className="w-3 h-3" /> job running — drain first
+          </span>
+        )}
+      </button>
+
+      {open && (
+        <div className="mt-2 space-y-2">
+          {isLoading && <p className="text-xs text-gray-500">Loading…</p>}
+          {error && (
+            <p className="text-xs text-red-400">
+              Couldn't load settings: {(error as Error).message}
+            </p>
+          )}
+          {data && (
+            <>
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                {keys.map(k => {
+                  const h = OLLAMA_FIELD_HELP[k] ?? { label: k, placeholder: '', hint: '' }
+                  const val = draft[k] ?? ''
+                  return (
+                    <label key={k} className="flex flex-col gap-0.5">
+                      <span className="text-[11px] text-gray-400">
+                        {h.label}
+                        <span className="ml-2 text-gray-600 font-mono">{k}</span>
+                      </span>
+                      <input
+                        type="text"
+                        value={val}
+                        placeholder={h.placeholder}
+                        onChange={e => setDraft({ ...draft, [k]: e.target.value })}
+                        className="bg-gray-950 border border-gray-700 rounded px-2 py-1 text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-brand-600 font-mono"
+                      />
+                      <span className="text-[10px] text-gray-600">{h.hint}</span>
+                    </label>
+                  )
+                })}
+              </div>
+
+              <div className="flex items-center gap-2 pt-1">
+                <button
+                  onClick={() => {
+                    if (runner.in_flight_job_id) {
+                      if (!window.confirm(`Job ${runner.in_flight_job_id.slice(0, 8)} is running on ${runner.hostname}. Applying will interrupt it. Continue?`)) return
+                    }
+                    setMsg(null)
+                    update.mutate(
+                      { runnerId: runner.id, settings: draft },
+                      {
+                        onSuccess: (d) => { setMsg({ kind: 'ok', text: d.message }); refetch() },
+                        onError: (e) => setMsg({ kind: 'err', text: (e as Error).message }),
+                      }
+                    )
+                  }}
+                  disabled={!dirty || update.isPending}
+                  className="flex items-center gap-1 text-xs bg-brand-600 hover:bg-brand-500 disabled:opacity-40 text-white px-3 py-1.5 rounded-lg transition-colors"
+                >
+                  {update.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <CheckCircle2 className="w-3 h-3" />}
+                  Apply (restart Ollama)
+                </button>
+                <button
+                  onClick={() => data.settings && setDraft(data.settings)}
+                  disabled={!dirty || update.isPending}
+                  className="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-200 disabled:opacity-40 px-2 py-1.5"
+                >
+                  Reset
+                </button>
+                {dirty && <span className="text-[11px] text-amber-400">unsaved changes</span>}
+              </div>
+
+              {msg && (
+                <p className={`text-xs ${msg.kind === 'ok' ? 'text-green-400' : 'text-red-400'}`}>
+                  {msg.text}
+                </p>
+              )}
+            </>
+          )}
         </div>
       )}
     </div>
