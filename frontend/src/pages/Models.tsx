@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Download, Trash2, Loader2, CheckCircle2, AlertCircle, Image, Layers, Cpu, Upload, Shield, ShieldOff, Play, Square, Search, RefreshCw, BookOpen, Cloud, Settings2, Power, RefreshCcw, Server, X } from 'lucide-react'
-import { usePullModel, useDeleteModel, useCheckpoints, useSwitchCheckpoint, useLlmStatus, useLoadModel, useUnloadFromVram, useStartComfyui, useStopComfyui, useLibrary, useRefreshLibrary, useCloudModels, useCloudStatus, useUpdateCloudModel, useCloudKeys, useStoreCloudKey, useDeleteCloudKey, useRunners, useSyncModels, useOps, useDismissOp, useModelList, useUpdateModelSettings } from '../hooks/useBackend'
+import { usePullModel, useDeleteModel, useCheckpoints, useSwitchCheckpoint, useLlmStatus, useLoadModel, useUnloadFromVram, useStartComfyui, useStopComfyui, useLibrary, useRefreshLibrary, useRefreshRemoteDigests, useUpdateOutdatedModels, useForceUpdateModel, useCloudModels, useCloudStatus, useUpdateCloudModel, useCloudKeys, useStoreCloudKey, useDeleteCloudKey, useRunners, useSyncModels, useOps, useDismissOp, useModelList, useUpdateModelSettings } from '../hooks/useBackend'
 import type { LibraryModel, Runner } from '../types'
 import type { CloudModel, ModelInfo, StoredApiKey } from '../hooks/useBackend'
 
@@ -622,15 +622,7 @@ function LibraryBrowserSection({ selectedRunner, selectedRunnerHostname, allRunn
           <h2 className="text-base font-semibold text-gray-200">Ollama Library</h2>
           <span className="text-xs text-gray-600">{library.data?.total ?? 0} models</span>
         </div>
-        <button
-          onClick={() => refresh.mutate()}
-          disabled={refresh.isPending}
-          className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-300 transition-colors"
-          title={`Cache age: ${cacheAge.toFixed(1)}h`}
-        >
-          {refresh.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
-          Refresh
-        </button>
+        <LibraryToolbar cacheAge={cacheAge} onRefreshCatalog={() => refresh.mutate()} refreshCatalogPending={refresh.isPending} />
       </div>
 
       {/* Legend */}
@@ -741,6 +733,15 @@ function LibraryBrowserSection({ selectedRunner, selectedRunnerHostname, allRunn
                           {m.downloaded_on.length === allRunners.length
                             ? 'All runners'
                             : m.downloaded_on.join(', ')}
+                        </span>
+                      )}
+                      {(m.outdated_on ?? []).length > 0 && (
+                        <span
+                          className="flex items-center gap-0.5 text-[10px] text-amber-400"
+                          title={`Outdated on: ${(m.outdated_on ?? []).join(', ')} — remote manifest digest differs from local`}
+                        >
+                          <AlertCircle className="w-2.5 h-2.5" />
+                          update available
                         </span>
                       )}
                     </div>
@@ -890,6 +891,8 @@ function LibraryBrowserSection({ selectedRunner, selectedRunnerHostname, allRunn
                                   })}
                                 </div>
                               )
+                            ) : isDownloaded ? (
+                              <ForceUpdateButton model={sizeModel} runnerId={selectedRunner} />
                             ) : null}
                           </div>
                           )
@@ -1320,6 +1323,117 @@ export function Models() {
       ) : (
         <CloudModelsSection />
       )}
+    </div>
+  )
+}
+
+
+// ── Force-update single model ───────────────────────────────────────────
+// Tiny inline button for the expanded library detail — re-pulls a specific
+// `model:tag` regardless of local state. Used on downloaded variants.
+
+function ForceUpdateButton({ model, runnerId }: { model: string; runnerId: number | undefined }) {
+  const forceUpdate = useForceUpdateModel()
+  const [status, setStatus] = useState<'idle' | 'ok' | 'err'>('idle')
+  return (
+    <button
+      onClick={e => {
+        e.stopPropagation()
+        if (!window.confirm(`Force re-pull ${model}? Runs the pull even if the model is already up to date.`)) return
+        setStatus('idle')
+        forceUpdate.mutate({ model, runner_id: runnerId }, {
+          onSuccess: () => setStatus('ok'),
+          onError: () => setStatus('err'),
+        })
+      }}
+      disabled={forceUpdate.isPending}
+      className="flex items-center gap-1 text-[10px] bg-gray-800 hover:bg-gray-700 text-gray-300 px-2 py-0.5 rounded transition-colors disabled:opacity-40"
+      title="Force re-pull this model (ignores local/remote digest)"
+    >
+      {forceUpdate.isPending ? <Loader2 className="w-2.5 h-2.5 animate-spin" />
+        : status === 'ok' ? <CheckCircle2 className="w-2.5 h-2.5 text-green-400" />
+        : status === 'err' ? <AlertCircle className="w-2.5 h-2.5 text-red-400" />
+        : <RefreshCcw className="w-2.5 h-2.5" />}
+      Force update
+    </button>
+  )
+}
+
+
+// ── Library update toolbar ───────────────────────────────────────────────
+// Top-right of the Ollama Library section. Three actions:
+//   - Refresh catalog: scrape ollama.com/library for the curated list (keeps
+//     the model cards current).
+//   - Check for updates: ping registry.ollama.ai for the current manifest
+//     digest of each *downloaded* tag and cache it. Drives the "update
+//     available" indicator.
+//   - Update all outdated: pull every tag whose local digest differs from
+//     the remote. Each pull becomes a background op visible in the
+//     downloads-in-progress card.
+
+function LibraryToolbar({
+  cacheAge,
+  onRefreshCatalog,
+  refreshCatalogPending,
+}: {
+  cacheAge: number
+  onRefreshCatalog: () => void
+  refreshCatalogPending: boolean
+}) {
+  const refreshRemote = useRefreshRemoteDigests()
+  const updateOutdated = useUpdateOutdatedModels()
+  const [msg, setMsg] = useState<string | null>(null)
+  return (
+    <div className="flex items-center gap-3">
+      {msg && <span className="text-[10px] text-gray-500">{msg}</span>}
+      <button
+        onClick={() => {
+          setMsg(null)
+          refreshRemote.mutate(undefined, {
+            onSuccess: d => setMsg(
+              d.status === 'idle'
+                ? 'No downloaded models to check'
+                : `Checked ${d.tags_checked ?? 0} tags (${d.errors ?? 0} errors)`
+            ),
+            onError: e => setMsg(`Error: ${(e as Error).message}`),
+          })
+        }}
+        disabled={refreshRemote.isPending}
+        className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-300 disabled:opacity-40 transition-colors"
+        title="Ask registry.ollama.ai for the current manifest digest of each downloaded tag"
+      >
+        {refreshRemote.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
+        Check for updates
+      </button>
+      <button
+        onClick={() => {
+          if (!window.confirm('Pull every tag whose local digest differs from the remote? This could take a while for large models.')) return
+          setMsg(null)
+          updateOutdated.mutate(undefined, {
+            onSuccess: d => setMsg(
+              d.status === 'idle'
+                ? d.message || 'No remote digests cached — click "Check for updates" first'
+                : `Started ${d.count} pull${d.count === 1 ? '' : 's'}`
+            ),
+            onError: e => setMsg(`Error: ${(e as Error).message}`),
+          })
+        }}
+        disabled={updateOutdated.isPending}
+        className="flex items-center gap-1 text-xs text-amber-400 hover:text-amber-300 disabled:opacity-40 transition-colors"
+        title="Pull every model whose local digest differs from the cached remote digest"
+      >
+        {updateOutdated.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Upload className="w-3 h-3" />}
+        Update outdated
+      </button>
+      <button
+        onClick={onRefreshCatalog}
+        disabled={refreshCatalogPending}
+        className="flex items-center gap-1 text-xs text-gray-500 hover:text-gray-300 disabled:opacity-40 transition-colors"
+        title={`Catalog cache age: ${cacheAge.toFixed(1)}h`}
+      >
+        {refreshCatalogPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
+        Refresh catalog
+      </button>
     </div>
   )
 }

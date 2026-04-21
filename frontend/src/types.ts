@@ -222,6 +222,8 @@ export interface LibraryModel {
   safety: string
   downloaded: boolean
   downloaded_on: string[]
+  /** Runners whose local digest differs from the cached remote manifest digest. */
+  outdated_on?: string[]
   loaded: boolean
   fits: boolean
   fits_on: { runner: string; vram_total_gb: number }[]

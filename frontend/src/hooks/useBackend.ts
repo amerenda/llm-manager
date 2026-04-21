@@ -649,6 +649,44 @@ export function useDismissOp() {
   })
 }
 
+// ── Library updates (remote-digest checks and pulls) ─────────────────────
+
+export function useRefreshRemoteDigests() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () => post<{ status: string; checked?: number; errors?: number; tags_checked?: number; message?: string }>(
+      '/api/library/refresh-remote-digests', {}),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['library'] }),
+  })
+}
+
+export function useUpdateOutdatedModels() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () => post<{ status: string; pulls: Array<{ runner: string; model: string; op_id?: string; error?: string }>; count: number; message?: string }>(
+      '/api/library/update-outdated', {}),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['library'] })
+      qc.invalidateQueries({ queryKey: ['ops'] })
+    },
+  })
+}
+
+export function useForceUpdateModel() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ model, runner_id }: { model: string; runner_id?: number }) => {
+      const qs = runner_id != null ? `?runner_id=${runner_id}` : ''
+      return post<{ ok: boolean; op_id: string; message: string }>(
+        `/api/library/models/${encodeURIComponent(model)}/force-update${qs}`, {})
+    },
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['library'] })
+      qc.invalidateQueries({ queryKey: ['ops'] })
+    },
+  })
+}
+
 // ── Library ──────────────────────────────────────────────────────────────────
 
 export function useLibrary(params: { search?: string; safety?: string; fits?: boolean; downloaded?: boolean; hasPulling?: boolean } = {}) {

@@ -68,40 +68,80 @@ async def browse_library(
     # Get library models
     library_models = await db.get_library_models(pool, search=search)
 
-    # Get downloaded models from all runners via agent API
-    downloaded_names = set()
-    loaded_names = set()
-    runner_vram = {}
+    # Read per-runner downloaded / loaded state from capabilities.
+    # Agent heartbeats (every 30s) populate `downloaded_models` and
+    # `loaded_models` in capabilities — authoritative and cheap. Stops the
+    # old per-request fanout to every agent's /v1/models.
+    downloaded_names: set[str] = set()
+    loaded_names: set[str] = set()
+    runner_vram: dict[str, float] = {}
     per_runner_downloads: dict[str, set[str]] = {}
+    # digest lookup for update-available detection (Phase B below)
+    per_runner_digests: dict[str, dict[str, str]] = {}
     try:
         runners = await db.get_active_runners(pool)
         for r in runners:
             hostname = r["hostname"]
             per_runner_downloads[hostname] = set()
-            try:
-                client = await _get_runner_client(pool, r["id"])
-                result = await client.models()
-                for m in result.get("data", []):
-                    mid = m.get("id", "")
-                    if mid:
-                        downloaded_names.add(mid)
-                        per_runner_downloads[hostname].add(mid)
-                status = await client.status()
-                for m in status.get("loaded_ollama_models", []):
-                    loaded_names.add(m["name"])
-            except Exception:
-                logger.warning("Failed to query runner %s via agent API", hostname)
-            caps = r.get("capabilities", {})
-            if isinstance(caps, dict):
-                total = caps.get("gpu_vram_total_bytes", 0) / (1024**3)
-                if total > 0:
-                    runner_vram[hostname] = round(total, 1)
+            per_runner_digests[hostname] = {}
+
+            caps = r.get("capabilities") or {}
+            if isinstance(caps, str):
+                try:
+                    import json as _json
+                    caps = _json.loads(caps)
+                except Exception:
+                    caps = {}
+
+            # downloaded_models is a list of {name, digest, size_bytes, modified_at}
+            # in recent agents; fall back to the old /v1/models live query if
+            # an older agent is still checked in (no key present).
+            downloaded_entries = caps.get("downloaded_models")
+            if downloaded_entries is None:
+                # Old agent — live poll once. Noisy but only for legacy runners.
+                try:
+                    client = await _get_runner_client(pool, r["id"])
+                    result = await client.models()
+                    downloaded_entries = [{"name": m.get("id", ""), "digest": "", "size_bytes": 0} for m in result.get("data", [])]
+                except Exception:
+                    logger.warning("Legacy-agent fallback failed for %s", hostname)
+                    downloaded_entries = []
+
+            for entry in downloaded_entries:
+                mid = entry.get("name", "") if isinstance(entry, dict) else str(entry)
+                if not mid:
+                    continue
+                downloaded_names.add(mid)
+                per_runner_downloads[hostname].add(mid)
+                digest = entry.get("digest", "") if isinstance(entry, dict) else ""
+                if digest:
+                    per_runner_digests[hostname][mid] = digest
+
+            for name in caps.get("loaded_models", []) or []:
+                loaded_names.add(name)
+
+            total = caps.get("gpu_vram_total_bytes", 0) / (1024**3)
+            if total > 0:
+                runner_vram[hostname] = round(total, 1)
     except Exception:
-        logger.warning("Failed to get runner info for library browse")
+        logger.warning("Failed to get runner info for library browse", exc_info=True)
 
     # Classify all models
     all_names = [m["name"] for m in library_models]
     safety_map = await classify_models_batch(pool, all_names)
+
+    # Cached remote-manifest digests (populated by periodic refresh job).
+    # Used to mark a runner's local copy as out-of-date when the remote
+    # tag's content has changed.
+    remote_digests: dict[str, str] = {}
+    try:
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT model_name, digest FROM ollama_remote_manifests WHERE digest != ''"
+            )
+            remote_digests = {r["model_name"]: r["digest"] for r in rows}
+    except Exception:
+        logger.debug("ollama_remote_manifests not yet populated")
 
     # Build response
     results = []
@@ -145,6 +185,18 @@ async def browse_library(
             if any(d.startswith(name) for d in models)
         ]
 
+        # Update-available detection: any runner with this model that has a
+        # local digest differing from the remote_manifests cache.
+        outdated_on: list[str] = []
+        for hostname, digests in per_runner_digests.items():
+            for model_tag, local_digest in digests.items():
+                if not model_tag.startswith(name):
+                    continue
+                remote = remote_digests.get(model_tag)
+                if remote and local_digest and remote != local_digest:
+                    if hostname not in outdated_on:
+                        outdated_on.append(hostname)
+
         # Per-size fit info for the UI badges
         size_info = {}
         for ps in param_sizes:
@@ -161,6 +213,7 @@ async def browse_library(
             "safety": model_safety,
             "downloaded": is_downloaded,
             "downloaded_on": downloaded_on,
+            "outdated_on": outdated_on,
             "loaded": any(l.startswith(name) for l in loaded_names),
             "fits": model_fits,
             "fits_on": fits_on,
@@ -205,6 +258,118 @@ async def refresh_cache(request: Request):
     pool = _get_pool(request)
     result = await refresh_library_cache(pool, force=True)
     return result
+
+
+@router.post("/refresh-remote-digests")
+async def refresh_remote_digests_endpoint(request: Request):
+    """Re-check each currently-downloaded tag against registry.ollama.ai
+    and store the remote digest. Library view's `outdated_on` reads from
+    this cache. Safe to call on-demand — polls only tags actually downloaded
+    on a runner."""
+    from library import refresh_remote_manifests
+    pool = _get_pool(request)
+    tags: set[str] = set()
+    runners = await db.get_active_runners(pool)
+    for r in runners:
+        caps = r.get("capabilities") or {}
+        if isinstance(caps, str):
+            import json as _j
+            try:
+                caps = _j.loads(caps)
+            except Exception:
+                caps = {}
+        for entry in (caps.get("downloaded_models") or []):
+            name = entry.get("name") if isinstance(entry, dict) else str(entry)
+            if name:
+                tags.add(name)
+    if not tags:
+        return {"status": "idle", "message": "No downloaded models on any runner"}
+    result = await refresh_remote_manifests(pool, sorted(tags))
+    return {"status": "ok", **result, "tags_checked": len(tags)}
+
+
+async def _pull_on_runner(request: Request, runner_id: int, model: str) -> dict:
+    """Internal helper: kick off a pull on a specific runner. Reuses the
+    existing /api/llm/models/pull endpoint semantics via its helper (so the
+    op appears in background_ops and the UI's failed/progress card)."""
+    from main import llm_pull_model, LLMPullRequest  # avoid circular import
+    req = LLMPullRequest(model=model)
+    return await llm_pull_model(req, runner_id=runner_id)
+
+
+@router.post("/models/{name:path}/force-update")
+async def force_update_model(name: str, request: Request, runner_id: Optional[int] = None):
+    """Run `ollama pull {name}` regardless of local state. Use runner_id to
+    target a specific runner; otherwise picks the first active runner that
+    already has this model (falling back to the first active runner)."""
+    pool = _get_pool(request)
+    target: Optional[int] = runner_id
+    if target is None:
+        runners = await db.get_active_runners(pool)
+        for r in runners:
+            caps = r.get("capabilities") or {}
+            if isinstance(caps, str):
+                import json as _j
+                try:
+                    caps = _j.loads(caps)
+                except Exception:
+                    caps = {}
+            names = {e.get("name") for e in (caps.get("downloaded_models") or []) if isinstance(e, dict)}
+            if name in names:
+                target = r["id"]
+                break
+        if target is None and runners:
+            target = runners[0]["id"]
+    if target is None:
+        raise HTTPException(503, "No active runners to pull on")
+    return await _pull_on_runner(request, target, name)
+
+
+@router.post("/update-outdated")
+async def update_outdated_models(request: Request):
+    """Re-pull every downloaded tag whose local digest differs from the
+    cached remote digest. Returns the list of pulls kicked off.
+
+    Does NOT refresh remote digests first — call /refresh-remote-digests
+    before this for a full freshness pass. (Separated so a batch update
+    doesn't double-hit registry.ollama.ai.)"""
+    pool = _get_pool(request)
+    # Load remote digests
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT model_name, digest FROM ollama_remote_manifests WHERE digest != ''"
+        )
+        remote = {r["model_name"]: r["digest"] for r in rows}
+    if not remote:
+        return {"status": "idle", "message": "No remote digests cached — run /refresh-remote-digests first"}
+
+    kicked: list[dict] = []
+    runners = await db.get_active_runners(pool)
+    for r in runners:
+        caps = r.get("capabilities") or {}
+        if isinstance(caps, str):
+            import json as _j
+            try:
+                caps = _j.loads(caps)
+            except Exception:
+                caps = {}
+        for entry in (caps.get("downloaded_models") or []):
+            if not isinstance(entry, dict):
+                continue
+            tag = entry.get("name")
+            local_digest = entry.get("digest")
+            remote_digest = remote.get(tag)
+            if not tag or not local_digest or not remote_digest:
+                continue
+            if local_digest == remote_digest:
+                continue  # up-to-date
+            # Stale copy — pull on THIS runner so the local blob is refreshed.
+            try:
+                resp = await _pull_on_runner(request, r["id"], tag)
+                kicked.append({"runner": r["hostname"], "model": tag, "op_id": resp.get("op_id")})
+            except Exception as e:
+                kicked.append({"runner": r["hostname"], "model": tag, "error": str(e)})
+    return {"status": "ok", "pulls": kicked, "count": len(kicked)}
 
 
 @router.get("/{name}")

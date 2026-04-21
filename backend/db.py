@@ -124,6 +124,17 @@ CREATE TABLE IF NOT EXISTS library_cache_meta (
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+-- Cache of remote manifest digests fetched from registry.ollama.ai. Used to
+-- decide whether a runner's downloaded copy of a model:tag is out of date.
+-- Keyed by full namespaced tag (e.g. "library/qwen3.5:9b", "MFDoom/...").
+-- Refreshed by a periodic job, not on every request.
+CREATE TABLE IF NOT EXISTS ollama_remote_manifests (
+    model_name TEXT PRIMARY KEY,
+    digest TEXT NOT NULL,
+    checked_at TIMESTAMPTZ DEFAULT NOW(),
+    error TEXT
+);
+
 CREATE TABLE IF NOT EXISTS api_keys (
     id SERIAL PRIMARY KEY,
     provider TEXT NOT NULL,

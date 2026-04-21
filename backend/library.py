@@ -20,6 +20,7 @@ import db
 logger = logging.getLogger(__name__)
 
 OLLAMA_LIBRARY_URL = "https://ollama.com/library"
+OLLAMA_REGISTRY = "https://registry.ollama.ai"
 
 
 # ── HTML parsing ──────────────────────────────────────────────────────────────
@@ -279,6 +280,84 @@ async def ensure_model_tags(pool: asyncpg.Pool, model_name: str) -> list[dict]:
 
 
 # ── Safety classification ────────────────────────────────────────────────────
+
+# ── Remote manifest digest lookup (for "update available" detection) ────────
+
+async def fetch_remote_manifest_digest(model_tag: str) -> tuple[str, Optional[str]]:
+    """Return (digest, error) for a model:tag from registry.ollama.ai.
+
+    Handles both library models (`qwen3.5:9b` → `library/qwen3.5:9b`) and
+    user-namespaced models (`MFDoom/deepseek-r1-...:tag` → used as-is).
+
+    Uses HEAD on the manifest endpoint so we get the content digest via the
+    `Docker-Content-Digest` header without downloading the manifest body.
+    Accepts the Ollama-specific manifest media type in addition to OCI.
+    """
+    # Split off tag
+    if ":" in model_tag:
+        path, tag = model_tag.rsplit(":", 1)
+    else:
+        path, tag = model_tag, "latest"
+
+    # Library prefix for official models (no namespace)
+    if "/" not in path:
+        path = f"library/{path}"
+
+    url = f"{OLLAMA_REGISTRY}/v2/{path}/manifests/{tag}"
+    headers = {
+        "Accept": "application/vnd.docker.distribution.manifest.v2+json, "
+                  "application/vnd.oci.image.manifest.v1+json, "
+                  "application/vnd.ollama.image.manifest+json, "
+                  "application/json",
+    }
+    try:
+        async with httpx.AsyncClient(timeout=15, follow_redirects=True) as c:
+            # HEAD gives us the digest header without the body
+            r = await c.head(url, headers=headers)
+            if r.status_code == 404:
+                return "", "not found"
+            if r.status_code >= 400:
+                return "", f"HTTP {r.status_code}"
+            digest = r.headers.get("Docker-Content-Digest") or r.headers.get("docker-content-digest") or ""
+            if not digest:
+                # Some registries don't send the header on HEAD — fall back to GET
+                r = await c.get(url, headers=headers)
+                digest = r.headers.get("Docker-Content-Digest", "")
+                if not digest and r.status_code == 200:
+                    # Last resort: compute digest ourselves from the manifest JSON
+                    import hashlib
+                    digest = "sha256:" + hashlib.sha256(r.content).hexdigest()
+            return digest, None
+    except Exception as e:
+        return "", str(e)
+
+
+async def refresh_remote_manifests(pool: asyncpg.Pool, model_names: list[str]) -> dict:
+    """Fetch remote manifest digests for each model:tag and cache in
+    ollama_remote_manifests. Returns {checked: N, errors: M}."""
+    checked = 0
+    errors = 0
+    for name in sorted(set(model_names)):
+        digest, err = await fetch_remote_manifest_digest(name)
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """
+                INSERT INTO ollama_remote_manifests (model_name, digest, checked_at, error)
+                VALUES ($1, $2, NOW(), $3)
+                ON CONFLICT (model_name) DO UPDATE SET
+                    digest = EXCLUDED.digest,
+                    checked_at = EXCLUDED.checked_at,
+                    error = EXCLUDED.error
+                """,
+                name, digest, err,
+            )
+        if err:
+            errors += 1
+        else:
+            checked += 1
+    logger.info("Remote manifests refreshed: %d checked, %d errors", checked, errors)
+    return {"checked": checked, "errors": errors}
+
 
 async def classify_model(pool: asyncpg.Pool, model_name: str) -> str:
     """Classify a model as 'safe' or 'unsafe' based on pattern rules."""

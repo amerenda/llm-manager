@@ -266,6 +266,7 @@ async def _build_capabilities() -> dict:
     gpu = _gpu_stats()
     disk = _disk_stats()
     loaded = await _ollama_loaded_models()
+    downloaded = await _ollama_downloaded_models()
     comfyui_ok = await _comfyui_ok()
     caps = {
         "gpu_vendor": gpu.get("gpu_vendor", "none"),
@@ -277,6 +278,11 @@ async def _build_capabilities() -> dict:
         "disk_free_bytes": disk["disk_free_bytes"],
         "comfyui_running": comfyui_ok,
         "loaded_models": [m["name"] for m in loaded],
+        # Per-runner authoritative "what's on disk" set, with digests so the
+        # backend can detect out-of-date tags vs registry.ollama.ai without
+        # polling each runner on every library view request. Replaces live
+        # polling of /v1/models from library_routes.py.
+        "downloaded_models": downloaded,
         "agent_version": AGENT_VERSION,
     }
     # Always include TLS cert so heartbeats don't wipe it
@@ -566,6 +572,31 @@ async def _comfyui_ok() -> bool:
             return r.status_code == 200
     except Exception:
         return False
+
+
+async def _ollama_downloaded_models() -> list[dict]:
+    """Return list of on-disk Ollama models with manifest digest + size.
+    Used by the backend to authoritatively track what each runner has
+    downloaded — replaces the old pattern of the backend polling each runner
+    on every /api/library request. The digest is what we'll later compare
+    against registry.ollama.ai to detect out-of-date tags."""
+    try:
+        async with httpx.AsyncClient(timeout=5) as c:
+            r = await c.get(f"{OLLAMA_URL}/api/tags")
+            if r.status_code == 200:
+                models = r.json().get("models", [])
+                return [
+                    {
+                        "name": m["name"],
+                        "digest": m.get("digest", ""),
+                        "size_bytes": m.get("size", 0),
+                        "modified_at": m.get("modified_at", ""),
+                    }
+                    for m in models
+                ]
+    except Exception:
+        logger.warning("Failed to list Ollama downloaded models", exc_info=False)
+    return []
 
 
 async def _ollama_loaded_models() -> list[dict]:
