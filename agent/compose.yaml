@@ -1,13 +1,21 @@
-# llm-agent — GPU monitoring + Ollama proxy
-# Prerequisites: Docker Compose, Ollama running on host
+# llm-agent + Ollama — GPU monitoring and LLM inference on a host.
 #
-# Usage:
-#   docker compose --profile nvidia up -d
-#   docker compose --profile amd up -d
+# Profiles (pick one):
+#   nvidia       — llm-agent only (host-managed Ollama)
+#   amd          — llm-agent-amd only (host-managed Ollama)
+#   nvidia-full  — llm-agent + Ollama container (docker-managed, tunable via UI)
+#   amd-full     — llm-agent-amd + Ollama-ROCm container
+#
+# install.sh picks the right profile. Direct usage:
+#   docker compose --profile nvidia-full up -d    # recommended for new installs
+#
+# Env:
+#   .env         — agent credentials + paths (PSK, BACKEND_URL, COMPOSE_DIR, OLLAMA_MODELS_PATH, HSA_OVERRIDE_GFX_VERSION)
+#   ollama.env   — Ollama runtime tunables the UI will edit (NUM_CTX, FLASH_ATTENTION, KV_CACHE_TYPE, ...)
 
 services:
   llm-agent:
-    profiles: ["nvidia"]
+    profiles: ["nvidia", "nvidia-full"]
     image: amerenda/llm-manager:agent-${AGENT_IMAGE_TAG:-latest}
     container_name: llm-agent
     network_mode: host
@@ -15,11 +23,12 @@ services:
     env_file: .env
     environment:
       OLLAMA_URL: http://localhost:11434
-      OLLAMA_MODELS: /hostfs${OLLAMA_MODELS_PATH:-/mnt/storage/models}
-      MODEL_STORAGE_PATH: ${MODEL_STORAGE_PATH:-/mnt/storage/models}
+      OLLAMA_CONTAINER: ${OLLAMA_CONTAINER:-ollama}
+      OLLAMA_MODELS: /hostfs${OLLAMA_MODELS_PATH:-/opt/ollama/models}
+      MODEL_STORAGE_PATH: ${MODEL_STORAGE_PATH:-/opt/ollama/models}
       COMPOSE_DIR: ${COMPOSE_DIR:-}
       COMPOSE_DIR_LOCAL: /host-compose
-      COMPOSE_PROFILE: nvidia
+      COMPOSE_PROFILE: ${COMPOSE_PROFILE:-nvidia-full}
     volumes:
       - agent-tls:/data/tls
       - /var/run/docker.sock:/var/run/docker.sock
@@ -34,7 +43,7 @@ services:
               capabilities: [gpu]
 
   llm-agent-amd:
-    profiles: ["amd"]
+    profiles: ["amd", "amd-full"]
     image: amerenda/llm-manager:agent-amd-${AGENT_IMAGE_TAG:-latest}
     container_name: llm-agent
     network_mode: host
@@ -42,12 +51,13 @@ services:
     env_file: .env
     environment:
       OLLAMA_URL: http://localhost:11434
+      OLLAMA_CONTAINER: ${OLLAMA_CONTAINER:-ollama}
       HSA_OVERRIDE_GFX_VERSION: ${HSA_OVERRIDE_GFX_VERSION:-}
-      OLLAMA_MODELS: /hostfs${OLLAMA_MODELS_PATH:-/mnt/storage/models}
-      MODEL_STORAGE_PATH: ${MODEL_STORAGE_PATH:-/mnt/storage/models}
+      OLLAMA_MODELS: /hostfs${OLLAMA_MODELS_PATH:-/opt/ollama/models}
+      MODEL_STORAGE_PATH: ${MODEL_STORAGE_PATH:-/opt/ollama/models}
       COMPOSE_DIR: ${COMPOSE_DIR:-}
       COMPOSE_DIR_LOCAL: /host-compose
-      COMPOSE_PROFILE: amd
+      COMPOSE_PROFILE: ${COMPOSE_PROFILE:-amd-full}
     devices:
       - /dev/kfd:/dev/kfd
       - /dev/dri:/dev/dri
@@ -60,6 +70,52 @@ services:
       - /sys:/sys:ro
       - /:/hostfs:ro
       - ${COMPOSE_DIR:-.}:/host-compose
+
+  # ── Docker-managed Ollama ────────────────────────────────────────────────
+  # Only started with -full profiles. Tunables come from ollama.env so the
+  # agent can rewrite them without touching agent credentials in .env.
+
+  ollama:
+    profiles: ["nvidia-full"]
+    image: ollama/ollama:${OLLAMA_IMAGE_TAG:-0.21.0}
+    container_name: ollama
+    network_mode: host
+    restart: unless-stopped
+    env_file:
+      - path: ollama.env
+        required: false
+    environment:
+      OLLAMA_HOST: ${OLLAMA_HOST:-127.0.0.1:11434}
+    volumes:
+      - ${OLLAMA_MODELS_PATH:-/opt/ollama/models}:/root/.ollama/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  ollama-amd:
+    profiles: ["amd-full"]
+    image: ollama/ollama:${OLLAMA_AMD_IMAGE_TAG:-0.21.0-rocm}
+    container_name: ollama
+    network_mode: host
+    restart: unless-stopped
+    env_file:
+      - path: ollama.env
+        required: false
+    environment:
+      OLLAMA_HOST: ${OLLAMA_HOST:-127.0.0.1:11434}
+      HSA_OVERRIDE_GFX_VERSION: ${HSA_OVERRIDE_GFX_VERSION:-}
+    devices:
+      - /dev/kfd:/dev/kfd
+      - /dev/dri:/dev/dri
+    group_add:
+      - video
+      - render
+    volumes:
+      - ${OLLAMA_MODELS_PATH:-/opt/ollama/models}:/root/.ollama/models
 
 volumes:
   agent-tls:
