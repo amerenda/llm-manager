@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, type ReactNode } from 'react'
 import { Download, Trash2, Loader2, CheckCircle2, AlertCircle, Image, Layers, Cpu, Upload, Shield, ShieldOff, Play, Square, Search, RefreshCw, BookOpen, Cloud, Settings2, Power, RefreshCcw, Server, X } from 'lucide-react'
 import { usePullModel, useDeleteModel, useCheckpoints, useSwitchCheckpoint, useLlmStatus, useLoadModel, useUnloadFromVram, useStartComfyui, useStopComfyui, useLibrary, useRefreshLibrary, useRefreshRemoteDigests, useUpdateOutdatedModels, useForceUpdateModel, useCommunityModels, useCloudModels, useCloudStatus, useUpdateCloudModel, useCloudKeys, useStoreCloudKey, useDeleteCloudKey, useRunners, useSyncModels, useOps, useDismissOp, useModelList, useUpdateModelSettings } from '../hooks/useBackend'
 import type { LibraryModel, Runner } from '../types'
@@ -1391,7 +1391,7 @@ function LibraryTagGrid({
 
         // State-driven styling (3 buckets + fit modifier)
         let tone: string
-        let icon: React.ReactNode = null
+        let icon: ReactNode = null
         let stateLabel = ''
         if (pulling) {
           tone = 'bg-amber-900/30 text-amber-400 border-amber-800/60'
