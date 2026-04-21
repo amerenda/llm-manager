@@ -111,9 +111,14 @@ services:
     devices:
       - /dev/kfd:/dev/kfd
       - /dev/dri:/dev/dri
+    # Numeric GIDs from the host — the ollama/ollama:*-rocm image doesn't
+    # define a `render` group in /etc/group, so passing names fails on
+    # distros where the agent container isn't involved (Arch, etc.). GIDs
+    # are resolved directly by the kernel against host device perms.
+    # install.sh detects the host GIDs and writes them to .env.
     group_add:
-      - video
-      - render
+      - "${VIDEO_GID:-44}"
+      - "${RENDER_GID:-107}"
     volumes:
       - ${OLLAMA_MODELS_PATH:-/opt/ollama/models}:/root/.ollama/models
 

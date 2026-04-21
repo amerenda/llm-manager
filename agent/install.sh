@@ -313,6 +313,32 @@ else
     upsert_env MODEL_STORAGE_PATH "$OLLAMA_MODELS_PATH"
 fi
 
+# Host GIDs for video/render groups (AMD only — ollama/ollama:*-rocm image
+# doesn't define these groups, so we must pass numeric GIDs for /dev/dri
+# device perms to work). NVIDIA path uses device_requests and doesn't need
+# supplementary groups.
+if [[ "$GPU_VENDOR" == "amd" ]]; then
+    upsert_gid_env() {
+        local key="$1" group="$2"
+        local gid
+        gid=$(getent group "$group" 2>/dev/null | cut -d: -f3 || true)
+        if [[ -z "$gid" ]]; then
+            warn "group '$group' not found on host — leaving ${key} unset (compose default will be used)"
+            return
+        fi
+        # Rewrite if present, add if missing — GIDs should track the host, not
+        # be treated as immutable user edits.
+        if grep -q "^${key}=" "$ENV_FILE"; then
+            sed -i "s|^${key}=.*|${key}=${gid}|" "$ENV_FILE"
+        else
+            echo "${key}=${gid}" >> "$ENV_FILE"
+        fi
+    }
+    upsert_gid_env VIDEO_GID  video
+    upsert_gid_env RENDER_GID render
+    log "AMD host GIDs: video=$(grep -oP '^VIDEO_GID=\K.*' "$ENV_FILE" 2>/dev/null || echo '?'), render=$(grep -oP '^RENDER_GID=\K.*' "$ENV_FILE" 2>/dev/null || echo '?')"
+fi
+
 # Pin the Ollama image tag in .env so re-runs and `compose up` inherit it
 if "$MANAGED_OLLAMA"; then
     if [[ "$GPU_VENDOR" == "amd" ]]; then
