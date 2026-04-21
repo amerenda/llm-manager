@@ -415,11 +415,18 @@ async def _self_update(target_version: str):
 
         # Run a helper container with docker compose to recreate us.
         # The helper mounts the Docker socket and the compose dir (host paths),
-        # then runs `docker compose up -d --force-recreate`.
+        # then runs `docker compose up -d --force-recreate` targeted at ONLY
+        # the llm-agent service. Must not recreate the whole profile —
+        # `nvidia-full` / `amd-full` now include the ollama container, and
+        # recreating it hits a name conflict (ollama already running) that
+        # silently rolls back the entire update. The agent was stuck in a
+        # 35s retry loop for a day because of this.
         compose_file = os.path.join(COMPOSE_DIR, "compose.yaml")
+        agent_service = "llm-agent-amd" if COMPOSE_PROFILE.startswith("amd") else "llm-agent"
         cmd = (
             f"sleep 2 && "
-            f"docker compose -f {compose_file} --profile {COMPOSE_PROFILE} up -d --force-recreate"
+            f"docker compose -f {compose_file} --profile {COMPOSE_PROFILE} "
+            f"up -d --no-deps --force-recreate {agent_service}"
         )
         logger.info("Launching helper container to recreate with new image...")
         _docker.containers.run(
