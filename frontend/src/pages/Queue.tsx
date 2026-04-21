@@ -61,7 +61,14 @@ function JobRow({ job, onCancel, onPriorityUp, onPriorityDown, isPending }: {
         {statusBadge(job.status)}
       </div>
       <div className="min-w-0 flex-1">
-        <p className="text-sm text-gray-200 truncate">{job.model}</p>
+        <p className="text-sm text-gray-200 truncate">
+          {job.model}
+          {job.runner_hostname && (
+            <span className="ml-2 text-xs font-normal text-gray-500">
+              on <span className="text-gray-300">{job.runner_hostname}</span>
+            </span>
+          )}
+        </p>
         <p className="text-xs text-gray-500 truncate">
           {job.app_name || 'unknown'} · {job.id}
           {job.metadata?.slot !== undefined && <span> · slot {String(job.metadata.slot)}</span>}

@@ -255,6 +255,10 @@ export interface QueueJob {
     temperature?: number
     max_tokens?: number
   }
+  // Populated by the scheduler on loading_model / running transitions.
+  // Null for queued jobs (not yet dispatched) and cloud jobs (no local runner).
+  runner_id: number | null
+  runner_hostname: string | null
   created_at: string | null
   started_at: string | null
   completed_at: string | null

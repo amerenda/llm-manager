@@ -352,7 +352,10 @@ class SimplifiedScheduler:
                 swap_needed = runner.current_model != model
                 if swap_needed:
                     for job in batch:
-                        await queue_db.update_job_status(self.pool, job["id"], "loading_model")
+                        await queue_db.update_job_status(
+                            self.pool, job["id"], "loading_model",
+                            runner_id=runner.runner_id,
+                        )
 
                 task = asyncio.create_task(
                     self._dispatch_batch(runner, batch, swap_needed)
@@ -563,7 +566,10 @@ class SimplifiedScheduler:
             except Exception:
                 pass
 
-        await queue_db.update_job_status(self.pool, job_id, "running")
+        await queue_db.update_job_status(
+            self.pool, job_id, "running",
+            runner_id=runner.runner_id if runner is not None else None,
+        )
         if runner is not None:
             runner.in_flight_job_id = job_id
 

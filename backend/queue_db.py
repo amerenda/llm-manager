@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS queue_jobs (
     metadata JSONB,
     result JSONB,
     error TEXT,
+    runner_id INTEGER REFERENCES llm_runners(id) ON DELETE SET NULL,
     created_at TIMESTAMPTZ DEFAULT now(),
     started_at TIMESTAMPTZ,
     completed_at TIMESTAMPTZ
@@ -55,6 +56,10 @@ async def init_queue_tables(pool: asyncpg.Pool):
         for stmt in [
             "ALTER TABLE model_settings ADD COLUMN IF NOT EXISTS categories TEXT[] NOT NULL DEFAULT '{}'",
             "ALTER TABLE model_settings ADD COLUMN IF NOT EXISTS safety TEXT NOT NULL DEFAULT 'safe'",
+            # Added 2026-04: expose which runner a job is dispatched to so the
+            # Active Queue UI can show it. Set by the scheduler on
+            # loading_model/running transitions.
+            "ALTER TABLE queue_jobs ADD COLUMN IF NOT EXISTS runner_id INTEGER REFERENCES llm_runners(id) ON DELETE SET NULL",
         ]:
             try:
                 await conn.execute(stmt)
@@ -93,21 +98,37 @@ async def get_batch_jobs(pool: asyncpg.Pool, batch_id: str) -> list[dict]:
 
 
 async def update_job_status(pool: asyncpg.Pool, job_id: str, status: str,
-                            result: Optional[dict] = None, error: Optional[str] = None):
+                            result: Optional[dict] = None, error: Optional[str] = None,
+                            runner_id: Optional[int] = None):
+    """Update job status. When runner_id is provided it's written in the same
+    UPDATE — used by the scheduler to stamp the dispatched runner on the
+    loading_model → running transitions so the Active Queue UI can show it.
+    Terminal transitions (completed/failed/cancelled) leave runner_id alone."""
     import json
     async with pool.acquire() as conn:
         if status == "running":
-            await conn.execute("""
-                UPDATE queue_jobs SET status = $2, started_at = now() WHERE id = $1
-            """, job_id, status)
+            if runner_id is not None:
+                await conn.execute("""
+                    UPDATE queue_jobs SET status = $2, runner_id = $3, started_at = now()
+                    WHERE id = $1
+                """, job_id, status, runner_id)
+            else:
+                await conn.execute("""
+                    UPDATE queue_jobs SET status = $2, started_at = now() WHERE id = $1
+                """, job_id, status)
         elif status in ("completed", "failed", "cancelled"):
             await conn.execute("""
                 UPDATE queue_jobs SET status = $2, result = $3::jsonb, error = $4, completed_at = now()
                 WHERE id = $1
             """, job_id, status, json.dumps(result) if result else None, error)
         else:
-            await conn.execute(
-                "UPDATE queue_jobs SET status = $2 WHERE id = $1", job_id, status)
+            if runner_id is not None:
+                await conn.execute(
+                    "UPDATE queue_jobs SET status = $2, runner_id = $3 WHERE id = $1",
+                    job_id, status, runner_id)
+            else:
+                await conn.execute(
+                    "UPDATE queue_jobs SET status = $2 WHERE id = $1", job_id, status)
 
 
 async def get_pending_jobs(pool: asyncpg.Pool, limit: int = 100) -> list[dict]:
@@ -257,22 +278,25 @@ async def update_job_priority(pool: asyncpg.Pool, job_id: str, priority: int):
 
 
 async def list_jobs(pool: asyncpg.Pool, status: Optional[str] = None, limit: int = 100) -> list[dict]:
-    """List jobs with optional status filter, includes app name."""
+    """List jobs with optional status filter. Includes app name and — when
+    the scheduler has dispatched the job — runner hostname."""
     async with pool.acquire() as conn:
         if status:
             rows = await conn.fetch("""
-                SELECT j.*, a.name as app_name
+                SELECT j.*, a.name as app_name, r.hostname as runner_hostname
                 FROM queue_jobs j
                 LEFT JOIN registered_apps a ON j.app_id = a.id
+                LEFT JOIN llm_runners r ON j.runner_id = r.id
                 WHERE j.status = $1
                 ORDER BY j.priority DESC, j.created_at ASC
                 LIMIT $2
             """, status, limit)
         else:
             rows = await conn.fetch("""
-                SELECT j.*, a.name as app_name
+                SELECT j.*, a.name as app_name, r.hostname as runner_hostname
                 FROM queue_jobs j
                 LEFT JOIN registered_apps a ON j.app_id = a.id
+                LEFT JOIN llm_runners r ON j.runner_id = r.id
                 WHERE j.status NOT IN ('completed', 'failed', 'cancelled')
                 ORDER BY
                     CASE j.status WHEN 'running' THEN 0 WHEN 'loading_model' THEN 1 ELSE 2 END,
@@ -425,9 +449,10 @@ async def list_recent_jobs(pool: asyncpg.Pool, limit: int = 50) -> list[dict]:
     """List recently completed/failed jobs."""
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
-            SELECT j.*, a.name as app_name
+            SELECT j.*, a.name as app_name, r.hostname as runner_hostname
             FROM queue_jobs j
             LEFT JOIN registered_apps a ON j.app_id = a.id
+            LEFT JOIN llm_runners r ON j.runner_id = r.id
             WHERE j.status IN ('completed', 'failed', 'cancelled')
             ORDER BY j.completed_at DESC
             LIMIT $1
