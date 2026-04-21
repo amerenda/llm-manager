@@ -19,6 +19,20 @@ from gpu import vram_for_model
 logger = logging.getLogger(__name__)
 
 
+def _norm_digest(d: Optional[str]) -> str:
+    """Normalize a manifest digest for comparison. Ollama's /api/tags reports
+    bare hex ('6488c96fa...') while the registry's Docker-Content-Digest
+    header returns prefixed form ('sha256:6488c96fa...'). Without this, every
+    comparison is a false positive and the library looks perpetually outdated
+    — which is exactly the bug that made "update all" do nothing useful."""
+    if not d:
+        return ""
+    d = d.strip().lower()
+    if d.startswith("sha256:"):
+        d = d[len("sha256:"):]
+    return d
+
+
 async def _get_runner_client(pool, runner_id: int) -> LLMAgentClient:
     runners = await db.get_active_runners(pool)
     r = next((x for x in runners if x["id"] == runner_id), None)
@@ -186,14 +200,16 @@ async def browse_library(
         ]
 
         # Update-available detection: any runner with this model that has a
-        # local digest differing from the remote_manifests cache.
+        # local digest differing from the remote_manifests cache. Normalize
+        # both sides — local digest is bare hex from Ollama's /api/tags,
+        # remote digest is sha256:-prefixed from the registry header.
         outdated_on: list[str] = []
         for hostname, digests in per_runner_digests.items():
             for model_tag, local_digest in digests.items():
                 if not model_tag.startswith(name):
                     continue
                 remote = remote_digests.get(model_tag)
-                if remote and local_digest and remote != local_digest:
+                if remote and local_digest and _norm_digest(remote) != _norm_digest(local_digest):
                     if hostname not in outdated_on:
                         outdated_on.append(hostname)
 
@@ -367,7 +383,7 @@ async def update_outdated_models(request: Request):
             remote_digest = remote.get(tag)
             if not tag or not local_digest or not remote_digest:
                 continue
-            if local_digest == remote_digest:
+            if _norm_digest(local_digest) == _norm_digest(remote_digest):
                 continue  # up-to-date
             # Stale copy — pull on THIS runner so the local blob is refreshed.
             try:
