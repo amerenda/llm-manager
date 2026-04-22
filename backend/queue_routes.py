@@ -442,14 +442,19 @@ async def list_model_settings(request: Request):
     return [ModelSettings(**r) for r in rows]
 
 
-@model_router.get("/{model_name}/settings", response_model=ModelSettings)
+# Community model names contain slashes (e.g. MFDoom/deepseek-r1-tool-calling:
+# 14b-qwen-distill-q4_K_M). Traefik / ingress decodes %2F in the URL back to a
+# literal '/' before FastAPI routes, so a default {model_name} matcher only
+# captures the first segment and the rest fails /settings. :path tells Starlette
+# to match everything up to the trailing /settings and URL-decode it.
+@model_router.get("/{model_name:path}/settings", response_model=ModelSettings)
 async def get_model_settings(model_name: str, request: Request):
     pool = _get_pool(request)
     settings = await queue_db.get_model_settings(pool, model_name)
     return ModelSettings(**settings)
 
 
-@model_router.patch("/{model_name}/settings", response_model=ModelSettings)
+@model_router.patch("/{model_name:path}/settings", response_model=ModelSettings)
 async def update_model_settings(model_name: str, body: ModelSettingsUpdate, request: Request):
     pool = _get_pool(request)
     updates = {k: v for k, v in body.model_dump(exclude_unset=True).items() if v is not None}
