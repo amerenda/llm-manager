@@ -20,7 +20,7 @@ import asyncio
 import json
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 import asyncpg
@@ -72,6 +72,21 @@ scheduler_jobs_completed_total = Counter(
 scheduler_runner_current_model_v2 = None  # populated only after start; see init
 
 
+def _dl_set_from_caps(caps: dict) -> set[str]:
+    """Extract the set of downloaded model names from a runner's capabilities
+    dict. Accepts the new-style list-of-dicts shape and the legacy list-of-
+    strings shape as a safety net."""
+    out: set[str] = set()
+    for entry in (caps.get("downloaded_models") or []):
+        if isinstance(entry, dict):
+            name = entry.get("name")
+        else:
+            name = entry
+        if isinstance(name, str) and name:
+            out.add(name)
+    return out
+
+
 # ── State ────────────────────────────────────────────────────────────────────
 
 @dataclass
@@ -88,10 +103,27 @@ class RunnerState:
     # runner. The flag persists in llm_runners.draining; it clears only when
     # an admin explicitly un-drains.
     draining: bool = False
+    # Names (base + tag, e.g. "qwen3:14b") of models currently on disk. Sourced
+    # from agent heartbeat capabilities.downloaded_models. Used by _pick_runner
+    # so we don't pick a runner for a model it doesn't have — that would force
+    # a doomed swap and then a fallback that hammered the drained runner (seen
+    # 2026-04-22: archlinux drained + only-copy of qwen3.6:35b → every job
+    # fallback-loaded on it, making it unresponsive).
+    downloaded_models: set[str] = field(default_factory=set)
 
     @property
     def is_idle(self) -> bool:
         return self.in_flight_job_id is None
+
+    def has_downloaded(self, model: str) -> bool:
+        """Model-tag downloaded. Also matches :latest tag as an alias for the
+        base name — keeps parity with the UI's `downloadedNames.has(name) ||
+        has(name:latest)` pattern."""
+        if model in self.downloaded_models:
+            return True
+        if ":" not in model and f"{model}:latest" in self.downloaded_models:
+            return True
+        return False
 
 
 # ── Scheduler ────────────────────────────────────────────────────────────────
@@ -217,6 +249,7 @@ class SimplifiedScheduler:
             total_bytes = caps.get("gpu_vram_total_bytes", 0)
             if total_bytes:
                 rs.gpu_total_gb = round(total_bytes / 1e9, 2)
+            rs.downloaded_models = _dl_set_from_caps(caps)
 
             # Ask the runner what it currently has loaded (best effort)
             try:
@@ -287,6 +320,10 @@ class SimplifiedScheduler:
                 # don't touch those.
                 rs.pinned_model = r.get("pinned_model")
                 rs.draining = bool(r.get("draining"))
+                # Downloaded set refreshes every heartbeat — the agent pulls
+                # models in the background and we need _pick_runner to see it
+                # as soon as the heartbeat lands.
+                rs.downloaded_models = _dl_set_from_caps(caps)
 
     # ── main loop ────────────────────────────────────────────────────────────
 
@@ -383,10 +420,11 @@ class SimplifiedScheduler:
         clearing it (via _run_job's finally) and for marking any unrun jobs
         failed if the swap breaks."""
         model = batch[0]["model"]
+        original_runner = runner
         try:
             if swap_needed:
-                ok = await self._swap_model(runner, model)
-                if not ok:
+                landed = await self._swap_model(runner, model)
+                if landed is None:
                     for job in batch:
                         await queue_db.update_job_status(
                             self.pool, job["id"], "failed",
@@ -394,6 +432,27 @@ class SimplifiedScheduler:
                         )
                         scheduler_jobs_completed_total.labels(model=model, status="failed").inc()
                     return
+                # Swap's live-probe fallback may have put the model on a
+                # different runner than we picked. Transfer ownership so the
+                # rest of this dispatch (and the DB/UI) refer to the actual
+                # runner. Without this, _run_job would call chat() against the
+                # original (wrong) runner and every job in the batch would
+                # fail with "model not found".
+                if landed.runner_id != runner.runner_id:
+                    logger.warning(
+                        "dispatch: swap redirected %s from %s to %s — "
+                        "retargeting batch",
+                        model, runner.hostname, landed.hostname,
+                    )
+                    # Release the originally-picked runner (we never used it)
+                    original_runner.in_flight_job_id = None
+                    landed.in_flight_job_id = batch[0]["id"]
+                    runner = landed
+                    for job in batch:
+                        await queue_db.update_job_status(
+                            self.pool, job["id"], "loading_model",
+                            runner_id=runner.runner_id,
+                        )
 
             if len(batch) > 1:
                 logger.info("Running batch of %d jobs for %s on %s",
@@ -422,12 +481,18 @@ class SimplifiedScheduler:
              (don't fall through — a pinned runner's jobs must go to it).
              Pinned + draining: don't route new work here — admin intent wins.
           2. Any non-pinned, non-draining idle runner already on this model.
-          3. Any non-pinned, non-draining idle runner that can fit the model (swap).
-          4. None.
+          3. Any non-pinned, non-draining idle runner that HAS THE MODEL
+             DOWNLOADED and can fit it (swap on that runner).
 
-        In all cases, a runner marked `draining` is excluded from new work.
-        Its current in-flight job (if any) is unaffected; it finishes and the
-        runner goes idle with draining=True, still excluded.
+        A runner marked `draining` is excluded from new work. Its current
+        in-flight job (if any) is unaffected; it finishes and the runner goes
+        idle with draining=True, still excluded.
+
+        Rule 3 used to accept any runner that fit — which picked doomed targets
+        when a model lived on only one runner (forcing a swap that failed, a
+        fallback that ignored drain, and a chat on the wrong runner). It now
+        requires the model to be on disk; if nobody has it, return None and
+        the job waits in queued until someone pulls it.
         """
         # 1. Pinned match (skip draining pinned runners — wait for drain to clear)
         pinned = [r for r in self._runners.values() if r.pinned_model == model]
@@ -435,9 +500,9 @@ class SimplifiedScheduler:
             for r in pinned:
                 if r.draining:
                     continue
-                if r.is_idle:
+                if r.is_idle and r.has_downloaded(model):
                     return r
-            return None  # pinned but busy or draining — wait
+            return None  # pinned but busy / draining / not yet downloaded — wait
 
         # 2. Already-loaded + idle
         for r in self._runners.values():
@@ -446,7 +511,7 @@ class SimplifiedScheduler:
             if r.current_model == model and r.is_idle:
                 return r
 
-        # 3. Idle + fits
+        # 3. Idle + has it downloaded + fits
         need = vram_for_model(model)
         for r in self._runners.values():
             if r.pinned_model is not None or r.draining:
@@ -455,6 +520,8 @@ class SimplifiedScheduler:
                 continue
             if r.gpu_total_gb <= 0:
                 continue  # unknown — skip defensively
+            if not r.has_downloaded(model):
+                continue
             if need <= r.gpu_total_gb:
                 return r
 
@@ -462,16 +529,18 @@ class SimplifiedScheduler:
 
     # ── swap ─────────────────────────────────────────────────────────────────
 
-    async def _swap_model(self, runner: RunnerState, new_model: str) -> bool:
-        """Unload runner.current_model (if any) then load new_model. Returns True
-        on success. Runner state is updated in place."""
+    async def _swap_model(self, runner: RunnerState, new_model: str) -> Optional[RunnerState]:
+        """Unload runner.current_model (if any) then load new_model. Returns
+        the RunnerState the model ended up on (usually == runner), or None on
+        failure. Normally same as the input; the live-probe fallback below
+        can return a different runner if capabilities drifted."""
         t0 = time.time()
         old = runner.current_model
         try:
             client = await self.get_runner_client(runner_id=runner.runner_id)
         except Exception as e:
             logger.error("swap: can't get client for %s: %s", runner.hostname, e)
-            return False
+            return None
 
         if old:
             try:
@@ -483,27 +552,29 @@ class SimplifiedScheduler:
             runner.current_model = None
             runner.model_loaded_at = None
 
-        # Verify the model is downloaded on this runner
+        # Live-probe the runner — capabilities may be a heartbeat behind. If
+        # the model vanished from the picked runner (admin deleted it between
+        # pick and swap), fall back to another non-draining runner that has it.
         try:
             models_resp = await client.models()
             model_list = models_resp.get("data", models_resp.get("models", []))
             names = [m.get("id", m.get("name", "")) for m in model_list]
             if new_model not in names:
-                logger.error("swap: model %s not downloaded on %s; falling back",
+                logger.error("swap: model %s vanished on %s; looking for another runner",
                              new_model, runner.hostname)
-                # Try any other runner that has it downloaded
-                other = await self._find_runner_with_model_downloaded(new_model, exclude_id=runner.runner_id)
+                other = await self._find_runner_with_model_downloaded(
+                    new_model, exclude_id=runner.runner_id,
+                )
                 if other is None:
-                    return False
-                # Swap context to that runner
+                    return None
                 runner = other
                 try:
                     client = await self.get_runner_client(runner_id=runner.runner_id)
                 except Exception:
-                    return False
+                    return None
         except Exception:
             logger.exception("swap: couldn't list models on %s", runner.hostname)
-            return False
+            return None
 
         try:
             logger.info("swap: loading %s on %s", new_model, runner.hostname)
@@ -519,19 +590,20 @@ class SimplifiedScheduler:
             scheduler_model_swap_seconds.labels(runner=runner.hostname).observe(elapsed)
             logger.info("swap: %s → %s on %s in %.1fs",
                         old or "none", new_model, runner.hostname, elapsed)
-            return True
+            return runner
         except Exception:
             logger.exception("swap: load %s on %s failed", new_model, runner.hostname)
-            return False
+            return None
 
     async def _find_runner_with_model_downloaded(
         self, model: str, exclude_id: Optional[int] = None,
     ) -> Optional[RunnerState]:
-        """Fallback: probe other runners to see who has the model on disk."""
+        """Fallback: probe other runners to see who has the model on disk.
+        Skips draining runners (admin intent wins) and non-idle ones."""
         for rs in self._runners.values():
             if exclude_id is not None and rs.runner_id == exclude_id:
                 continue
-            if not rs.is_idle:
+            if rs.draining or not rs.is_idle:
                 continue
             try:
                 client = await self.get_runner_client(runner_id=rs.runner_id)

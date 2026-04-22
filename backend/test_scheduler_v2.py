@@ -30,7 +30,9 @@ def _make_sched(runners=None):
 
 class TestPickRunner:
     def test_pins_win(self):
-        a = RunnerState(runner_id=1, hostname="a", gpu_total_gb=17, pinned_model="qwen3:14b")
+        a = RunnerState(runner_id=1, hostname="a", gpu_total_gb=17,
+                        pinned_model="qwen3:14b",
+                        downloaded_models={"qwen3:14b"})
         b = RunnerState(runner_id=2, hostname="b", gpu_total_gb=24, current_model="qwen3:14b")
         sched = _make_sched([a, b])
         assert sched._pick_runner("qwen3:14b") is a
@@ -38,14 +40,27 @@ class TestPickRunner:
     def test_pinned_busy_blocks_fallback(self):
         # Pinned runner is busy → return None, DON'T steal capacity from another runner
         a = RunnerState(runner_id=1, hostname="a", gpu_total_gb=17,
-                        pinned_model="qwen3:14b", in_flight_job_id="j1")
-        b = RunnerState(runner_id=2, hostname="b", gpu_total_gb=24)
+                        pinned_model="qwen3:14b", in_flight_job_id="j1",
+                        downloaded_models={"qwen3:14b"})
+        b = RunnerState(runner_id=2, hostname="b", gpu_total_gb=24,
+                        downloaded_models={"qwen3:14b"})
         sched = _make_sched([a, b])
         assert sched._pick_runner("qwen3:14b") is None
 
+    def test_pin_without_download_not_picked(self):
+        # A pin that refers to a model the runner hasn't downloaded yet shouldn't
+        # force a doomed swap. Wait for the pull to finish.
+        a = RunnerState(runner_id=1, hostname="a", gpu_total_gb=17,
+                        pinned_model="qwen3:14b")  # no downloads
+        sched = _make_sched([a])
+        assert sched._pick_runner("qwen3:14b") is None
+
     def test_already_loaded_idle_wins_over_idle_empty(self):
+        # Rule 2: current_model match bypasses the downloaded_models check
+        # (loaded implies downloaded).
         a = RunnerState(runner_id=1, hostname="a", gpu_total_gb=17)  # empty
-        b = RunnerState(runner_id=2, hostname="b", gpu_total_gb=17, current_model="qwen3:14b")  # loaded
+        b = RunnerState(runner_id=2, hostname="b", gpu_total_gb=17,
+                        current_model="qwen3:14b")  # loaded
         sched = _make_sched([a, b])
         assert sched._pick_runner("qwen3:14b") is b
 
@@ -58,20 +73,33 @@ class TestPickRunner:
         assert sched._pick_runner("qwen3:14b") is None
 
     def test_idle_fits_picked_for_swap(self):
-        a = RunnerState(runner_id=1, hostname="a", gpu_total_gb=17, current_model="deepseek-r1:14b")
+        a = RunnerState(runner_id=1, hostname="a", gpu_total_gb=17,
+                        current_model="deepseek-r1:14b",
+                        downloaded_models={"qwen3:14b", "deepseek-r1:14b"})
         sched = _make_sched([a])
         picked = sched._pick_runner("qwen3:14b")
         assert picked is a  # will swap
 
+    def test_idle_fits_but_no_download_skipped(self):
+        # Core regression fix: runner fits VRAM but doesn't have the model on
+        # disk. Pre-fix this was picked, the swap failed, the fallback loaded
+        # on the drained runner anyway. Post-fix: no pick — job waits.
+        a = RunnerState(runner_id=1, hostname="a", gpu_total_gb=40,
+                        current_model="something-else")
+        sched = _make_sched([a])
+        assert sched._pick_runner("qwen3.6:35b-a3b") is None
+
     def test_too_large_skipped(self):
-        a = RunnerState(runner_id=1, hostname="a", gpu_total_gb=8.6)  # small
+        a = RunnerState(runner_id=1, hostname="a", gpu_total_gb=8.6,
+                        downloaded_models={"qwen3:70b"})
         sched = _make_sched([a])
         # qwen3:70b → 40GB estimate > 8.6
         assert sched._pick_runner("qwen3:70b") is None
 
     def test_unknown_gpu_total_skipped(self):
         # Runner whose gpu_total_gb=0 hasn't been reconciled yet — defensively skip
-        a = RunnerState(runner_id=1, hostname="a", gpu_total_gb=0)
+        a = RunnerState(runner_id=1, hostname="a", gpu_total_gb=0,
+                        downloaded_models={"qwen3:14b"})
         sched = _make_sched([a])
         assert sched._pick_runner("qwen3:14b") is None
 
@@ -87,18 +115,22 @@ class TestPickRunner:
         assert sched._pick_runner("qwen3:14b") is None
 
     def test_draining_runner_skipped_fallback_to_other(self):
-        # One draining runner has the model, another non-draining idle → pick the non-draining
+        # One draining runner has the model, another non-draining idle has it
+        # downloaded → pick the non-draining for swap.
         a = RunnerState(runner_id=1, hostname="a", gpu_total_gb=17,
                         current_model="qwen3:14b", draining=True)
-        b = RunnerState(runner_id=2, hostname="b", gpu_total_gb=24)
+        b = RunnerState(runner_id=2, hostname="b", gpu_total_gb=24,
+                        downloaded_models={"qwen3:14b"})
         sched = _make_sched([a, b])
         assert sched._pick_runner("qwen3:14b") is b  # will swap b to qwen3:14b
 
     def test_draining_pinned_blocks_new_work(self):
         # Pinned but draining → don't fall through to other runners (admin intent wins)
         a = RunnerState(runner_id=1, hostname="a", gpu_total_gb=17,
-                        pinned_model="qwen3:14b", draining=True)
-        b = RunnerState(runner_id=2, hostname="b", gpu_total_gb=24)
+                        pinned_model="qwen3:14b", draining=True,
+                        downloaded_models={"qwen3:14b"})
+        b = RunnerState(runner_id=2, hostname="b", gpu_total_gb=24,
+                        downloaded_models={"qwen3:14b"})
         sched = _make_sched([a, b])
         assert sched._pick_runner("qwen3:14b") is None
 
@@ -110,6 +142,15 @@ class TestPickRunner:
                         current_model="qwen3:14b", in_flight_job_id="j1", draining=True)
         sched = _make_sched([a])
         assert sched._pick_runner("qwen3:14b") is None
+
+    def test_latest_tag_alias(self):
+        # Catalog-style requests come in as "qwen3" or "qwen3:14b"; agents often
+        # report "qwen3:latest" for the default tag. has_downloaded() aliases
+        # base → base:latest so _pick_runner still matches.
+        a = RunnerState(runner_id=1, hostname="a", gpu_total_gb=17,
+                        downloaded_models={"qwen3:latest"})
+        sched = _make_sched([a])
+        assert sched._pick_runner("qwen3") is a
 
 
 # ── check_submission ────────────────────────────────────────────────────────
