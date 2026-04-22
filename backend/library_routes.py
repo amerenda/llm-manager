@@ -413,13 +413,16 @@ async def _pull_on_runner(request: Request, runner_id: int, model: str) -> dict:
 @router.post("/models/{name:path}/force-update")
 async def force_update_model(name: str, request: Request, runner_id: Optional[int] = None):
     """Run `ollama pull {name}` regardless of local state. Use runner_id to
-    target a specific runner; otherwise picks the first active runner that
-    already has this model (falling back to the first active runner)."""
+    target a specific runner; otherwise picks the first non-draining runner
+    that already has this model, falling back to the first non-draining
+    runner if none have it yet. Draining runners are skipped on the auto-
+    pick path — admin intent wins."""
     pool = _get_pool(request)
     target: Optional[int] = runner_id
     if target is None:
         runners = await db.get_active_runners(pool)
-        for r in runners:
+        non_draining = [r for r in runners if not r.get("draining")]
+        for r in non_draining:
             caps = r.get("capabilities") or {}
             if isinstance(caps, str):
                 import json as _j
@@ -431,10 +434,10 @@ async def force_update_model(name: str, request: Request, runner_id: Optional[in
             if name in names:
                 target = r["id"]
                 break
-        if target is None and runners:
-            target = runners[0]["id"]
+        if target is None and non_draining:
+            target = non_draining[0]["id"]
     if target is None:
-        raise HTTPException(503, "No active runners to pull on")
+        raise HTTPException(503, "No active runners to pull on (all draining or offline)")
     return await _pull_on_runner(request, target, name)
 
 

@@ -121,7 +121,17 @@ async def _get_runner_client(
     allowed_runner_ids: Optional[list[int]] = None,
 ) -> LLMAgentClient:
     """Return an LLMAgentClient pointed at an active (enabled) runner.
-    If allowed_runner_ids is set, only those runners are candidates."""
+    If allowed_runner_ids is set, only those runners are candidates.
+
+    When runner_id is None (fallback path used by /api/llm/models/load,
+    /api/llm/models/unload, library pull helpers, etc.) draining runners
+    are excluded. An explicit runner_id overrides — admins can still
+    target a drained runner for maintenance ops.
+
+    Regression 2026-04-22: archlinux was drained, alphabetical ordering
+    in get_active_runners put it first, and a UI "load model" test
+    landed a 35b model on it anyway — archlinux's 17 GB GPU overflowed
+    to RAM and the host died."""
     runners_list = await db.get_active_runners(pool)
     if allowed_runner_ids:
         runners_list = [r for r in runners_list if r["id"] in allowed_runner_ids]
@@ -132,7 +142,10 @@ async def _get_runner_client(
         if not r:
             raise HTTPException(404, "Runner not found or inactive")
     else:
-        r = runners_list[0]
+        eligible = [x for x in runners_list if not x.get("draining")]
+        if not eligible:
+            raise HTTPException(503, "No active llm-runners available (all are draining)")
+        r = eligible[0]
     url = r["address"].rstrip("/")
     if "://" in url:
         url = url.split("://", 1)[1]
@@ -150,16 +163,22 @@ async def _get_runner_client(
 
 async def _get_runner_ollama_base(pool: asyncpg.Pool, runner_id: Optional[int] = None) -> str:
     """Get Ollama URL for a runner. Replaces the runner port with 11434.
-    Ollama always uses plain HTTP regardless of agent protocol."""
+    Ollama always uses plain HTTP regardless of agent protocol.
+
+    Draining-aware: see _get_runner_client for the reasoning."""
     runners_list = await db.get_active_runners(pool)
     if not runners_list:
         raise HTTPException(503, "No active llm-runners available")
     if runner_id is not None:
         r = next((x for x in runners_list if x["id"] == runner_id), None)
         if not r:
-            r = runners_list[0]
+            eligible = [x for x in runners_list if not x.get("draining")]
+            r = eligible[0] if eligible else runners_list[0]
     else:
-        r = runners_list[0]
+        eligible = [x for x in runners_list if not x.get("draining")]
+        if not eligible:
+            raise HTTPException(503, "No active llm-runners available (all are draining)")
+        r = eligible[0]
     # runner address is like https://10.x.x.x:8090
     # ollama is on the same host at port 11434, always plain HTTP
     addr = r["address"]
