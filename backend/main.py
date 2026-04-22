@@ -1731,6 +1731,7 @@ async def list_apps():
         a_copy.setdefault("excluded_categories", [])
         a_copy["excluded_categories"] = list(a_copy["excluded_categories"] or [])
         a_copy["allowed_models"] = await db.get_app_allowed_models(app.state.db, a_copy["id"])
+        a_copy["excluded_models"] = await db.get_app_excluded_models(app.state.db, a_copy["id"])
         result.append(a_copy)
     return result
 
@@ -1880,6 +1881,22 @@ class AppAllowedModelsRequest(BaseModel):
 @app.put("/api/apps/{app_id}/allowed-models")
 async def set_app_allowed_models_endpoint(app_id: int, req: AppAllowedModelsRequest):
     await db.set_app_allowed_models(app.state.db, app_id, req.allowed_models)
+    return {"ok": True}
+
+
+@app.get("/api/apps/{app_id}/excluded-models")
+async def get_app_excluded_models_endpoint(app_id: int):
+    models = await db.get_app_excluded_models(app.state.db, app_id)
+    return {"app_id": app_id, "excluded_models": models}
+
+
+class AppExcludedModelsRequest(BaseModel):
+    excluded_models: list[str]
+
+
+@app.put("/api/apps/{app_id}/excluded-models")
+async def set_app_excluded_models_endpoint(app_id: int, req: AppExcludedModelsRequest):
+    await db.set_app_excluded_models(app.state.db, app_id, req.excluded_models)
     return {"ok": True}
 
 

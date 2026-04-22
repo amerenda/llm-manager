@@ -91,6 +91,7 @@ export interface RegisteredApp {
   status: string             // 'pending' | 'active'
   allow_profile_switch: boolean
   allowed_models: string[]   // empty = unrestricted
+  excluded_models: string[]  // always blocks matched models
   allowed_runner_ids: number[] // empty = any runner
   allowed_categories: string[] // empty = no restriction
   excluded_categories: string[] // empty = no restriction

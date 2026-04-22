@@ -99,6 +99,14 @@ CREATE TABLE IF NOT EXISTS app_allowed_models (
     UNIQUE(app_id, model_pattern)
 );
 
+CREATE TABLE IF NOT EXISTS app_excluded_models (
+    id SERIAL PRIMARY KEY,
+    app_id INT NOT NULL REFERENCES registered_apps(id) ON DELETE CASCADE,
+    model_pattern TEXT NOT NULL,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(app_id, model_pattern)
+);
+
 CREATE TABLE IF NOT EXISTS ollama_library_cache (
     id SERIAL PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
@@ -993,6 +1001,27 @@ async def set_app_allowed_models(pool: asyncpg.Pool, app_id: int, patterns: list
             )
 
 
+async def get_app_excluded_models(pool: asyncpg.Pool, app_id: int) -> list[str]:
+    """Return list of excluded model patterns for an app. Empty = nothing excluded."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT model_pattern FROM app_excluded_models WHERE app_id = $1 ORDER BY model_pattern",
+            app_id,
+        )
+    return [r["model_pattern"] for r in rows]
+
+
+async def set_app_excluded_models(pool: asyncpg.Pool, app_id: int, patterns: list[str]) -> None:
+    """Replace the excluded model list for an app."""
+    async with pool.acquire() as conn:
+        await conn.execute("DELETE FROM app_excluded_models WHERE app_id = $1", app_id)
+        for p in patterns:
+            await conn.execute(
+                "INSERT INTO app_excluded_models (app_id, model_pattern) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+                app_id, p,
+            )
+
+
 async def check_model_allowed(pool: asyncpg.Pool, api_key: str, model: str) -> bool:
     """Check if a model is allowed for the app identified by api_key.
 
@@ -1013,12 +1042,21 @@ async def check_model_allowed(pool: asyncpg.Pool, api_key: str, model: str) -> b
         )
         if not app_row:
             return False
+        app_id = app_row["id"]
         patterns = await conn.fetch(
-            "SELECT model_pattern FROM app_allowed_models WHERE app_id = $1", app_row["id"]
+            "SELECT model_pattern FROM app_allowed_models WHERE app_id = $1", app_id
+        )
+        exclusions = await conn.fetch(
+            "SELECT model_pattern FROM app_excluded_models WHERE app_id = $1", app_id
         )
 
     provider = detect_provider(model)
     pattern_list = [r["model_pattern"] for r in patterns]
+    exclusion_list = [r["model_pattern"] for r in exclusions]
+
+    # Exclusions always win — check before allow logic
+    if exclusion_list and any(fnmatch.fnmatch(model, p) for p in exclusion_list):
+        return False
 
     if provider == ModelProvider.LOCAL:
         # No patterns = unrestricted (backward compatible)

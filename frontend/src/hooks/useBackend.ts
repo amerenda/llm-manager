@@ -458,6 +458,19 @@ export function useUpdateAppAllowedModels() {
   })
 }
 
+export function useUpdateAppExcludedModels() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ appId, excluded_models }: { appId: number; excluded_models: string[] }) =>
+      fetch(`/api/apps/${appId}/excluded-models`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ excluded_models }),
+      }).then(r => { if (!r.ok) throw new Error('Failed'); return r.json() }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['apps'] }),
+  })
+}
+
 // ── Model load/unload ────────────────────────────────────────────────────────
 
 export function useLoadModel() {

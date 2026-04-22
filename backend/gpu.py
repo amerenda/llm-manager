@@ -10,6 +10,7 @@ MODEL_VRAM: dict[str, float] = {
     "qwen3.5:35b-a3b": 8.0,
     "qwen3:30b-a3b": 8.0,
     # Dense models
+    "qwen3.6:27b": 17.0,
     "qwen3:14b": 8.5,
     "qwen3:8b": 5.0,
     "qwen3.5:9b": 5.5,
@@ -55,6 +56,8 @@ def _estimate_vram(model_name: str) -> float:
         if params >= 40:  return 24.0
         if params >= 34:  return 20.0
         if params >= 32:  return 18.0
+        if params >= 27:  return 16.5
+        if params >= 20:  return 12.0
         if params >= 14:  return 8.5
         if params >= 13:  return 8.0
         if params >= 8:   return 5.0

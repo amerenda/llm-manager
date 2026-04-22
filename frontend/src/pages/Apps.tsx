@@ -1,6 +1,6 @@
 import { useState } from 'react'
-import { AppWindow, Plus, Loader2, CheckCircle2, AlertCircle, Copy, Check, Shield, RefreshCw, Cpu, X, Cloud, Server, Trash2 } from 'lucide-react'
-import { useApps, useRegisterApp, useApproveApp, useUpdateAppPermissions, useUpdateAppAllowedModels, useModelList, useCloudModels, useRunners, useUpdateAppAllowedRunners, useUpdateAppCategories, useDeleteApp } from '../hooks/useBackend'
+import { AppWindow, Plus, Loader2, CheckCircle2, AlertCircle, Copy, Check, Shield, RefreshCw, Cpu, X, Cloud, Server, Trash2, Ban } from 'lucide-react'
+import { useApps, useRegisterApp, useApproveApp, useUpdateAppPermissions, useUpdateAppAllowedModels, useUpdateAppExcludedModels, useModelList, useCloudModels, useRunners, useUpdateAppAllowedRunners, useUpdateAppCategories, useDeleteApp } from '../hooks/useBackend'
 import { StatusDot } from '../components/StatusDot'
 import type { RegisteredApp, Runner } from '../types'
 
@@ -484,6 +484,155 @@ function RunnerAffinityEditor({ appId, currentRunnerIds }: { appId: number; curr
   )
 }
 
+function ModelExclusionEditor({ appId, currentExcluded }: { appId: number; currentExcluded: string[] }) {
+  const [open, setOpen] = useState(false)
+  const [selected, setSelected] = useState<string[]>(currentExcluded)
+  const [customPattern, setCustomPattern] = useState('')
+  const updateExcluded = useUpdateAppExcludedModels()
+  const localModels = useModelList()
+
+  const localModelNames: string[] = localModels.data?.map((m: { name: string }) => m.name) ?? []
+
+  // Patterns that are not known local model names
+  const knownSet = new Set(localModelNames)
+  const customPatterns = selected.filter(s => !knownSet.has(s))
+
+  function toggle(model: string) {
+    setSelected(prev =>
+      prev.includes(model) ? prev.filter(m => m !== model) : [...prev, model]
+    )
+  }
+
+  function addPattern() {
+    const p = customPattern.trim()
+    if (p && !selected.includes(p)) {
+      setSelected(prev => [...prev, p])
+      setCustomPattern('')
+    }
+  }
+
+  function save() {
+    updateExcluded.mutate({ appId, excluded_models: selected }, {
+      onSuccess: () => setOpen(false),
+    })
+  }
+
+  if (!open) {
+    return (
+      <button
+        onClick={() => { setSelected(currentExcluded); setOpen(true) }}
+        title={currentExcluded.length === 0 ? 'No model exclusions' : `${currentExcluded.length} excluded model${currentExcluded.length !== 1 ? 's' : ''}`}
+        className={`flex items-center gap-1 text-xs px-2 py-1 rounded-lg transition-colors ${
+          currentExcluded.length === 0
+            ? 'bg-gray-800 text-gray-500 border border-gray-700 hover:border-gray-600'
+            : 'bg-red-900/30 text-red-400 border border-red-800'
+        }`}
+      >
+        <Ban className="w-3 h-3" />
+        {currentExcluded.length === 0 ? 'No exclusions' : `${currentExcluded.length} excluded`}
+      </button>
+    )
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={() => setOpen(false)}>
+      <div className="bg-gray-900 border border-gray-700 rounded-xl p-5 w-[28rem] max-h-[80vh] flex flex-col" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-4">
+          <h3 className="text-sm font-semibold text-gray-200">Model Exclusions</h3>
+          <button onClick={() => setOpen(false)} className="text-gray-500 hover:text-gray-300">
+            <X className="w-4 h-4" />
+          </button>
+        </div>
+        <p className="text-[11px] text-gray-500 mb-4">Excluded models are always blocked, even if the app's allow list would otherwise permit them. Exclusions are also filtered from the model list returned to the app.</p>
+
+        <div className="flex-1 overflow-y-auto space-y-4 mb-4">
+          {/* Local model list */}
+          <div>
+            <p className="text-[10px] text-gray-500 uppercase tracking-wide mb-2 flex items-center gap-1">
+              <Server className="w-3 h-3" /> Local models
+            </p>
+            {localModelNames.length === 0 ? (
+              <p className="text-xs text-gray-600 py-2 text-center">No local models available</p>
+            ) : (
+              <div className="space-y-1">
+                {localModelNames.sort().map((name: string) => (
+                  <label key={name} className="flex items-center gap-2 px-3 py-1.5 rounded-lg hover:bg-gray-800 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={selected.includes(name)}
+                      onChange={() => toggle(name)}
+                      className="rounded border-gray-600 bg-gray-800 text-red-500 focus:ring-red-600"
+                    />
+                    <span className="text-sm text-gray-300 font-mono">{name}</span>
+                  </label>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Custom patterns */}
+          <div>
+            <p className="text-[10px] text-gray-500 uppercase tracking-wide mb-1.5">Custom patterns</p>
+            {customPatterns.length > 0 && (
+              <div className="space-y-1 mb-2">
+                {customPatterns.map(p => (
+                  <div key={p} className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-gray-800">
+                    <span className="text-sm text-gray-300 font-mono flex-1">{p}</span>
+                    <button onClick={() => toggle(p)} className="text-gray-500 hover:text-red-400">
+                      <X className="w-3 h-3" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="flex gap-2">
+              <input
+                type="text"
+                value={customPattern}
+                onChange={e => setCustomPattern(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && addPattern()}
+                placeholder="e.g. qwen3.6:* or *:27b"
+                className="flex-1 bg-gray-950 border border-gray-700 rounded-lg px-3 py-1.5 text-sm text-gray-200 placeholder-gray-600 focus:outline-none focus:border-red-700 font-mono"
+              />
+              <button
+                onClick={addPattern}
+                disabled={!customPattern.trim()}
+                className="text-xs px-3 py-1.5 rounded-lg bg-gray-800 text-gray-400 hover:bg-gray-700 disabled:opacity-30 transition-colors"
+              >
+                Add
+              </button>
+            </div>
+            <p className="text-[10px] text-gray-600 mt-1">Glob patterns: * matches any, ? matches one character</p>
+          </div>
+        </div>
+
+        <div className="border-t border-gray-800 pt-3">
+          <p className="text-[10px] text-gray-600 mb-3">
+            {selected.length === 0
+              ? 'No exclusions — all permitted models are available.'
+              : `${selected.length} model${selected.length !== 1 ? 's' : ''} blocked.`}
+          </p>
+          <div className="flex gap-2">
+            <button
+              onClick={() => { setSelected([]); save() }}
+              className="flex-1 text-xs px-3 py-2 rounded-lg bg-gray-800 text-gray-400 hover:bg-gray-700 transition-colors"
+            >
+              Clear all
+            </button>
+            <button
+              onClick={save}
+              disabled={updateExcluded.isPending}
+              className="flex-1 text-xs px-3 py-2 rounded-lg bg-red-700 text-white hover:bg-red-600 disabled:opacity-40 transition-colors"
+            >
+              {updateExcluded.isPending ? 'Saving...' : 'Save'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export function Apps() {
   const apps = useApps()
   const register = useRegisterApp()
@@ -606,6 +755,7 @@ export function Apps() {
                         {a.allow_profile_switch ? 'Profiles' : 'No profiles'}
                       </button>
                       <ModelRestrictionEditor appId={a.id} currentModels={a.allowed_models ?? []} />
+                      <ModelExclusionEditor appId={a.id} currentExcluded={a.excluded_models ?? []} />
                       <CategoryFilterEditor
                         appId={a.id}
                         currentAllowed={a.allowed_categories ?? []}
