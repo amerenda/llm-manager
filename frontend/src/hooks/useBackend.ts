@@ -321,7 +321,7 @@ export function useRegisterApp() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: ({ name, base_url }: { name: string; base_url: string }) =>
-      post<{ ok: boolean; api_key: string }>('/api/apps', { name, base_url }),
+      post<{ ok: boolean; api_key: string }>('/api/apps/register', { name, base_url }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['apps'] }),
   })
 }
