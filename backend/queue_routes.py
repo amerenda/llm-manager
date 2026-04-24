@@ -13,6 +13,7 @@ from queue_models import (
     QueueJobRequest, QueueBatchRequest, QueueJobResponse,
     QueueBatchResponse, QueueJobResult, QueueBatchStatus,
     QueueOverview, ModelSettingsUpdate, ModelSettings,
+    ModelAlias, ModelAliasCreate, ModelRunnerParams, ModelRunnerParamsUpsert,
 )
 from scheduler import Scheduler
 
@@ -27,6 +28,7 @@ def _parse_jsonb(val):
 
 router = APIRouter(prefix="/api/queue", tags=["queue"])
 model_router = APIRouter(prefix="/api/models", tags=["models"])
+alias_router = APIRouter(prefix="/api/model-aliases", tags=["aliases"])
 
 
 def _get_pool(request: Request):
@@ -462,3 +464,95 @@ async def update_model_settings(model_name: str, body: ModelSettingsUpdate, requ
         await queue_db.upsert_model_settings(pool, model_name, **updates)
     settings = await queue_db.get_model_settings(pool, model_name)
     return ModelSettings(**settings)
+
+
+# ── Runner params (per model per runner) ──────────────────────────────────────
+
+@model_router.get("/{model_name:path}/runner-params", response_model=list[ModelRunnerParams])
+async def list_runner_params(model_name: str, request: Request):
+    pool = _get_pool(request)
+    rows = await queue_db.get_all_runner_params_for_model(pool, model_name)
+    return [ModelRunnerParams(
+        model_name=r["model_name"],
+        runner_id=r["runner_id"],
+        hostname=r.get("hostname"),
+        system_prompt=r.get("system_prompt"),
+        parameters=r.get("parameters") or {},
+    ) for r in rows]
+
+
+@model_router.put("/{model_name:path}/runner-params/{runner_id}", response_model=ModelRunnerParams)
+async def upsert_runner_params(
+    model_name: str, runner_id: int, body: ModelRunnerParamsUpsert, request: Request
+):
+    pool = _get_pool(request)
+    row = await queue_db.upsert_model_runner_params(
+        pool, model_name, runner_id, body.system_prompt, body.parameters)
+    # Re-fetch with hostname
+    rows = await queue_db.get_all_runner_params_for_model(pool, model_name)
+    for r in rows:
+        if r["runner_id"] == runner_id:
+            return ModelRunnerParams(
+                model_name=r["model_name"],
+                runner_id=r["runner_id"],
+                hostname=r.get("hostname"),
+                system_prompt=r.get("system_prompt"),
+                parameters=r.get("parameters") or {},
+            )
+    return ModelRunnerParams(
+        model_name=row["model_name"], runner_id=row["runner_id"],
+        system_prompt=row.get("system_prompt"), parameters=row.get("parameters") or {},
+    )
+
+
+@model_router.delete("/{model_name:path}/runner-params/{runner_id}")
+async def delete_runner_params(model_name: str, runner_id: int, request: Request):
+    pool = _get_pool(request)
+    deleted = await queue_db.delete_model_runner_params(pool, model_name, runner_id)
+    if not deleted:
+        raise HTTPException(404, "Runner params not found")
+    return {"ok": True}
+
+
+# ── Model aliases ─────────────────────────────────────────────────────────────
+
+@alias_router.get("", response_model=list[ModelAlias])
+async def list_aliases(request: Request):
+    pool = _get_pool(request)
+    rows = await queue_db.get_all_model_aliases(pool)
+    return [ModelAlias(**{k: v for k, v in r.items() if k in ModelAlias.model_fields}) for r in rows]
+
+
+@alias_router.get("/{alias_name:path}", response_model=ModelAlias)
+async def get_alias(alias_name: str, request: Request):
+    pool = _get_pool(request)
+    row = await queue_db.get_model_alias(pool, alias_name)
+    if not row:
+        raise HTTPException(404, "Alias not found")
+    return ModelAlias(**{k: v for k, v in row.items() if k in ModelAlias.model_fields})
+
+
+@alias_router.put("/{alias_name:path}", response_model=ModelAlias)
+async def upsert_alias(alias_name: str, body: ModelAliasCreate, request: Request):
+    pool = _get_pool(request)
+    row = await queue_db.upsert_model_alias(
+        pool, alias_name, body.base_model,
+        body.system_prompt, body.parameters, body.description,
+    )
+    return ModelAlias(**{k: v for k, v in row.items() if k in ModelAlias.model_fields})
+
+
+@alias_router.delete("/{alias_name:path}")
+async def delete_alias(alias_name: str, request: Request):
+    pool = _get_pool(request)
+    deleted = await queue_db.delete_model_alias(pool, alias_name)
+    if not deleted:
+        raise HTTPException(404, "Alias not found")
+    return {"ok": True}
+
+
+@model_router.get("/{model_name:path}/aliases", response_model=list[ModelAlias])
+async def list_aliases_for_model(model_name: str, request: Request):
+    pool = _get_pool(request)
+    rows = await queue_db.get_aliases_for_base_model(pool, model_name)
+    return [ModelAlias(**{k: v for k, v in r.items() if k in ModelAlias.model_fields}) for r in rows]

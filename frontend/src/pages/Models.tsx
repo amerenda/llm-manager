@@ -1,6 +1,7 @@
 import { useState, type ReactNode } from 'react'
 import { Download, Trash2, Loader2, CheckCircle2, AlertCircle, Image, Layers, Cpu, Upload, Shield, ShieldOff, Play, Square, Search, RefreshCw, BookOpen, Cloud, Settings2, Power, RefreshCcw, Server, X } from 'lucide-react'
-import { usePullModel, useDeleteModel, useCheckpoints, useSwitchCheckpoint, useLlmStatus, useLoadModel, useUnloadFromVram, useStartComfyui, useStopComfyui, useLibrary, useRefreshLibrary, useRefreshRemoteDigests, useUpdateOutdatedModels, useForceUpdateModel, useCommunityModels, useCloudModels, useCloudStatus, useUpdateCloudModel, useCloudKeys, useStoreCloudKey, useDeleteCloudKey, useRunners, useSyncModels, useOps, useDismissOp, useModelList, useUpdateModelSettings } from '../hooks/useBackend'
+import { usePullModel, useDeleteModel, useCheckpoints, useSwitchCheckpoint, useLlmStatus, useLoadModel, useUnloadFromVram, useStartComfyui, useStopComfyui, useLibrary, useRefreshLibrary, useRefreshRemoteDigests, useUpdateOutdatedModels, useForceUpdateModel, useCommunityModels, useCloudModels, useCloudStatus, useUpdateCloudModel, useCloudKeys, useStoreCloudKey, useDeleteCloudKey, useRunners, useSyncModels, useOps, useDismissOp, useModelList, useUpdateModelSettings, useAliasesForModel, useUpsertAlias, useDeleteAlias, useRunnerParamsForModel, useUpsertRunnerParams, useDeleteRunnerParams } from '../hooks/useBackend'
+import type { ModelAlias, ModelRunnerParams } from '../hooks/useBackend'
 import type { LibraryModel, Runner } from '../types'
 import type { CloudModel, ModelInfo, StoredApiKey } from '../hooks/useBackend'
 
@@ -43,9 +44,238 @@ function RunnerTabs({ runners, selected, onSelect }: {
 // ── Model Settings Modal ─────────────────────────────────────────────────────
 
 const STANDARD_CATEGORIES = ['tools', 'vision', 'thinking', 'embedding']
+const PARAM_FIELDS: { key: string; label: string; min: number; max: number; step: number }[] = [
+  { key: 'temperature', label: 'Temperature', min: 0, max: 2, step: 0.05 },
+  { key: 'top_p', label: 'Top P', min: 0, max: 1, step: 0.05 },
+  { key: 'top_k', label: 'Top K', min: 1, max: 200, step: 1 },
+  { key: 'num_ctx', label: 'Context (tokens)', min: 512, max: 131072, step: 512 },
+  { key: 'repeat_penalty', label: 'Repeat Penalty', min: 0, max: 2, step: 0.05 },
+  { key: 'num_predict', label: 'Max Predict', min: -1, max: 8192, step: 64 },
+]
 
-function ModelSettingsModal({ model, onClose }: { model: ModelInfo; onClose: () => void }) {
+function ParamEditor({
+  params, onChange,
+}: { params: Record<string, unknown>; onChange: (p: Record<string, unknown>) => void }) {
+  function set(key: string, val: string) {
+    const n = parseFloat(val)
+    onChange({ ...params, [key]: isNaN(n) ? undefined : n })
+  }
+  function clear(key: string) {
+    const next = { ...params }
+    delete next[key]
+    onChange(next)
+  }
+  return (
+    <div className="space-y-2">
+      {PARAM_FIELDS.map(f => (
+        <div key={f.key} className="flex items-center gap-2">
+          <span className="text-xs text-gray-400 w-32 shrink-0">{f.label}</span>
+          <input
+            type="number" min={f.min} max={f.max} step={f.step}
+            value={params[f.key] !== undefined ? String(params[f.key]) : ''}
+            placeholder="default"
+            onChange={e => set(f.key, e.target.value)}
+            className="w-24 bg-gray-950 border border-gray-700 rounded px-2 py-1 text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-brand-600"
+          />
+          {params[f.key] !== undefined && (
+            <button onClick={() => clear(f.key)} className="text-gray-600 hover:text-gray-400">
+              <X className="w-3 h-3" />
+            </button>
+          )}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function RunnerParamsTab({ modelName, runners }: { modelName: string; runners: import('../types').Runner[] }) {
+  const { data: allParams = [] } = useRunnerParamsForModel(modelName)
+  const upsert = useUpsertRunnerParams()
+  const remove = useDeleteRunnerParams()
+  const [editing, setEditing] = useState<number | null>(null)
+  const [draft, setDraft] = useState<{ system_prompt: string; parameters: Record<string, unknown> }>({
+    system_prompt: '', parameters: {},
+  })
+
+  function startEdit(runner_id: number) {
+    const existing = allParams.find(p => p.runner_id === runner_id)
+    setDraft({
+      system_prompt: existing?.system_prompt ?? '',
+      parameters: existing?.parameters ?? {},
+    })
+    setEditing(runner_id)
+  }
+
+  function save(runner_id: number) {
+    upsert.mutate({
+      model_name: modelName,
+      runner_id,
+      hostname: null,
+      system_prompt: draft.system_prompt || null,
+      parameters: draft.parameters,
+    }, { onSuccess: () => setEditing(null) })
+  }
+
+  return (
+    <div className="space-y-3">
+      {runners.map(r => {
+        const existing = allParams.find(p => p.runner_id === r.id)
+        const isEditing = editing === r.id
+        return (
+          <div key={r.id} className="bg-gray-800/60 rounded-lg p-3">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs font-medium text-gray-300">{r.hostname}</span>
+              <div className="flex gap-1.5">
+                {existing && !isEditing && (
+                  <button onClick={() => remove.mutate({ model_name: modelName, runner_id: r.id })}
+                    className="text-[10px] text-red-500 hover:text-red-400 px-1.5 py-0.5 rounded">
+                    Reset
+                  </button>
+                )}
+                <button onClick={() => isEditing ? setEditing(null) : startEdit(r.id)}
+                  className="text-[10px] text-gray-400 hover:text-gray-200 px-1.5 py-0.5 rounded bg-gray-700">
+                  {isEditing ? 'Cancel' : existing ? 'Edit' : 'Add override'}
+                </button>
+              </div>
+            </div>
+            {!isEditing && existing && (
+              <div className="text-[10px] text-gray-500 space-y-0.5">
+                {existing.system_prompt && <p className="truncate">System: {existing.system_prompt}</p>}
+                {Object.entries(existing.parameters).map(([k, v]) => (
+                  <span key={k} className="inline-block mr-2">{k}={String(v)}</span>
+                ))}
+              </div>
+            )}
+            {!isEditing && !existing && (
+              <p className="text-[10px] text-gray-600">Using defaults</p>
+            )}
+            {isEditing && (
+              <div className="space-y-3 mt-2">
+                <div>
+                  <p className="text-[10px] text-gray-500 uppercase tracking-wide mb-1">System Prompt</p>
+                  <textarea
+                    rows={2}
+                    value={draft.system_prompt}
+                    onChange={e => setDraft(d => ({ ...d, system_prompt: e.target.value }))}
+                    placeholder="Override system prompt (leave blank to inherit)"
+                    className="w-full bg-gray-950 border border-gray-700 rounded px-2 py-1.5 text-xs text-gray-200 placeholder-gray-600 resize-none focus:outline-none focus:border-brand-600"
+                  />
+                </div>
+                <div>
+                  <p className="text-[10px] text-gray-500 uppercase tracking-wide mb-2">Parameters</p>
+                  <ParamEditor params={draft.parameters} onChange={p => setDraft(d => ({ ...d, parameters: p }))} />
+                </div>
+                <button onClick={() => save(r.id)} disabled={upsert.isPending}
+                  className="w-full text-xs py-1.5 rounded bg-brand-600 text-white hover:bg-brand-500 disabled:opacity-40 transition-colors">
+                  Save
+                </button>
+              </div>
+            )}
+          </div>
+        )
+      })}
+      {runners.length === 0 && <p className="text-xs text-gray-600">No runners available</p>}
+    </div>
+  )
+}
+
+function AliasesTab({ baseModel }: { baseModel: string }) {
+  const { data: aliases = [], isLoading } = useAliasesForModel(baseModel)
+  const upsert = useUpsertAlias()
+  const remove = useDeleteAlias()
+  const [creating, setCreating] = useState(false)
+  const [editingId, setEditingId] = useState<number | null>(null)
+  const blankDraft = { alias_name: '', base_model: baseModel, system_prompt: '', parameters: {} as Record<string, unknown>, description: '' }
+  const [draft, setDraft] = useState(blankDraft)
+
+  function startCreate() {
+    setDraft({ ...blankDraft })
+    setCreating(true)
+    setEditingId(null)
+  }
+
+  function startEdit(a: ModelAlias) {
+    setDraft({ alias_name: a.alias_name, base_model: baseModel, system_prompt: a.system_prompt ?? '', parameters: a.parameters, description: a.description })
+    setEditingId(a.id)
+    setCreating(false)
+  }
+
+  function save() {
+    upsert.mutate(
+      { ...draft, id: editingId ?? 0, system_prompt: draft.system_prompt || null },
+      { onSuccess: () => { setCreating(false); setEditingId(null) } }
+    )
+  }
+
+  const editForm = (
+    <div className="bg-gray-800/60 rounded-lg p-3 space-y-2 mt-2">
+      <input value={draft.alias_name} onChange={e => setDraft(d => ({ ...d, alias_name: e.target.value }))}
+        placeholder="Alias name (e.g. qwen3-thinking)"
+        disabled={editingId !== null}
+        className="w-full bg-gray-950 border border-gray-700 rounded px-2 py-1.5 text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-brand-600 disabled:opacity-50"
+      />
+      <input value={draft.description} onChange={e => setDraft(d => ({ ...d, description: e.target.value }))}
+        placeholder="Description (optional)"
+        className="w-full bg-gray-950 border border-gray-700 rounded px-2 py-1.5 text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-brand-600"
+      />
+      <textarea rows={2} value={draft.system_prompt ?? ''} onChange={e => setDraft(d => ({ ...d, system_prompt: e.target.value }))}
+        placeholder="System prompt (optional)"
+        className="w-full bg-gray-950 border border-gray-700 rounded px-2 py-1.5 text-xs text-gray-200 placeholder-gray-600 resize-none focus:outline-none focus:border-brand-600"
+      />
+      <ParamEditor params={draft.parameters} onChange={p => setDraft(d => ({ ...d, parameters: p }))} />
+      <div className="flex gap-2 pt-1">
+        <button onClick={() => { setCreating(false); setEditingId(null) }}
+          className="flex-1 text-xs py-1.5 rounded bg-gray-700 text-gray-400 hover:bg-gray-600 transition-colors">
+          Cancel
+        </button>
+        <button onClick={save} disabled={!draft.alias_name.trim() || upsert.isPending}
+          className="flex-1 text-xs py-1.5 rounded bg-brand-600 text-white hover:bg-brand-500 disabled:opacity-40 transition-colors">
+          {upsert.isPending ? 'Saving…' : 'Save'}
+        </button>
+      </div>
+    </div>
+  )
+
+  return (
+    <div className="space-y-2">
+      {isLoading && <p className="text-xs text-gray-600">Loading…</p>}
+      {aliases.map(a => (
+        <div key={a.id}>
+          {editingId === a.id ? editForm : (
+            <div className="bg-gray-800/60 rounded-lg p-3">
+              <div className="flex items-center justify-between">
+                <span className="text-xs font-mono text-brand-300">{a.alias_name}</span>
+                <div className="flex gap-1.5">
+                  <button onClick={() => startEdit(a)} className="text-[10px] text-gray-400 hover:text-gray-200 px-1.5 py-0.5 rounded bg-gray-700">Edit</button>
+                  <button onClick={() => remove.mutate(a.alias_name)} className="text-[10px] text-red-500 hover:text-red-400 px-1.5 py-0.5 rounded">Delete</button>
+                </div>
+              </div>
+              {a.description && <p className="text-[10px] text-gray-500 mt-0.5">{a.description}</p>}
+              {a.system_prompt && <p className="text-[10px] text-gray-500 mt-0.5 truncate">System: {a.system_prompt}</p>}
+              {Object.keys(a.parameters).length > 0 && (
+                <p className="text-[10px] text-gray-600 mt-0.5">
+                  {Object.entries(a.parameters).map(([k, v]) => `${k}=${v}`).join(' · ')}
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+      ))}
+      {creating ? editForm : (
+        <button onClick={startCreate}
+          className="w-full text-xs py-1.5 rounded border border-dashed border-gray-700 text-gray-500 hover:border-gray-500 hover:text-gray-300 transition-colors">
+          + New alias
+        </button>
+      )}
+    </div>
+  )
+}
+
+type SettingsTab = 'general' | 'runner-params' | 'aliases'
+
+function ModelSettingsModal({ model, runners, onClose }: { model: ModelInfo; runners: import('../types').Runner[]; onClose: () => void }) {
   const update = useUpdateModelSettings()
+  const [tab, setTab] = useState<SettingsTab>('general')
   const [categories, setCategories] = useState<string[]>(model.categories ?? [])
   const [safety, setSafety] = useState(model.safety ?? 'safe')
   const [customCat, setCustomCat] = useState('')
@@ -66,81 +296,110 @@ function ModelSettingsModal({ model, onClose }: { model: ModelInfo; onClose: () 
     update.mutate({ model: model.name, categories, safety }, { onSuccess: onClose })
   }
 
+  const baseModel = (model as unknown as { base_model?: string }).base_model ?? model.name
+  const isAlias = !!(model as unknown as { is_alias?: boolean }).is_alias
+
   return (
     <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={onClose}>
-      <div className="bg-gray-900 border border-gray-700 rounded-xl p-5 w-[26rem]" onClick={e => e.stopPropagation()}>
-        <div className="flex items-center justify-between mb-4">
+      <div className="bg-gray-900 border border-gray-700 rounded-xl p-5 w-[28rem] max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-1">
           <h3 className="text-sm font-semibold text-gray-200">Model Settings</h3>
           <button onClick={onClose} className="text-gray-500 hover:text-gray-300"><X className="w-4 h-4" /></button>
         </div>
-        <p className="text-xs text-gray-500 font-mono mb-4 truncate">{model.name}</p>
+        <p className="text-xs text-gray-500 font-mono mb-3 truncate">
+          {model.name}
+          {isAlias && <span className="ml-2 text-[10px] bg-indigo-900/50 text-indigo-400 px-1.5 py-0.5 rounded">alias of {baseModel}</span>}
+        </p>
 
-        <div className="space-y-4">
-          {/* Safety */}
-          <div>
-            <p className="text-[10px] text-gray-500 uppercase tracking-wide mb-2">Safety</p>
-            <div className="flex gap-2">
-              {(['safe', 'unsafe'] as const).map(s => (
-                <button key={s} onClick={() => setSafety(s)}
-                  className={`text-xs px-3 py-1.5 rounded-lg transition-colors border ${
-                    safety === s
-                      ? s === 'safe' ? 'bg-green-900/50 text-green-400 border-green-700' : 'bg-red-900/50 text-red-400 border-red-700'
-                      : 'bg-gray-800 text-gray-400 hover:bg-gray-700 border-transparent'
-                  }`}>
-                  {s === 'safe' ? 'Safe' : 'Unsafe'}
-                </button>
-              ))}
-            </div>
+        {/* Tab bar */}
+        {!isAlias && (
+          <div className="flex gap-1 bg-gray-800 rounded-lg p-0.5 mb-4 text-[11px]">
+            {(['general', 'runner-params', 'aliases'] as SettingsTab[]).map(t => (
+              <button key={t} onClick={() => setTab(t)}
+                className={`flex-1 py-1.5 rounded-md transition-colors font-medium ${
+                  tab === t ? 'bg-gray-700 text-gray-200' : 'text-gray-500 hover:text-gray-300'
+                }`}>
+                {t === 'general' ? 'General' : t === 'runner-params' ? 'Runner Params' : 'Aliases'}
+              </button>
+            ))}
           </div>
+        )}
 
-          {/* Categories */}
-          <div>
-            <p className="text-[10px] text-gray-500 uppercase tracking-wide mb-2">Categories</p>
-            <div className="flex gap-1.5 flex-wrap mb-2">
-              {STANDARD_CATEGORIES.map(cat => (
-                <button key={cat} onClick={() => toggleCategory(cat)}
-                  className={`text-xs px-2.5 py-1 rounded-full transition-colors border ${
-                    categories.includes(cat)
-                      ? 'bg-brand-900 text-brand-300 border-brand-700'
-                      : 'bg-gray-800 text-gray-500 hover:bg-gray-700 hover:text-gray-300 border-transparent'
-                  }`}>
-                  {cat}
-                </button>
-              ))}
-            </div>
-            {categories.filter(c => !STANDARD_CATEGORIES.includes(c)).length > 0 && (
-              <div className="flex flex-wrap gap-1.5 mb-2">
-                {categories.filter(c => !STANDARD_CATEGORIES.includes(c)).map(c => (
-                  <span key={c} className="inline-flex items-center gap-1 text-xs bg-indigo-900/40 text-indigo-300 px-2 py-0.5 rounded-full">
-                    {c}
-                    <button onClick={() => toggleCategory(c)} className="hover:text-red-400"><X className="w-2.5 h-2.5" /></button>
-                  </span>
+        {/* General tab */}
+        {(tab === 'general' || isAlias) && (
+          <div className="space-y-4">
+            <div>
+              <p className="text-[10px] text-gray-500 uppercase tracking-wide mb-2">Safety</p>
+              <div className="flex gap-2">
+                {(['safe', 'unsafe'] as const).map(s => (
+                  <button key={s} onClick={() => setSafety(s)}
+                    className={`text-xs px-3 py-1.5 rounded-lg transition-colors border ${
+                      safety === s
+                        ? s === 'safe' ? 'bg-green-900/50 text-green-400 border-green-700' : 'bg-red-900/50 text-red-400 border-red-700'
+                        : 'bg-gray-800 text-gray-400 hover:bg-gray-700 border-transparent'
+                    }`}>
+                    {s === 'safe' ? 'Safe' : 'Unsafe'}
+                  </button>
                 ))}
               </div>
-            )}
-            <div className="flex gap-2 mt-1">
-              <input type="text" value={customCat} onChange={e => setCustomCat(e.target.value)}
-                onKeyDown={e => e.key === 'Enter' && addCustom()}
-                placeholder="Add custom category"
-                className="flex-1 bg-gray-950 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-brand-600"
-              />
-              <button onClick={addCustom} disabled={!customCat.trim()}
-                className="text-xs px-2.5 py-1.5 rounded-lg bg-gray-800 text-gray-400 hover:bg-gray-700 disabled:opacity-30 transition-colors">
-                Add
+            </div>
+            <div>
+              <p className="text-[10px] text-gray-500 uppercase tracking-wide mb-2">Categories</p>
+              <div className="flex gap-1.5 flex-wrap mb-2">
+                {STANDARD_CATEGORIES.map(cat => (
+                  <button key={cat} onClick={() => toggleCategory(cat)}
+                    className={`text-xs px-2.5 py-1 rounded-full transition-colors border ${
+                      categories.includes(cat)
+                        ? 'bg-brand-900 text-brand-300 border-brand-700'
+                        : 'bg-gray-800 text-gray-500 hover:bg-gray-700 hover:text-gray-300 border-transparent'
+                    }`}>
+                    {cat}
+                  </button>
+                ))}
+              </div>
+              {categories.filter(c => !STANDARD_CATEGORIES.includes(c)).length > 0 && (
+                <div className="flex flex-wrap gap-1.5 mb-2">
+                  {categories.filter(c => !STANDARD_CATEGORIES.includes(c)).map(c => (
+                    <span key={c} className="inline-flex items-center gap-1 text-xs bg-indigo-900/40 text-indigo-300 px-2 py-0.5 rounded-full">
+                      {c}
+                      <button onClick={() => toggleCategory(c)} className="hover:text-red-400"><X className="w-2.5 h-2.5" /></button>
+                    </span>
+                  ))}
+                </div>
+              )}
+              <div className="flex gap-2 mt-1">
+                <input type="text" value={customCat} onChange={e => setCustomCat(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && addCustom()}
+                  placeholder="Add custom category"
+                  className="flex-1 bg-gray-950 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-brand-600"
+                />
+                <button onClick={addCustom} disabled={!customCat.trim()}
+                  className="text-xs px-2.5 py-1.5 rounded-lg bg-gray-800 text-gray-400 hover:bg-gray-700 disabled:opacity-30 transition-colors">
+                  Add
+                </button>
+              </div>
+            </div>
+            <div className="flex gap-2 pt-1">
+              <button onClick={onClose} className="flex-1 text-xs px-3 py-2 rounded-lg bg-gray-800 text-gray-400 hover:bg-gray-700 transition-colors">
+                Cancel
+              </button>
+              <button onClick={save} disabled={update.isPending}
+                className="flex-1 text-xs px-3 py-2 rounded-lg bg-brand-600 text-white hover:bg-brand-500 disabled:opacity-40 transition-colors">
+                {update.isPending ? 'Saving...' : 'Save'}
               </button>
             </div>
           </div>
-        </div>
+        )}
 
-        <div className="flex gap-2 mt-5">
-          <button onClick={onClose} className="flex-1 text-xs px-3 py-2 rounded-lg bg-gray-800 text-gray-400 hover:bg-gray-700 transition-colors">
-            Cancel
-          </button>
-          <button onClick={save} disabled={update.isPending}
-            className="flex-1 text-xs px-3 py-2 rounded-lg bg-brand-600 text-white hover:bg-brand-500 disabled:opacity-40 transition-colors">
-            {update.isPending ? 'Saving...' : 'Save'}
-          </button>
-        </div>
+        {/* Runner Params tab */}
+        {tab === 'runner-params' && !isAlias && (
+          <RunnerParamsTab modelName={model.name} runners={runners} />
+        )}
+
+        {/* Aliases tab */}
+        {tab === 'aliases' && !isAlias && (
+          <AliasesTab baseModel={model.name} />
+        )}
       </div>
     </div>
   )
@@ -404,10 +663,15 @@ function InstalledModelsView({ runners, selectedRunner, selectedRunnerHostname }
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center gap-1.5 flex-wrap">
                       <span className="text-sm text-gray-200 font-medium">{displayName}</span>
-                      {m.parameter_count && (
+                      {(m as unknown as { is_alias?: boolean }).is_alias && (
+                        <span className="text-[10px] bg-indigo-900/50 text-indigo-400 px-1.5 py-0.5 rounded-full">
+                          alias → {(m as unknown as { base_model?: string }).base_model}
+                        </span>
+                      )}
+                      {m.parameter_count && !(m as unknown as { is_alias?: boolean }).is_alias && (
                         <span className="text-[10px] bg-gray-800 text-gray-400 px-1.5 py-0.5 rounded">{m.parameter_count}</span>
                       )}
-                      {m.quantization && (
+                      {m.quantization && !(m as unknown as { is_alias?: boolean }).is_alias && (
                         <span className="text-[10px] bg-gray-800 text-gray-500 px-1.5 py-0.5 rounded">{m.quantization}</span>
                       )}
                       {(m.categories ?? []).map(cat => (
@@ -532,7 +796,7 @@ function InstalledModelsView({ runners, selectedRunner, selectedRunnerHostname }
       </div>
 
       {editingModel && (
-        <ModelSettingsModal model={editingModel} onClose={() => setEditingModel(null)} />
+        <ModelSettingsModal model={editingModel} runners={runners} onClose={() => setEditingModel(null)} />
       )}
     </section>
   )

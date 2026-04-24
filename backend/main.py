@@ -45,7 +45,7 @@ if os.getenv("SIMPLIFIED_SCHEDULER", "").lower() in ("1", "true", "yes"):
 else:
     from scheduler import Scheduler
     _SCHEDULER_VARIANT = "legacy"
-from queue_routes import router as queue_router, model_router
+from queue_routes import router as queue_router, model_router, alias_router
 from library_routes import router as library_router, safety_router
 from library import classify_models_batch, parse_param_count, parse_quantization, refresh_library_cache
 import queue_db
@@ -303,6 +303,7 @@ app.add_middleware(
 )
 app.include_router(queue_router)
 app.include_router(model_router)
+app.include_router(alias_router)
 app.include_router(library_router)
 app.include_router(safety_router)
 
@@ -686,6 +687,39 @@ async def models_for_agents():
             })
         # Sort: models that fit first, then by VRAM estimate
         models.sort(key=lambda m: (not m["fits"], m["vram_estimate_gb"]))
+
+        # Append alias entries so the UI can show/manage them
+        try:
+            aliases = await queue_db.get_all_model_aliases(pool)
+            base_map = {m["name"]: m for m in models}
+            for alias in aliases:
+                base = base_map.get(alias["base_model"])
+                params = alias.get("parameters") or {}
+                if isinstance(params, str):
+                    params = json.loads(params)
+                models.append({
+                    "name": alias["alias_name"],
+                    "is_alias": True,
+                    "base_model": alias["base_model"],
+                    "alias_description": alias.get("description", ""),
+                    "alias_parameters": params,
+                    "alias_system_prompt": alias.get("system_prompt"),
+                    "size_gb": base["size_gb"] if base else 0,
+                    "vram_estimate_gb": base["vram_estimate_gb"] if base else 0,
+                    "parameter_count": base["parameter_count"] if base else None,
+                    "quantization": base["quantization"] if base else None,
+                    "safety": base["safety"] if base else "safe",
+                    "categories": base["categories"] if base else [],
+                    "description": alias.get("description", ""),
+                    "runners": base["runners"] if base else [],
+                    "downloaded": bool(base),
+                    "loaded": base["loaded"] if base else False,
+                    "fits": base["fits"] if base else False,
+                    "fits_on": base["fits_on"] if base else [],
+                })
+        except Exception:
+            pass
+
         return models
     except Exception as e:
         logger.exception("Error fetching models")
@@ -1491,6 +1525,25 @@ async def proxy_chat_completions(request: Request, runner_id: Optional[int] = No
     model = body.get("model", "")
     stream = body.get("stream", False)
 
+    # Resolve model alias → base model, injecting alias params/system prompt
+    alias_row = await queue_db.get_model_alias(app.state.db, model)
+    if alias_row:
+        body = dict(body)
+        alias_params = alias_row.get("parameters") or {}
+        if isinstance(alias_params, str):
+            alias_params = json.loads(alias_params)
+        for k, v in alias_params.items():
+            if k not in body:
+                body[k] = v
+        alias_system = alias_row.get("system_prompt")
+        if alias_system:
+            msgs = list(body.get("messages", []))
+            if not any(m.get("role") == "system" for m in msgs):
+                msgs.insert(0, {"role": "system", "content": alias_system})
+                body["messages"] = msgs
+        model = alias_row["base_model"]
+        body["model"] = model
+
     # Enforce per-app model + runner restrictions
     app_allowed_runners: list[int] = []
     auth_header = request.headers.get("Authorization", "")
@@ -1659,6 +1712,14 @@ async def proxy_list_models(request: Request):
         for c in cloud_configs:
             if c.get("enabled", True):
                 model_ids.add(c["model_id"])
+    except Exception:
+        pass
+
+    # Model aliases appear as selectable models
+    try:
+        aliases = await queue_db.get_all_model_aliases(pool)
+        for a in aliases:
+            model_ids.add(a["alias_name"])
     except Exception:
         pass
 

@@ -671,13 +671,32 @@ class SimplifiedScheduler:
 
     async def _run_local(self, job_id: str, model: str, request: dict, runner: RunnerState):
         client = await self.get_runner_client(runner_id=runner.runner_id)
+        messages = list(request.get("messages", []))
         kwargs = {}
-        if "temperature" in request: kwargs["temperature"] = request["temperature"]
-        if "max_tokens" in request: kwargs["max_tokens"] = request["max_tokens"]
-        if request.get("tools"): kwargs["tools"] = request["tools"]
+        for key in ("temperature", "max_tokens", "tools", "top_p", "top_k",
+                    "frequency_penalty", "presence_penalty", "stop",
+                    "seed", "repeat_penalty", "num_ctx", "num_predict"):
+            if key in request:
+                kwargs[key] = request[key]
+
+        # Runner params override alias/request params (runner has physical constraints)
+        try:
+            rp = await queue_db.get_model_runner_params(self.pool, model, runner.runner_id)
+            if rp:
+                params = rp.get("parameters") or {}
+                if isinstance(params, str):
+                    params = json.loads(params)
+                kwargs.update(params)
+                sys_prompt = rp.get("system_prompt")
+                if sys_prompt:
+                    messages = [m for m in messages if m.get("role") != "system"]
+                    messages.insert(0, {"role": "system", "content": sys_prompt})
+        except Exception:
+            logger.debug("Failed to fetch runner params for %s on runner %d", model, runner.runner_id)
+
         t0 = time.time()
         result = await client.chat(
-            messages=request.get("messages", []),
+            messages=messages,
             model=model, stream=False, **kwargs,
         )
         elapsed = time.time() - t0

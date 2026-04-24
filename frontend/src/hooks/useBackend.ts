@@ -909,3 +909,91 @@ export function useSetJobPriority() {
     onSuccess: () => qc.invalidateQueries({ queryKey: ['queue-jobs'] }),
   })
 }
+
+// ── Model Aliases ─────────────────────────────────────────────────────────────
+
+export interface ModelAlias {
+  id: number
+  alias_name: string
+  base_model: string
+  system_prompt: string | null
+  parameters: Record<string, unknown>
+  description: string
+}
+
+export interface ModelRunnerParams {
+  model_name: string
+  runner_id: number
+  hostname: string | null
+  system_prompt: string | null
+  parameters: Record<string, unknown>
+}
+
+export function useModelAliases() {
+  return useQuery<ModelAlias[]>({
+    queryKey: ['model-aliases'],
+    queryFn: () => get('/api/model-aliases'),
+    refetchInterval: 30_000,
+  })
+}
+
+export function useAliasesForModel(baseModel: string) {
+  return useQuery<ModelAlias[]>({
+    queryKey: ['model-aliases', baseModel],
+    queryFn: () => get(`/api/models/${encodeURIComponent(baseModel)}/aliases`),
+    enabled: !!baseModel,
+  })
+}
+
+export function useUpsertAlias() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ alias_name, ...body }: Omit<ModelAlias, 'id'>) =>
+      put<ModelAlias>(`/api/model-aliases/${encodeURIComponent(alias_name)}`, body),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['model-aliases'] })
+      qc.invalidateQueries({ queryKey: ['model-list'] })
+    },
+  })
+}
+
+export function useDeleteAlias() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (alias_name: string) =>
+      del<{ ok: boolean }>(`/api/model-aliases/${encodeURIComponent(alias_name)}`),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['model-aliases'] })
+      qc.invalidateQueries({ queryKey: ['model-list'] })
+    },
+  })
+}
+
+export function useRunnerParamsForModel(modelName: string) {
+  return useQuery<ModelRunnerParams[]>({
+    queryKey: ['runner-params', modelName],
+    queryFn: () => get(`/api/models/${encodeURIComponent(modelName)}/runner-params`),
+    enabled: !!modelName,
+  })
+}
+
+export function useUpsertRunnerParams() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ model_name, runner_id, ...body }: ModelRunnerParams) =>
+      put<ModelRunnerParams>(
+        `/api/models/${encodeURIComponent(model_name)}/runner-params/${runner_id}`,
+        body,
+      ),
+    onSuccess: (_data, vars) => qc.invalidateQueries({ queryKey: ['runner-params', vars.model_name] }),
+  })
+}
+
+export function useDeleteRunnerParams() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ model_name, runner_id }: { model_name: string; runner_id: number }) =>
+      del<{ ok: boolean }>(`/api/models/${encodeURIComponent(model_name)}/runner-params/${runner_id}`),
+    onSuccess: (_data, vars) => qc.invalidateQueries({ queryKey: ['runner-params', vars.model_name] }),
+  })
+}

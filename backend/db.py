@@ -181,6 +181,27 @@ CREATE TABLE IF NOT EXISTS cloud_model_config (
     config JSONB DEFAULT '{}'::jsonb,
     updated_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+CREATE TABLE IF NOT EXISTS model_aliases (
+    id SERIAL PRIMARY KEY,
+    alias_name TEXT UNIQUE NOT NULL,
+    base_model TEXT NOT NULL,
+    system_prompt TEXT,
+    parameters JSONB NOT NULL DEFAULT '{}',
+    description TEXT NOT NULL DEFAULT '',
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS model_runner_params (
+    id SERIAL PRIMARY KEY,
+    model_name TEXT NOT NULL,
+    runner_id INTEGER NOT NULL REFERENCES llm_runners(id) ON DELETE CASCADE,
+    system_prompt TEXT,
+    parameters JSONB NOT NULL DEFAULT '{}',
+    updated_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(model_name, runner_id)
+);
 """
 
 CREATE_INDEXES_SQL = """

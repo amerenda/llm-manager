@@ -84,6 +84,36 @@ class ModelSettings(BaseModel):
     safety: str = "safe"
 
 
+class ModelAlias(BaseModel):
+    id: int
+    alias_name: str
+    base_model: str
+    system_prompt: Optional[str] = None
+    parameters: dict = {}
+    description: str = ""
+
+
+class ModelAliasCreate(BaseModel):
+    alias_name: str
+    base_model: str
+    system_prompt: Optional[str] = None
+    parameters: dict = {}
+    description: str = ""
+
+
+class ModelRunnerParams(BaseModel):
+    model_name: str
+    runner_id: int
+    hostname: Optional[str] = None
+    system_prompt: Optional[str] = None
+    parameters: dict = {}
+
+
+class ModelRunnerParamsUpsert(BaseModel):
+    system_prompt: Optional[str] = None
+    parameters: dict = {}
+
+
 class EvictionError(BaseModel):
     error: str  # model_too_large | insufficient_vram
     message: str

@@ -472,6 +472,144 @@ async def list_recent_jobs(pool: asyncpg.Pool, limit: int = 50) -> list[dict]:
     return result
 
 
+# ── Model Aliases ─────────────────────────────────────────────────────────────
+
+async def get_all_model_aliases(pool: asyncpg.Pool) -> list[dict]:
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("SELECT * FROM model_aliases ORDER BY alias_name")
+    result = []
+    for r in rows:
+        d = dict(r)
+        if isinstance(d.get("parameters"), str):
+            import json as _j
+            d["parameters"] = _j.loads(d["parameters"])
+        result.append(d)
+    return result
+
+
+async def get_aliases_for_base_model(pool: asyncpg.Pool, base_model: str) -> list[dict]:
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT * FROM model_aliases WHERE base_model = $1 ORDER BY alias_name", base_model)
+    result = []
+    for r in rows:
+        d = dict(r)
+        if isinstance(d.get("parameters"), str):
+            import json as _j
+            d["parameters"] = _j.loads(d["parameters"])
+        result.append(d)
+    return result
+
+
+async def get_model_alias(pool: asyncpg.Pool, alias_name: str) -> Optional[dict]:
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT * FROM model_aliases WHERE alias_name = $1", alias_name)
+    if not row:
+        return None
+    d = dict(row)
+    if isinstance(d.get("parameters"), str):
+        import json as _j
+        d["parameters"] = _j.loads(d["parameters"])
+    return d
+
+
+async def upsert_model_alias(
+    pool: asyncpg.Pool, alias_name: str, base_model: str,
+    system_prompt: Optional[str], parameters: dict, description: str = "",
+) -> dict:
+    import json as _j
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO model_aliases (alias_name, base_model, system_prompt, parameters, description)
+            VALUES ($1, $2, $3, $4::jsonb, $5)
+            ON CONFLICT (alias_name) DO UPDATE SET
+                base_model = EXCLUDED.base_model,
+                system_prompt = EXCLUDED.system_prompt,
+                parameters = EXCLUDED.parameters,
+                description = EXCLUDED.description,
+                updated_at = NOW()
+            RETURNING *
+        """, alias_name, base_model, system_prompt, _j.dumps(parameters), description)
+    d = dict(row)
+    if isinstance(d.get("parameters"), str):
+        d["parameters"] = _j.loads(d["parameters"])
+    return d
+
+
+async def delete_model_alias(pool: asyncpg.Pool, alias_name: str) -> bool:
+    async with pool.acquire() as conn:
+        result = await conn.execute("DELETE FROM model_aliases WHERE alias_name = $1", alias_name)
+    return result == "DELETE 1"
+
+
+# ── Model Runner Params ───────────────────────────────────────────────────────
+
+async def get_model_runner_params(
+    pool: asyncpg.Pool, model_name: str, runner_id: int
+) -> Optional[dict]:
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT * FROM model_runner_params WHERE model_name = $1 AND runner_id = $2",
+            model_name, runner_id)
+    if not row:
+        return None
+    d = dict(row)
+    if isinstance(d.get("parameters"), str):
+        import json as _j
+        d["parameters"] = _j.loads(d["parameters"])
+    return d
+
+
+async def get_all_runner_params_for_model(pool: asyncpg.Pool, model_name: str) -> list[dict]:
+    async with pool.acquire() as conn:
+        rows = await conn.fetch("""
+            SELECT mrp.*, r.hostname
+            FROM model_runner_params mrp
+            JOIN llm_runners r ON r.id = mrp.runner_id
+            WHERE mrp.model_name = $1
+            ORDER BY r.hostname
+        """, model_name)
+    result = []
+    for r in rows:
+        d = dict(r)
+        if isinstance(d.get("parameters"), str):
+            import json as _j
+            d["parameters"] = _j.loads(d["parameters"])
+        result.append(d)
+    return result
+
+
+async def upsert_model_runner_params(
+    pool: asyncpg.Pool, model_name: str, runner_id: int,
+    system_prompt: Optional[str], parameters: dict,
+) -> dict:
+    import json as _j
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("""
+            INSERT INTO model_runner_params (model_name, runner_id, system_prompt, parameters)
+            VALUES ($1, $2, $3, $4::jsonb)
+            ON CONFLICT (model_name, runner_id) DO UPDATE SET
+                system_prompt = EXCLUDED.system_prompt,
+                parameters = EXCLUDED.parameters,
+                updated_at = NOW()
+            RETURNING *
+        """, model_name, runner_id, system_prompt, _j.dumps(parameters))
+    d = dict(row)
+    if isinstance(d.get("parameters"), str):
+        d["parameters"] = _j.loads(d["parameters"])
+    return d
+
+
+async def delete_model_runner_params(
+    pool: asyncpg.Pool, model_name: str, runner_id: int
+) -> bool:
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "DELETE FROM model_runner_params WHERE model_name = $1 AND runner_id = $2",
+            model_name, runner_id)
+    return result == "DELETE 1"
+
+
 async def get_app_category_perms(pool: asyncpg.Pool, app_id: int) -> dict:
     """Return allowed_categories and excluded_categories for an app."""
     async with pool.acquire() as conn:
