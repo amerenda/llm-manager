@@ -202,7 +202,7 @@ function AliasesTab({ baseModel }: { baseModel: string }) {
 
   function save() {
     upsert.mutate(
-      { ...draft, id: editingId ?? 0, system_prompt: draft.system_prompt || null },
+      { ...draft, system_prompt: draft.system_prompt || null },
       { onSuccess: () => { setCreating(false); setEditingId(null) } }
     )
   }
