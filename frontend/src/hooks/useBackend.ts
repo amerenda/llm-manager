@@ -369,6 +369,35 @@ export interface OllamaSettingsResponse {
   env_file: string
 }
 
+export interface OllamaVersionResponse {
+  version: string | null
+  image_tag: string
+  commit: string | null
+}
+
+export function useOllamaVersion(runnerId: number | null, enabled = true) {
+  return useQuery<OllamaVersionResponse>({
+    queryKey: ['ollama-version', runnerId],
+    queryFn: () => get(`/api/llm/runners/${runnerId}/ollama-version`),
+    enabled: enabled && runnerId != null,
+    refetchInterval: false,
+  })
+}
+
+export function useUpgradeOllama() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ runnerId, tag }: { runnerId: number; tag: string }) =>
+      post<{ ok: boolean; image: string; tag: string; commit: string | null; message: string }>(
+        `/api/llm/runners/${runnerId}/ollama-upgrade`, { tag }),
+    onSuccess: (_d, v) => {
+      qc.invalidateQueries({ queryKey: ['ollama-version', v.runnerId] })
+      qc.invalidateQueries({ queryKey: ['runners'] })
+      qc.invalidateQueries({ queryKey: ['llm-status'] })
+    },
+  })
+}
+
 export function useOllamaSettings(runnerId: number | null, enabled = true) {
   return useQuery<OllamaSettingsResponse>({
     queryKey: ['ollama-settings', runnerId],

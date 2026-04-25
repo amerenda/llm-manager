@@ -1444,14 +1444,72 @@ def _write_env_file(path: str, settings: dict) -> None:
     os.replace(tmp, path)
 
 
-def _recreate_ollama_container(new_env: dict) -> None:
+def _get_ollama_tag_env_key() -> str:
+    """Return the .env key for the Ollama image tag based on the compose profile."""
+    return "OLLAMA_AMD_IMAGE_TAG" if COMPOSE_PROFILE.startswith("amd") else "OLLAMA_IMAGE_TAG"
+
+
+def _read_ollama_image_tag() -> str:
+    """Read the current Ollama image tag from the host .env file."""
+    local_dir = COMPOSE_DIR_LOCAL or COMPOSE_DIR
+    if not local_dir:
+        return ""
+    key = _get_ollama_tag_env_key()
+    env_file = os.path.join(local_dir, ".env")
+    try:
+        with open(env_file) as f:
+            for line in f:
+                line = line.strip()
+                if line.startswith(f"{key}="):
+                    return line[len(key) + 1:].strip()
+    except FileNotFoundError:
+        pass
+    return ""
+
+
+def _write_ollama_image_tag(tag: str) -> None:
+    """Update the Ollama image tag in the host .env file."""
+    local_dir = COMPOSE_DIR_LOCAL or COMPOSE_DIR
+    if not local_dir:
+        raise RuntimeError("COMPOSE_DIR not configured")
+    key = _get_ollama_tag_env_key()
+    env_file = os.path.join(local_dir, ".env")
+    lines = []
+    found = False
+    if os.path.isfile(env_file):
+        with open(env_file) as f:
+            for line in f:
+                if line.startswith(f"{key}="):
+                    lines.append(f"{key}={tag}\n")
+                    found = True
+                else:
+                    lines.append(line)
+    if not found:
+        lines.append(f"{key}={tag}\n")
+    with open(env_file, "w") as f:
+        f.writelines(lines)
+
+
+def _ollama_image_commit(image: str) -> Optional[str]:
+    """Return the git commit SHA from Docker image OCI labels, if present."""
+    if not _DOCKER_OK:
+        return None
+    try:
+        img = _docker.images.get(image)
+        labels = img.labels or {}
+        return labels.get("org.opencontainers.image.revision") or None
+    except Exception:
+        return None
+
+
+def _recreate_ollama_container(new_env: dict, new_image: Optional[str] = None) -> None:
     """Stop + remove the existing ollama container, then recreate it with the
     same image/mounts/devices/GPU config but a new env dict.
 
     Preserves: image, NetworkMode, RestartPolicy, Binds (volumes), Devices,
     DeviceRequests (nvidia GPU), GroupAdd (amd video/render groups), PortBindings.
     Only the env (PATH, OLLAMA_HOST, HSA_OVERRIDE_GFX_VERSION + allowlisted
-    tunables) changes.
+    tunables) changes.  Pass new_image to swap the image tag (for upgrades).
 
     Raises RuntimeError with a message on failure — caller should surface it.
     """
@@ -1465,7 +1523,7 @@ def _recreate_ollama_container(new_env: dict) -> None:
 
     cfg = inspect.get("Config") or {}
     host = inspect.get("HostConfig") or {}
-    image = cfg.get("Image")
+    image = new_image or cfg.get("Image")
 
     # Preserve env vars that belong to the runtime (not user tunables).
     preserve = {"PATH", "OLLAMA_HOST", "HSA_OVERRIDE_GFX_VERSION",
@@ -1594,6 +1652,93 @@ async def put_ollama_settings(req: OllamaSettingsRequest):
         "ok": True,
         "applied": container_env,
         "message": f"Ollama restarted with {len(container_env)} tuning(s).",
+    }
+
+
+async def _ollama_version() -> Optional[str]:
+    """Fetch the running Ollama version string from its API."""
+    try:
+        async with httpx.AsyncClient(timeout=3) as c:
+            r = await c.get(f"{OLLAMA_URL}/api/version")
+            if r.status_code == 200:
+                return r.json().get("version")
+    except Exception:
+        pass
+    return None
+
+
+@app.get("/v1/ollama/version")
+async def get_ollama_version():
+    """Return running Ollama version, configured image tag, and git commit hash."""
+    version = await _ollama_version()
+    image_tag = _read_ollama_image_tag()
+    commit: Optional[str] = None
+    if _DOCKER_OK and OLLAMA_CONTAINER:
+        try:
+            container = _docker.containers.get(OLLAMA_CONTAINER)
+            image_name = container.attrs.get("Config", {}).get("Image", "")
+            if image_name:
+                commit = _ollama_image_commit(image_name)
+        except Exception:
+            pass
+    return {"version": version, "image_tag": image_tag, "commit": commit}
+
+
+class OllamaUpgradeRequest(BaseModel):
+    tag: str
+
+
+@app.post("/v1/ollama/upgrade")
+async def upgrade_ollama(req: OllamaUpgradeRequest):
+    """Pull a new Ollama image version and recreate the container.
+    Writes the new tag to .env so it persists across compose restarts."""
+    if not OLLAMA_CONTAINER:
+        raise HTTPException(503, "OLLAMA_CONTAINER not configured")
+    if not _DOCKER_OK:
+        raise HTTPException(503, "Docker not available")
+
+    import re
+    tag = req.tag.strip()
+    if not tag:
+        raise HTTPException(400, "tag is required")
+    if not re.fullmatch(r"[\w.\-]+", tag):
+        raise HTTPException(400, f"Invalid tag format: {tag!r}")
+
+    try:
+        inspect = _docker.api.inspect_container(OLLAMA_CONTAINER)
+    except docker_lib.errors.NotFound:
+        raise HTTPException(404, f"Container '{OLLAMA_CONTAINER}' not found")
+
+    current_image = inspect.get("Config", {}).get("Image", "ollama/ollama")
+    repo = current_image.rsplit(":", 1)[0] if ":" in current_image else current_image
+    new_image = f"{repo}:{tag}"
+
+    try:
+        _write_ollama_image_tag(tag)
+    except RuntimeError as e:
+        raise HTTPException(500, f"Failed to update .env: {e}")
+
+    logger.info("Pulling Ollama image %s ...", new_image)
+    try:
+        pull_repo, pull_tag = new_image.rsplit(":", 1)
+        _docker.images.pull(pull_repo, tag=pull_tag)
+    except Exception as e:
+        raise HTTPException(500, f"Failed to pull {new_image}: {e}")
+
+    current_env = _parse_env_file(_OLLAMA_ENV_FILE)
+    container_env = {k: v for k, v in current_env.items() if v != ""}
+    try:
+        _recreate_ollama_container(container_env, new_image=new_image)
+    except RuntimeError as e:
+        raise HTTPException(500, f"Pulled image but failed to recreate container: {e}")
+
+    commit = _ollama_image_commit(new_image)
+    return {
+        "ok": True,
+        "image": new_image,
+        "tag": tag,
+        "commit": commit,
+        "message": f"Ollama upgraded to {tag}",
     }
 
 

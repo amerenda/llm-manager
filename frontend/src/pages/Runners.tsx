@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Server, Cpu, HardDrive, MemoryStick, Volume2, RefreshCw, Power, Upload, AlertCircle, ChevronDown, ChevronRight, Play, Loader2, Zap, Settings2, CheckCircle2 } from 'lucide-react'
-import { useRunners, useUpdateRunner, useAgentTargetVersion, useSetAgentTargetVersion, useRunnerStatus, useTriggerRunnerUpdate, useFlushRunnerVram, useRestartOllama, useOllamaSettings, useUpdateOllamaSettings } from '../hooks/useBackend'
+import { useRunners, useUpdateRunner, useAgentTargetVersion, useSetAgentTargetVersion, useRunnerStatus, useTriggerRunnerUpdate, useFlushRunnerVram, useRestartOllama, useOllamaSettings, useUpdateOllamaSettings, useOllamaVersion, useUpgradeOllama } from '../hooks/useBackend'
 import { StatusDot } from '../components/StatusDot'
 import type { Runner } from '../types'
 
@@ -40,7 +40,10 @@ function RunnerDetail({ runner, target }: { runner: Runner; target: string }) {
   const triggerUpdate = useTriggerRunnerUpdate()
   const flushVram = useFlushRunnerVram()
   const restartOllama = useRestartOllama()
+  const ollamaVersion = useOllamaVersion(runner.id)
+  const upgradeOllama = useUpgradeOllama()
   const [updateVersion, setUpdateVersion] = useState('')
+  const [ollamaUpgradeTag, setOllamaUpgradeTag] = useState('')
   const [flushMsg, setFlushMsg] = useState<string | null>(null)
   const caps = runner.capabilities
   const s = status.data
@@ -262,6 +265,56 @@ function RunnerDetail({ runner, target }: { runner: Runner; target: string }) {
           <p className="text-xs text-red-400">Failed: {(triggerUpdate.error as Error).message}</p>
         )}
       </div>
+
+      {/* Ollama version + upgrade — GPU runners only */}
+      {isGpu && (
+        <div className="border-t border-gray-800 pt-3 space-y-2">
+          <p className="text-xs text-gray-500 font-medium uppercase tracking-wide">Ollama Version</p>
+          {ollamaVersion.isLoading && <p className="text-xs text-gray-600">Loading…</p>}
+          {ollamaVersion.data && (
+            <div className="space-y-1.5">
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+                <span className="text-gray-400">Running: <span className="font-mono text-gray-200">{ollamaVersion.data.version ?? 'unknown'}</span></span>
+                {ollamaVersion.data.image_tag && (
+                  <span className="text-gray-400">Tag: <span className="font-mono text-gray-200">{ollamaVersion.data.image_tag}</span></span>
+                )}
+                {ollamaVersion.data.commit && (
+                  <span className="text-gray-400">Commit: <span className="font-mono text-gray-500">{ollamaVersion.data.commit.slice(0, 12)}</span></span>
+                )}
+              </div>
+              <div className="flex gap-2 items-center">
+                <input
+                  type="text"
+                  value={ollamaUpgradeTag}
+                  onChange={e => setOllamaUpgradeTag(e.target.value)}
+                  placeholder="e.g. 0.6.5 or 0.6.5-rocm"
+                  className="flex-1 bg-gray-800 border border-gray-700 rounded-lg px-3 py-1.5 text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-brand-600"
+                />
+                <button
+                  onClick={() => {
+                    if (!window.confirm(`Upgrade Ollama on ${runner.hostname} to ${ollamaUpgradeTag.trim()}?\n\nThis will pull the image and restart Ollama — ~30s of downtime.`)) return
+                    upgradeOllama.mutate(
+                      { runnerId: runner.id, tag: ollamaUpgradeTag.trim() },
+                      { onSuccess: () => setOllamaUpgradeTag('') }
+                    )
+                  }}
+                  disabled={!ollamaUpgradeTag.trim() || upgradeOllama.isPending}
+                  className="flex items-center gap-1 text-xs bg-brand-600 hover:bg-brand-500 disabled:opacity-40 text-white px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap"
+                >
+                  {upgradeOllama.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Upload className="w-3 h-3" />}
+                  Upgrade
+                </button>
+              </div>
+              {upgradeOllama.isSuccess && upgradeOllama.data && (
+                <p className="text-xs text-green-400">{upgradeOllama.data.message}{upgradeOllama.data.commit ? ` · ${upgradeOllama.data.commit.slice(0, 12)}` : ''}</p>
+              )}
+              {upgradeOllama.isError && (
+                <p className="text-xs text-red-400">Failed: {(upgradeOllama.error as Error).message}</p>
+              )}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* Address */}
       <div className="text-xs text-gray-600 font-mono truncate">{runner.address}</div>

@@ -2106,6 +2106,35 @@ async def put_runner_ollama_settings(runner_id: int, req: OllamaSettingsUpdateRe
         raise HTTPException(e.response.status_code, detail)
 
 
+@app.get("/api/llm/runners/{runner_id}/ollama-version")
+async def get_runner_ollama_version(runner_id: int):
+    """Return the running Ollama version, configured image tag, and git commit hash."""
+    _inc_request(f"/api/llm/runners/{runner_id}/ollama-version", "GET", 200)
+    client = await _get_runner_client(app.state.db, runner_id)
+    return await client.get_ollama_version()
+
+
+class OllamaUpgradeRequest(BaseModel):
+    tag: str
+
+
+@app.post("/api/llm/runners/{runner_id}/ollama-upgrade")
+async def upgrade_runner_ollama(runner_id: int, req: OllamaUpgradeRequest):
+    """Pull a new Ollama image version and recreate the container on this runner.
+    Updates .env so the tag persists across compose restarts.
+    Strongly recommend draining the runner first."""
+    _inc_request(f"/api/llm/runners/{runner_id}/ollama-upgrade", "POST", 200)
+    client = await _get_runner_client(app.state.db, runner_id)
+    try:
+        return await client.upgrade_ollama(req.tag)
+    except httpx.HTTPStatusError as e:
+        try:
+            detail = e.response.json().get("detail", str(e))
+        except Exception:
+            detail = str(e)
+        raise HTTPException(e.response.status_code, detail)
+
+
 # ── Profiles ──────────────────────────────────────────────────────────────────
 
 class ProfileCreateRequest(BaseModel):

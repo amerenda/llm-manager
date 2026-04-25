@@ -196,6 +196,24 @@ class LLMAgentClient:
             r.raise_for_status()
             return r.json()
 
+    async def get_ollama_version(self) -> dict:
+        """Return running Ollama version, configured image tag, and commit hash."""
+        async with self._client(timeout=httpx.Timeout(10.0)) as c:
+            r = await c.get(f"{self.base_url}/v1/ollama/version", headers=self._headers)
+            r.raise_for_status()
+            return r.json()
+
+    async def upgrade_ollama(self, tag: str) -> dict:
+        """Pull a new Ollama image and recreate the container. Long timeout — image pull can be slow."""
+        async with self._client(timeout=httpx.Timeout(30.0, read=600.0)) as c:
+            r = await c.post(
+                f"{self.base_url}/v1/ollama/upgrade",
+                json={"tag": tag},
+                headers=self._headers,
+            )
+            r.raise_for_status()
+            return r.json()
+
     async def get_ollama_settings(self) -> dict:
         """Read the runner's ollama.env tunables."""
         async with self._client(timeout=httpx.Timeout(10.0)) as c:
