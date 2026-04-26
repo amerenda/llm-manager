@@ -94,7 +94,6 @@ class ModelAlias(BaseModel):
 
 
 class ModelAliasCreate(BaseModel):
-    alias_name: str
     base_model: str
     system_prompt: Optional[str] = None
     parameters: dict = {}

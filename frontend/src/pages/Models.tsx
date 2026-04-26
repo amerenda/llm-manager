@@ -185,6 +185,7 @@ function AliasesTab({ baseModel }: { baseModel: string }) {
   const remove = useDeleteAlias()
   const [creating, setCreating] = useState(false)
   const [editingId, setEditingId] = useState<number | null>(null)
+  const [saveError, setSaveError] = useState<string | null>(null)
   const blankDraft = { alias_name: '', base_model: baseModel, system_prompt: '', parameters: {} as Record<string, unknown>, description: '' }
   const [draft, setDraft] = useState(blankDraft)
 
@@ -201,9 +202,13 @@ function AliasesTab({ baseModel }: { baseModel: string }) {
   }
 
   function save() {
+    setSaveError(null)
     upsert.mutate(
       { ...draft, system_prompt: draft.system_prompt || null },
-      { onSuccess: () => { setCreating(false); setEditingId(null) } }
+      {
+        onSuccess: () => { setCreating(false); setEditingId(null); setSaveError(null) },
+        onError: (e) => setSaveError((e as Error).message),
+      }
     )
   }
 
@@ -223,8 +228,9 @@ function AliasesTab({ baseModel }: { baseModel: string }) {
         className="w-full bg-gray-950 border border-gray-700 rounded px-2 py-1.5 text-xs text-gray-200 placeholder-gray-600 resize-none focus:outline-none focus:border-brand-600"
       />
       <ParamEditor params={draft.parameters} onChange={p => setDraft(d => ({ ...d, parameters: p }))} />
+      {saveError && <p className="text-xs text-red-400">{saveError}</p>}
       <div className="flex gap-2 pt-1">
-        <button onClick={() => { setCreating(false); setEditingId(null) }}
+        <button onClick={() => { setCreating(false); setEditingId(null); setSaveError(null) }}
           className="flex-1 text-xs py-1.5 rounded bg-gray-700 text-gray-400 hover:bg-gray-600 transition-colors">
           Cancel
         </button>
