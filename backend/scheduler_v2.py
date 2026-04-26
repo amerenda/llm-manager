@@ -24,6 +24,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 import asyncpg
+import httpx
 from prometheus_client import Counter, Histogram
 
 import queue_db
@@ -652,7 +653,11 @@ class SimplifiedScheduler:
                 await self._run_local(job_id, model, request, runner)
             scheduler_jobs_completed_total.labels(model=model, status="completed").inc()
         except Exception as e:
-            await queue_db.update_job_status(self.pool, job_id, "failed", error=str(e))
+            if isinstance(e, httpx.HTTPStatusError):
+                error_msg = f"{e}: {e.response.text}"
+            else:
+                error_msg = str(e)
+            await queue_db.update_job_status(self.pool, job_id, "failed", error=error_msg)
             scheduler_jobs_completed_total.labels(model=model, status="failed").inc()
             logger.exception("Job %s failed", job_id)
         finally:
