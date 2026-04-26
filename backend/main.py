@@ -194,7 +194,7 @@ SCHEDULER_LOCK_ID = 900001  # Postgres advisory lock ID for scheduler
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10)
+    pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
     app.state.db = pool
     await init_db(pool)
     await queue_db.init_queue_tables(pool)
