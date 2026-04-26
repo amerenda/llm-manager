@@ -6,6 +6,7 @@ import logging
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Header, Request
+from pydantic import BaseModel
 from fastapi.responses import StreamingResponse
 
 import queue_db
