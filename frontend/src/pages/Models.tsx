@@ -537,7 +537,6 @@ function InstalledModelsView({ runners, selectedRunner, selectedRunnerHostname }
                             {isPinned && <Pin className="w-2.5 h-2.5 text-indigo-400 shrink-0" />}
                             <div className="min-w-0">
                               <span className="text-xs text-gray-300 truncate block">{alias ?? lm.name.replace(/:latest$/, '')}</span>
-                              {alias && <span className="text-[10px] text-gray-600 truncate block">{lm.name.replace(/:latest$/, '')}</span>}
                             </div>
                           </div>
                           <div className="flex items-center gap-1 shrink-0">

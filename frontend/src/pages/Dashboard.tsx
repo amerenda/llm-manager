@@ -219,10 +219,7 @@ export function Dashboard() {
                       {isPinned && <Pin className="w-3 h-3 text-indigo-400 shrink-0" />}
                       <div className="min-w-0">
                         <p className="text-sm text-gray-200 truncate">{alias ?? m.name}</p>
-                        <p className="text-xs text-gray-500">
-                          {alias && <span className="text-gray-600">{m.name} · </span>}
-                          {m.runner && <span>on {m.runner}</span>}
-                        </p>
+                        {m.runner && <p className="text-xs text-gray-500">on {m.runner}</p>}
                       </div>
                     </div>
                     <div className="ml-2 flex items-center gap-1 flex-shrink-0">
