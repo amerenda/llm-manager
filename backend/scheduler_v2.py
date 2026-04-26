@@ -657,7 +657,7 @@ class SimplifiedScheduler:
             if isinstance(e, httpx.HTTPStatusError):
                 error_msg = f"{e}: {e.response.text}"
             else:
-                error_msg = str(e)
+                error_msg = str(e) or repr(e)  # str() is empty for some exceptions (e.g. ReadTimeout)
             await queue_db.update_job_status(self.pool, job_id, "failed", error=error_msg)
             scheduler_jobs_completed_total.labels(model=model, status="failed").inc()
             logger.exception("Job %s failed", job_id)

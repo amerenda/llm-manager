@@ -42,7 +42,7 @@ class LLMAgentClient:
         else:
             self.base_url = f"http://{host}:{port}"
             self._ssl_context = None
-        self._timeout = httpx.Timeout(30.0, read=300.0)
+        self._timeout = httpx.Timeout(30.0, read=600.0)
         self._headers = {"X-Agent-PSK": psk} if psk else {}
 
     def _client(self, **overrides) -> httpx.AsyncClient:
