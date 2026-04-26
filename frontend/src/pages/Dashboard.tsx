@@ -1,5 +1,6 @@
-import { Cpu, MemoryStick, Layers, AppWindow, Trash2, RefreshCw, Server } from 'lucide-react'
-import { useLlmStatus, useApps, useUnloadFromVram } from '../hooks/useBackend'
+import { useMemo } from 'react'
+import { Cpu, MemoryStick, Layers, AppWindow, Trash2, RefreshCw, Server, Pin, Upload } from 'lucide-react'
+import { useLlmStatus, useApps, useUnloadFromVram, useModelList, useUpdateModelSettings } from '../hooks/useBackend'
 import { StatCard } from '../components/StatCard'
 import { StatusDot } from '../components/StatusDot'
 import type { RegisteredApp, RunnerStatus } from '../types'
@@ -112,11 +113,24 @@ export function Dashboard() {
   const status = useLlmStatus()
   const apps = useApps()
   const unloadModel = useUnloadFromVram()
+  const modelList = useModelList()
+  const updateSettings = useUpdateModelSettings()
 
   const s = status.data
   const appList = apps.data ?? []
   const loadedModels = s?.loaded_ollama_models ?? []
   const runners = s?.runners ?? []
+  const allModels = modelList.data ?? []
+
+  const aliasMap = useMemo(() => {
+    const map: Record<string, string> = {}
+    for (const m of allModels) {
+      const mAny = m as unknown as { is_alias?: boolean; base_model?: string }
+      if (mAny.is_alias && mAny.base_model && !map[mAny.base_model]) map[mAny.base_model] = m.name
+    }
+    return map
+  }, [allModels])
+  const modelInfoMap = useMemo(() => Object.fromEntries(allModels.map(m => [m.name, m])), [allModels])
 
   return (
     <div className="space-y-6">
@@ -192,28 +206,46 @@ export function Dashboard() {
             <p className="text-xs text-gray-600 py-4 text-center">No models loaded</p>
           ) : (
             <div className="space-y-2">
-              {loadedModels.map((m: { name: string; size_gb: number; runner?: string }) => (
-                <div
-                  key={`${m.name}-${m.runner}`}
-                  className="flex items-center justify-between bg-gray-950 rounded-lg px-3 py-2"
-                >
-                  <div className="min-w-0">
-                    <p className="text-sm text-gray-200 truncate">{m.name}</p>
-                    <p className="text-xs text-gray-500">
-                      {m.size_gb.toFixed(1)} GB
-                      {m.runner && <span className="ml-1.5 text-gray-600">on {m.runner}</span>}
-                    </p>
-                  </div>
-                  <button
-                    onClick={() => unloadModel.mutate({ model: m.name })}
-                    disabled={unloadModel.isPending}
-                    title="Unload from VRAM — reloads on next request"
-                    className="ml-2 p-1.5 rounded-lg bg-gray-800 hover:bg-red-900/50 hover:text-red-400 text-gray-500 transition-colors flex-shrink-0"
+              {loadedModels.map((m: { name: string; size_gb: number; runner?: string }) => {
+                const alias = aliasMap[m.name]
+                const info = modelInfoMap[m.name]
+                const isPinned = info?.do_not_evict ?? false
+                return (
+                  <div
+                    key={`${m.name}-${m.runner}`}
+                    className="flex items-center justify-between bg-gray-950 rounded-lg px-3 py-2"
                   >
-                    <Trash2 className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              ))}
+                    <div className="min-w-0 flex items-center gap-1.5">
+                      {isPinned && <Pin className="w-3 h-3 text-indigo-400 shrink-0" />}
+                      <div className="min-w-0">
+                        <p className="text-sm text-gray-200 truncate">{alias ?? m.name}</p>
+                        <p className="text-xs text-gray-500">
+                          {alias && <span className="text-gray-600">{m.name} · </span>}
+                          {m.runner && <span>on {m.runner}</span>}
+                        </p>
+                      </div>
+                    </div>
+                    <div className="ml-2 flex items-center gap-1 flex-shrink-0">
+                      <button
+                        onClick={() => updateSettings.mutate({ model: m.name, do_not_evict: !isPinned })}
+                        disabled={updateSettings.isPending}
+                        title={isPinned ? 'Unpin' : 'Pin (keep in VRAM)'}
+                        className={`p-1.5 rounded-lg transition-colors disabled:opacity-40 ${isPinned ? 'text-indigo-400 hover:text-indigo-300' : 'text-gray-600 hover:text-gray-400'}`}
+                      >
+                        <Pin className="w-3.5 h-3.5" />
+                      </button>
+                      <button
+                        onClick={() => unloadModel.mutate({ model: m.name })}
+                        disabled={unloadModel.isPending}
+                        title="Evict from VRAM"
+                        className="p-1.5 rounded-lg bg-gray-800 hover:bg-yellow-900/50 hover:text-yellow-400 text-gray-500 transition-colors"
+                      >
+                        <Upload className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                )
+              })}
             </div>
           )}
         </div>

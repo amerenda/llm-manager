@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react'
+import { useState, useMemo, type ReactNode } from 'react'
 import { Download, Trash2, Loader2, CheckCircle2, AlertCircle, Image, Layers, Cpu, Upload, Shield, ShieldOff, Play, Square, Search, RefreshCw, BookOpen, Cloud, Settings2, Power, RefreshCcw, Server, X, Pin } from 'lucide-react'
 import { usePullModel, useDeleteModel, useCheckpoints, useSwitchCheckpoint, useLlmStatus, useLoadModel, useUnloadFromVram, useStartComfyui, useStopComfyui, useLibrary, useRefreshLibrary, useRefreshRemoteDigests, useUpdateOutdatedModels, useForceUpdateModel, useCommunityModels, useCloudModels, useCloudStatus, useUpdateCloudModel, useCloudKeys, useStoreCloudKey, useDeleteCloudKey, useRunners, useSyncModels, useOps, useDismissOp, useModelList, useUpdateModelSettings, useAliasesForModel, useUpsertAlias, useDeleteAlias, useRunnerParamsForModel, useUpsertRunnerParams, useDeleteRunnerParams } from '../hooks/useBackend'
 import type { ModelAlias, ModelRunnerParams } from '../hooks/useBackend'
@@ -442,6 +442,18 @@ function InstalledModelsView({ runners, selectedRunner, selectedRunnerHostname }
   const [capFilter, setCapFilter] = useState('')
 
   const allModels = (modelList.data ?? []).sort((a, b) => a.name.localeCompare(b.name))
+
+  // reverse map: base_model → first alias name; info map: model name → ModelInfo
+  const aliasMap = useMemo(() => {
+    const map: Record<string, string> = {}
+    for (const m of allModels) {
+      const mAny = m as unknown as { is_alias?: boolean; base_model?: string }
+      if (mAny.is_alias && mAny.base_model && !map[mAny.base_model]) map[mAny.base_model] = m.name
+    }
+    return map
+  }, [allModels])
+  const modelInfoMap = useMemo(() => Object.fromEntries(allModels.map(m => [m.name, m])), [allModels])
+
   const models = (selectedRunner !== undefined
     ? allModels.filter(m => (m.runners ?? []).some(r => r.runner_id === selectedRunner))
     : allModels
@@ -515,19 +527,40 @@ function InstalledModelsView({ runners, selectedRunner, selectedRunnerHostname }
                 <div>
                   <p className="text-[10px] text-gray-500 font-medium uppercase tracking-wide mb-1.5">In VRAM</p>
                   <div className="space-y-1">
-                    {(rs?.loaded_ollama_models ?? []).map(lm => (
-                      <div key={lm.name} className="flex items-center justify-between gap-2">
-                        <span className="text-xs text-gray-300 truncate">{lm.name.replace(/:latest$/, '')}</span>
-                        <button
-                          onClick={() => unloadVram.mutate({ model: lm.name, runner_id: r.id })}
-                          disabled={unloadVram.isPending}
-                          title="Evict from VRAM"
-                          className="flex items-center gap-1 text-[10px] bg-yellow-900/30 hover:bg-yellow-800/40 text-yellow-400 px-1.5 py-0.5 rounded transition-colors disabled:opacity-40 shrink-0"
-                        >
-                          <Upload className="w-2.5 h-2.5" /> Evict
-                        </button>
-                      </div>
-                    ))}
+                    {(rs?.loaded_ollama_models ?? []).map(lm => {
+                      const alias = aliasMap[lm.name]
+                      const info = modelInfoMap[lm.name]
+                      const isPinned = info?.do_not_evict ?? false
+                      return (
+                        <div key={lm.name} className="flex items-center justify-between gap-2">
+                          <div className="min-w-0 flex items-center gap-1.5">
+                            {isPinned && <Pin className="w-2.5 h-2.5 text-indigo-400 shrink-0" />}
+                            <div className="min-w-0">
+                              <span className="text-xs text-gray-300 truncate block">{alias ?? lm.name.replace(/:latest$/, '')}</span>
+                              {alias && <span className="text-[10px] text-gray-600 truncate block">{lm.name.replace(/:latest$/, '')}</span>}
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-1 shrink-0">
+                            <button
+                              onClick={() => updateSettings.mutate({ model: lm.name, do_not_evict: !isPinned })}
+                              disabled={updateSettings.isPending}
+                              title={isPinned ? 'Unpin' : 'Pin (keep in VRAM)'}
+                              className={`p-0.5 rounded transition-colors disabled:opacity-40 ${isPinned ? 'text-indigo-400 hover:text-indigo-300' : 'text-gray-600 hover:text-gray-400'}`}
+                            >
+                              <Pin className="w-3 h-3" />
+                            </button>
+                            <button
+                              onClick={() => unloadVram.mutate({ model: lm.name, runner_id: r.id })}
+                              disabled={unloadVram.isPending}
+                              title="Evict from VRAM"
+                              className="flex items-center gap-1 text-[10px] bg-yellow-900/30 hover:bg-yellow-800/40 text-yellow-400 px-1.5 py-0.5 rounded transition-colors disabled:opacity-40"
+                            >
+                              <Upload className="w-2.5 h-2.5" /> Evict
+                            </button>
+                          </div>
+                        </div>
+                      )
+                    })}
                   </div>
                 </div>
               )}
@@ -710,6 +743,11 @@ function InstalledModelsView({ runners, selectedRunner, selectedRunnerHostname }
                       {isLoaded && (
                         <span className="text-[10px] bg-blue-900/40 text-blue-400 px-1.5 py-0.5 rounded-full flex items-center gap-0.5">
                           <Cpu className="w-2.5 h-2.5" /> VRAM
+                        </span>
+                      )}
+                      {m.do_not_evict && (
+                        <span className="text-[10px] bg-indigo-900/50 text-indigo-400 px-1.5 py-0.5 rounded-full flex items-center gap-0.5">
+                          <Pin className="w-2.5 h-2.5" /> pinned
                         </span>
                       )}
                     </div>
