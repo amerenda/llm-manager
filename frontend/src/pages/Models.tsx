@@ -279,6 +279,67 @@ function AliasesTab({ baseModel }: { baseModel: string }) {
 
 type SettingsTab = 'general' | 'runner-params' | 'aliases'
 
+function AliasSettingsModal({ model, onClose }: { model: ModelInfo; onClose: () => void }) {
+  const mAny = model as unknown as { base_model: string; alias_description?: string; alias_parameters?: Record<string, unknown>; alias_system_prompt?: string | null }
+  const upsert = useUpsertAlias()
+  const [description, setDescription] = useState(mAny.alias_description ?? '')
+  const [systemPrompt, setSystemPrompt] = useState(mAny.alias_system_prompt ?? '')
+  const [parameters, setParameters] = useState<Record<string, unknown>>(mAny.alias_parameters ?? {})
+  const [saveError, setSaveError] = useState<string | null>(null)
+
+  function save() {
+    setSaveError(null)
+    upsert.mutate(
+      { alias_name: model.name, base_model: mAny.base_model, system_prompt: systemPrompt || null, parameters, description },
+      { onSuccess: onClose, onError: (e) => setSaveError((e as Error).message) }
+    )
+  }
+
+  return (
+    <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={onClose}>
+      <div className="bg-gray-900 border border-gray-700 rounded-xl p-5 w-[28rem] max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-1">
+          <h3 className="text-sm font-semibold text-gray-200">Alias Settings</h3>
+          <button onClick={onClose} className="text-gray-500 hover:text-gray-300"><X className="w-4 h-4" /></button>
+        </div>
+        <p className="text-xs text-gray-500 font-mono mb-1 truncate">{model.name}</p>
+        <p className="text-[10px] text-gray-600 mb-4">alias of <span className="text-indigo-400">{mAny.base_model}</span></p>
+
+        <div className="space-y-3">
+          <div>
+            <p className="text-[10px] text-gray-500 uppercase tracking-wide mb-1.5">Description</p>
+            <input value={description} onChange={e => setDescription(e.target.value)}
+              placeholder="Short description (optional)"
+              className="w-full bg-gray-950 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-brand-600"
+            />
+          </div>
+          <div>
+            <p className="text-[10px] text-gray-500 uppercase tracking-wide mb-1.5">System Prompt</p>
+            <textarea rows={4} value={systemPrompt} onChange={e => setSystemPrompt(e.target.value)}
+              placeholder="System prompt injected on every request (optional)"
+              className="w-full bg-gray-950 border border-gray-700 rounded-lg px-2.5 py-1.5 text-xs text-gray-200 placeholder-gray-600 resize-none focus:outline-none focus:border-brand-600"
+            />
+          </div>
+          <div>
+            <p className="text-[10px] text-gray-500 uppercase tracking-wide mb-1.5">Parameters</p>
+            <ParamEditor params={parameters} onChange={setParameters} />
+          </div>
+          {saveError && <p className="text-xs text-red-400">{saveError}</p>}
+          <div className="flex gap-2 pt-1">
+            <button onClick={onClose} className="flex-1 text-xs px-3 py-2 rounded-lg bg-gray-800 text-gray-400 hover:bg-gray-700 transition-colors">
+              Cancel
+            </button>
+            <button onClick={save} disabled={upsert.isPending}
+              className="flex-1 text-xs px-3 py-2 rounded-lg bg-brand-600 text-white hover:bg-brand-500 disabled:opacity-40 transition-colors">
+              {upsert.isPending ? 'Saving…' : 'Save'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
 function ModelSettingsModal({ model, runners, onClose }: { model: ModelInfo; runners: import('../types').Runner[]; onClose: () => void }) {
   const update = useUpdateModelSettings()
   const [tab, setTab] = useState<SettingsTab>('general')
@@ -302,9 +363,6 @@ function ModelSettingsModal({ model, runners, onClose }: { model: ModelInfo; run
     update.mutate({ model: model.name, categories, safety }, { onSuccess: onClose })
   }
 
-  const baseModel = (model as unknown as { base_model?: string }).base_model ?? model.name
-  const isAlias = !!(model as unknown as { is_alias?: boolean }).is_alias
-
   return (
     <div className="fixed inset-0 bg-black/60 flex items-center justify-center z-50" onClick={onClose}>
       <div className="bg-gray-900 border border-gray-700 rounded-xl p-5 w-[28rem] max-h-[90vh] overflow-y-auto" onClick={e => e.stopPropagation()}>
@@ -312,27 +370,20 @@ function ModelSettingsModal({ model, runners, onClose }: { model: ModelInfo; run
           <h3 className="text-sm font-semibold text-gray-200">Model Settings</h3>
           <button onClick={onClose} className="text-gray-500 hover:text-gray-300"><X className="w-4 h-4" /></button>
         </div>
-        <p className="text-xs text-gray-500 font-mono mb-3 truncate">
-          {model.name}
-          {isAlias && <span className="ml-2 text-[10px] bg-indigo-900/50 text-indigo-400 px-1.5 py-0.5 rounded">alias of {baseModel}</span>}
-        </p>
+        <p className="text-xs text-gray-500 font-mono mb-3 truncate">{model.name}</p>
 
-        {/* Tab bar */}
-        {!isAlias && (
-          <div className="flex gap-1 bg-gray-800 rounded-lg p-0.5 mb-4 text-[11px]">
-            {(['general', 'runner-params', 'aliases'] as SettingsTab[]).map(t => (
-              <button key={t} onClick={() => setTab(t)}
-                className={`flex-1 py-1.5 rounded-md transition-colors font-medium ${
-                  tab === t ? 'bg-gray-700 text-gray-200' : 'text-gray-500 hover:text-gray-300'
-                }`}>
-                {t === 'general' ? 'General' : t === 'runner-params' ? 'Runner Params' : 'Aliases'}
-              </button>
-            ))}
-          </div>
-        )}
+        <div className="flex gap-1 bg-gray-800 rounded-lg p-0.5 mb-4 text-[11px]">
+          {(['general', 'runner-params', 'aliases'] as SettingsTab[]).map(t => (
+            <button key={t} onClick={() => setTab(t)}
+              className={`flex-1 py-1.5 rounded-md transition-colors font-medium ${
+                tab === t ? 'bg-gray-700 text-gray-200' : 'text-gray-500 hover:text-gray-300'
+              }`}>
+              {t === 'general' ? 'General' : t === 'runner-params' ? 'Runner Params' : 'Aliases'}
+            </button>
+          ))}
+        </div>
 
-        {/* General tab */}
-        {(tab === 'general' || isAlias) && (
+        {tab === 'general' && (
           <div className="space-y-4">
             <div>
               <p className="text-[10px] text-gray-500 uppercase tracking-wide mb-2">Safety</p>
@@ -397,13 +448,11 @@ function ModelSettingsModal({ model, runners, onClose }: { model: ModelInfo; run
           </div>
         )}
 
-        {/* Runner Params tab */}
-        {tab === 'runner-params' && !isAlias && (
+        {tab === 'runner-params' && (
           <RunnerParamsTab modelName={model.name} runners={runners} />
         )}
 
-        {/* Aliases tab */}
-        {tab === 'aliases' && !isAlias && (
+        {tab === 'aliases' && (
           <AliasesTab baseModel={model.name} />
         )}
       </div>
@@ -874,7 +923,9 @@ function InstalledModelsView({ runners, selectedRunner, selectedRunnerHostname }
       </div>
 
       {editingModel && (
-        <ModelSettingsModal model={editingModel} runners={runners} onClose={() => setEditingModel(null)} />
+        (editingModel as unknown as { is_alias?: boolean }).is_alias
+          ? <AliasSettingsModal model={editingModel} onClose={() => setEditingModel(null)} />
+          : <ModelSettingsModal model={editingModel} runners={runners} onClose={() => setEditingModel(null)} />
       )}
     </section>
   )
