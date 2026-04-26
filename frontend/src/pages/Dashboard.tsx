@@ -1,6 +1,6 @@
 import { useMemo } from 'react'
 import { Cpu, MemoryStick, Layers, AppWindow, Trash2, RefreshCw, Server, Pin, Upload } from 'lucide-react'
-import { useLlmStatus, useApps, useUnloadFromVram, useModelList, usePinModelOnRunner } from '../hooks/useBackend'
+import { useLlmStatus, useApps, useUnloadFromVram, usePinModelOnRunner } from '../hooks/useBackend'
 import { StatCard } from '../components/StatCard'
 import { StatusDot } from '../components/StatusDot'
 import type { RegisteredApp, RunnerStatus } from '../types'
@@ -113,23 +113,13 @@ export function Dashboard() {
   const status = useLlmStatus()
   const apps = useApps()
   const unloadModel = useUnloadFromVram()
-  const modelList = useModelList()
+
   const pinRunner = usePinModelOnRunner()
 
   const s = status.data
   const appList = apps.data ?? []
   const loadedModels = s?.loaded_ollama_models ?? []
   const runners = s?.runners ?? []
-  const allModels = modelList.data ?? []
-
-  const aliasMap = useMemo(() => {
-    const map: Record<string, string> = {}
-    for (const m of allModels) {
-      const mAny = m as unknown as { is_alias?: boolean; base_model?: string }
-      if (mAny.is_alias && mAny.base_model && !map[mAny.base_model]) map[mAny.base_model] = m.name
-    }
-    return map
-  }, [allModels])
 
   return (
     <div className="space-y-6">
@@ -206,7 +196,6 @@ export function Dashboard() {
           ) : (
             <div className="space-y-2">
               {loadedModels.map((m: { name: string; size_gb: number; runner?: string; do_not_evict?: boolean }) => {
-                const alias = aliasMap[m.name]
                 const isPinned = m.do_not_evict ?? false
                 const runnerId = runners.find(r => r.runner_hostname === m.runner)?.runner_id
                 return (
@@ -217,7 +206,7 @@ export function Dashboard() {
                     <div className="min-w-0 flex items-center gap-1.5">
                       {isPinned && <Pin className="w-3 h-3 text-indigo-400 shrink-0" />}
                       <div className="min-w-0">
-                        <p className="text-sm text-gray-200 truncate">{alias ?? m.name}</p>
+                        <p className="text-sm text-gray-200 truncate">{m.name}</p>
                         {m.runner && <p className="text-xs text-gray-500">on {m.runner}</p>}
                       </div>
                     </div>

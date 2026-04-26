@@ -223,7 +223,7 @@ export function useUnloadFromVram() {
   return useMutation({
     mutationFn: ({ model, runner_id }: { model: string; runner_id?: number }) => {
       const params = runner_id ? `?runner_id=${runner_id}` : ''
-      return post<{ ok: boolean }>(`/api/llm/models/${encodeURIComponent(model)}/unload${params}`)
+      return post<{ ok: boolean }>(`/api/llm/models/unload${params}`, { model })
     },
     onSettled: () => {
       qc.invalidateQueries({ queryKey: ['llm-status'] })
