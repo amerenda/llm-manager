@@ -314,6 +314,7 @@ class SimplifiedScheduler:
                     total_bytes = caps.get("gpu_vram_total_bytes", 0)
                     if total_bytes:
                         rs.gpu_total_gb = round(total_bytes / 1e9, 2)
+                rs.downloaded_models = _dl_set_from_caps(caps)
                 self._runners[r["id"]] = rs
             else:
                 # Update mutable admin-controlled flags (changed via API).
