@@ -582,22 +582,38 @@ async def get_all_runner_params_for_model(pool: asyncpg.Pool, model_name: str) -
 async def upsert_model_runner_params(
     pool: asyncpg.Pool, model_name: str, runner_id: int,
     system_prompt: Optional[str], parameters: dict,
+    do_not_evict: bool = False,
 ) -> dict:
     import json as _j
     async with pool.acquire() as conn:
         row = await conn.fetchrow("""
-            INSERT INTO model_runner_params (model_name, runner_id, system_prompt, parameters)
-            VALUES ($1, $2, $3, $4::jsonb)
+            INSERT INTO model_runner_params (model_name, runner_id, system_prompt, parameters, do_not_evict)
+            VALUES ($1, $2, $3, $4::jsonb, $5)
             ON CONFLICT (model_name, runner_id) DO UPDATE SET
                 system_prompt = EXCLUDED.system_prompt,
                 parameters = EXCLUDED.parameters,
+                do_not_evict = EXCLUDED.do_not_evict,
                 updated_at = NOW()
             RETURNING *
-        """, model_name, runner_id, system_prompt, _j.dumps(parameters))
+        """, model_name, runner_id, system_prompt, _j.dumps(parameters), do_not_evict)
     d = dict(row)
     if isinstance(d.get("parameters"), str):
         d["parameters"] = _j.loads(d["parameters"])
     return d
+
+
+async def set_runner_model_pin(
+    pool: asyncpg.Pool, model_name: str, runner_id: int, do_not_evict: bool
+) -> None:
+    """Create or update only the do_not_evict flag without touching system_prompt/parameters."""
+    async with pool.acquire() as conn:
+        await conn.execute("""
+            INSERT INTO model_runner_params (model_name, runner_id, do_not_evict)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (model_name, runner_id) DO UPDATE SET
+                do_not_evict = EXCLUDED.do_not_evict,
+                updated_at = NOW()
+        """, model_name, runner_id, do_not_evict)
 
 
 async def delete_model_runner_params(

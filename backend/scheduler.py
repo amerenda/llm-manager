@@ -369,7 +369,9 @@ class Scheduler:
         candidates = []
         for name, info in self._loaded_models.items():
             settings = await queue_db.get_model_settings(self.pool, name)
-            if settings.get("do_not_evict", False):
+            runner_id = info.get("runner_id")
+            runner_params = (await queue_db.get_model_runner_params(self.pool, name, runner_id)) if runner_id else {}
+            if settings.get("do_not_evict", False) or (runner_params or {}).get("do_not_evict", False):
                 continue
             if not settings.get("evictable", True):
                 continue
@@ -635,8 +637,11 @@ class Scheduler:
             loaded_info = []
             for name, size_gb in loaded_models.items():
                 settings = await queue_db.get_model_settings(self.pool, name)
+                model_runner_id = self._loaded_models.get(name, {}).get("runner_id")
+                runner_params = (await queue_db.get_model_runner_params(self.pool, name, model_runner_id)) if model_runner_id else {}
                 model_vram = size_gb or vram_for_model(name)
-                if settings.get("do_not_evict", False) or not settings.get("evictable", True):
+                pinned = settings.get("do_not_evict", False) or (runner_params or {}).get("do_not_evict", False) or not settings.get("evictable", True)
+                if pinned:
                     non_evictable_vram += model_vram
                     loaded_info.append({"model": name, "vram_gb": model_vram, "do_not_evict": True})
                 else:

@@ -1081,6 +1081,8 @@ async def llm_status(request: Request, runner_id: Optional[int] = None):
 
             for m in status.get("loaded_ollama_models", []):
                 m["runner"] = r["hostname"]
+                rp = await queue_db.get_model_runner_params(pool, m["name"], r["id"])
+                m["do_not_evict"] = bool((rp or {}).get("do_not_evict", False))
                 all_loaded_models.append(m)
         except Exception:
             runner_statuses.append({

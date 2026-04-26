@@ -1,6 +1,6 @@
 import { useMemo } from 'react'
 import { Cpu, MemoryStick, Layers, AppWindow, Trash2, RefreshCw, Server, Pin, Upload } from 'lucide-react'
-import { useLlmStatus, useApps, useUnloadFromVram, useModelList, useUpdateModelSettings } from '../hooks/useBackend'
+import { useLlmStatus, useApps, useUnloadFromVram, useModelList, usePinModelOnRunner } from '../hooks/useBackend'
 import { StatCard } from '../components/StatCard'
 import { StatusDot } from '../components/StatusDot'
 import type { RegisteredApp, RunnerStatus } from '../types'
@@ -114,7 +114,7 @@ export function Dashboard() {
   const apps = useApps()
   const unloadModel = useUnloadFromVram()
   const modelList = useModelList()
-  const updateSettings = useUpdateModelSettings()
+  const pinRunner = usePinModelOnRunner()
 
   const s = status.data
   const appList = apps.data ?? []
@@ -130,7 +130,6 @@ export function Dashboard() {
     }
     return map
   }, [allModels])
-  const modelInfoMap = useMemo(() => Object.fromEntries(allModels.map(m => [m.name, m])), [allModels])
 
   return (
     <div className="space-y-6">
@@ -206,10 +205,10 @@ export function Dashboard() {
             <p className="text-xs text-gray-600 py-4 text-center">No models loaded</p>
           ) : (
             <div className="space-y-2">
-              {loadedModels.map((m: { name: string; size_gb: number; runner?: string }) => {
+              {loadedModels.map((m: { name: string; size_gb: number; runner?: string; do_not_evict?: boolean }) => {
                 const alias = aliasMap[m.name]
-                const info = modelInfoMap[m.name]
-                const isPinned = info?.do_not_evict ?? false
+                const isPinned = m.do_not_evict ?? false
+                const runnerId = runners.find(r => r.runner_hostname === m.runner)?.runner_id
                 return (
                   <div
                     key={`${m.name}-${m.runner}`}
@@ -223,14 +222,16 @@ export function Dashboard() {
                       </div>
                     </div>
                     <div className="ml-2 flex items-center gap-1 flex-shrink-0">
-                      <button
-                        onClick={() => updateSettings.mutate({ model: m.name, do_not_evict: !isPinned })}
-                        disabled={updateSettings.isPending}
-                        title={isPinned ? 'Unpin' : 'Pin (keep in VRAM)'}
-                        className={`p-1.5 rounded-lg transition-colors disabled:opacity-40 ${isPinned ? 'text-indigo-400 hover:text-indigo-300' : 'text-gray-600 hover:text-gray-400'}`}
-                      >
-                        <Pin className="w-3.5 h-3.5" />
-                      </button>
+                      {runnerId !== undefined && (
+                        <button
+                          onClick={() => pinRunner.mutate({ model_name: m.name, runner_id: runnerId, do_not_evict: !isPinned })}
+                          disabled={pinRunner.isPending}
+                          title={isPinned ? 'Unpin from this runner' : 'Pin to this runner'}
+                          className={`p-1.5 rounded-lg transition-colors disabled:opacity-40 ${isPinned ? 'text-indigo-400 hover:text-indigo-300' : 'text-gray-600 hover:text-gray-400'}`}
+                        >
+                          <Pin className="w-3.5 h-3.5" />
+                        </button>
+                      )}
                       <button
                         onClick={() => unloadModel.mutate({ model: m.name })}
                         disabled={unloadModel.isPending}

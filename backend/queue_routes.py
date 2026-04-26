@@ -486,8 +486,9 @@ async def upsert_runner_params(
     model_name: str, runner_id: int, body: ModelRunnerParamsUpsert, request: Request
 ):
     pool = _get_pool(request)
+    do_not_evict = body.do_not_evict if body.do_not_evict is not None else False
     row = await queue_db.upsert_model_runner_params(
-        pool, model_name, runner_id, body.system_prompt, body.parameters)
+        pool, model_name, runner_id, body.system_prompt, body.parameters, do_not_evict)
     # Re-fetch with hostname
     rows = await queue_db.get_all_runner_params_for_model(pool, model_name)
     for r in rows:
@@ -498,11 +499,25 @@ async def upsert_runner_params(
                 hostname=r.get("hostname"),
                 system_prompt=r.get("system_prompt"),
                 parameters=r.get("parameters") or {},
+                do_not_evict=bool(r.get("do_not_evict", False)),
             )
     return ModelRunnerParams(
         model_name=row["model_name"], runner_id=row["runner_id"],
         system_prompt=row.get("system_prompt"), parameters=row.get("parameters") or {},
+        do_not_evict=bool(row.get("do_not_evict", False)),
     )
+
+
+class PinRequest(BaseModel):
+    do_not_evict: bool
+
+
+@model_router.patch("/{model_name:path}/runner-params/{runner_id}/pin")
+async def pin_model_on_runner(model_name: str, runner_id: int, body: PinRequest, request: Request):
+    """Set do_not_evict for a specific model/runner without touching system_prompt/parameters."""
+    pool = _get_pool(request)
+    await queue_db.set_runner_model_pin(pool, model_name, runner_id, body.do_not_evict)
+    return {"ok": True, "model_name": model_name, "runner_id": runner_id, "do_not_evict": body.do_not_evict}
 
 
 @model_router.delete("/{model_name:path}/runner-params/{runner_id}")

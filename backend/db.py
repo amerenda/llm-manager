@@ -243,6 +243,15 @@ async def init_db(pool: asyncpg.Pool) -> None:
             except asyncpg.DuplicateColumnError:
                 pass
 
+        # model_runner_params migrations
+        try:
+            await conn.execute(
+                "ALTER TABLE model_runner_params ADD COLUMN do_not_evict BOOLEAN NOT NULL DEFAULT FALSE"
+            )
+            logger.info("Added column model_runner_params.do_not_evict")
+        except asyncpg.DuplicateColumnError:
+            pass
+
         # Runner migrations
         for col, definition in [
             ("enabled", "BOOLEAN NOT NULL DEFAULT TRUE"),

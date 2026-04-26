@@ -1019,6 +1019,18 @@ export function useUpsertRunnerParams() {
   })
 }
 
+export function usePinModelOnRunner() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ model_name, runner_id, do_not_evict }: { model_name: string; runner_id: number; do_not_evict: boolean }) =>
+      patch<{ ok: boolean }>(`/api/models/${encodeURIComponent(model_name)}/runner-params/${runner_id}/pin`, { do_not_evict }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ['llm-status'] })
+      qc.invalidateQueries({ queryKey: ['runner-params'] })
+    },
+  })
+}
+
 export function useDeleteRunnerParams() {
   const qc = useQueryClient()
   return useMutation({

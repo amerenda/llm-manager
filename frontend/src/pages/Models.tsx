@@ -1,6 +1,6 @@
 import { useState, useMemo, type ReactNode } from 'react'
 import { Download, Trash2, Loader2, CheckCircle2, AlertCircle, Image, Layers, Cpu, Upload, Shield, ShieldOff, Play, Square, Search, RefreshCw, BookOpen, Cloud, Settings2, Power, RefreshCcw, Server, X, Pin } from 'lucide-react'
-import { usePullModel, useDeleteModel, useCheckpoints, useSwitchCheckpoint, useLlmStatus, useLoadModel, useUnloadFromVram, useStartComfyui, useStopComfyui, useLibrary, useRefreshLibrary, useRefreshRemoteDigests, useUpdateOutdatedModels, useForceUpdateModel, useCommunityModels, useCloudModels, useCloudStatus, useUpdateCloudModel, useCloudKeys, useStoreCloudKey, useDeleteCloudKey, useRunners, useSyncModels, useOps, useDismissOp, useModelList, useUpdateModelSettings, useAliasesForModel, useUpsertAlias, useDeleteAlias, useRunnerParamsForModel, useUpsertRunnerParams, useDeleteRunnerParams } from '../hooks/useBackend'
+import { usePullModel, useDeleteModel, useCheckpoints, useSwitchCheckpoint, useLlmStatus, useLoadModel, useUnloadFromVram, useStartComfyui, useStopComfyui, useLibrary, useRefreshLibrary, useRefreshRemoteDigests, useUpdateOutdatedModels, useForceUpdateModel, useCommunityModels, useCloudModels, useCloudStatus, useUpdateCloudModel, useCloudKeys, useStoreCloudKey, useDeleteCloudKey, useRunners, useSyncModels, useOps, useDismissOp, useModelList, useUpdateModelSettings, useAliasesForModel, useUpsertAlias, useDeleteAlias, useRunnerParamsForModel, useUpsertRunnerParams, useDeleteRunnerParams, usePinModelOnRunner } from '../hooks/useBackend'
 import type { ModelAlias, ModelRunnerParams } from '../hooks/useBackend'
 import type { LibraryModel, Runner } from '../types'
 import type { CloudModel, ModelInfo, StoredApiKey } from '../hooks/useBackend'
@@ -474,6 +474,7 @@ function InstalledModelsView({ runners, selectedRunner, selectedRunnerHostname }
   const load = useLoadModel()
   const unloadVram = useUnloadFromVram()
   const updateSettings = useUpdateModelSettings()
+  const pinRunner = usePinModelOnRunner()
   const ops = useOps()
   const [pullInput, setPullInput] = useState('')
   const [pullMsg, setPullMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
@@ -590,9 +591,9 @@ function InstalledModelsView({ runners, selectedRunner, selectedRunnerHostname }
                           </div>
                           <div className="flex items-center gap-1 shrink-0">
                             <button
-                              onClick={() => updateSettings.mutate({ model: lm.name, do_not_evict: !isPinned })}
-                              disabled={updateSettings.isPending}
-                              title={isPinned ? 'Unpin' : 'Pin (keep in VRAM)'}
+                              onClick={() => pinRunner.mutate({ model_name: lm.name, runner_id: r.id, do_not_evict: !isPinned })}
+                              disabled={pinRunner.isPending}
+                              title={isPinned ? 'Unpin from this runner' : 'Pin to this runner'}
                               className={`p-0.5 rounded transition-colors disabled:opacity-40 ${isPinned ? 'text-indigo-400 hover:text-indigo-300' : 'text-gray-600 hover:text-gray-400'}`}
                             >
                               <Pin className="w-3 h-3" />
@@ -755,9 +756,16 @@ function InstalledModelsView({ runners, selectedRunner, selectedRunnerHostname }
           </div>
         ) : (
           models.map(m => {
+            const mAny = m as unknown as { is_alias?: boolean; base_model?: string }
+            const realName = mAny.is_alias ? (mAny.base_model ?? m.name) : m.name
             const isLoaded = selectedRunner !== undefined
-              ? allLoadedModels.some(lm => lm.name === m.name && lm.runner === selectedRunnerHostname)
-              : allLoadedModels.some(lm => lm.name === m.name)
+              ? allLoadedModels.some(lm => lm.name === realName && lm.runner === selectedRunnerHostname)
+              : allLoadedModels.some(lm => lm.name === realName)
+            // Per-runner pin state: read from the loaded model entry for this runner
+            const loadedEntry = selectedRunner !== undefined
+              ? allLoadedModels.find(lm => lm.name === realName && lm.runner === selectedRunnerHostname)
+              : undefined
+            const isRunnerPinned = loadedEntry?.do_not_evict ?? false
             const displayName = m.name.replace(/:latest$/, '')
             const isExpanded = expandedModel === m.name
 
@@ -793,7 +801,7 @@ function InstalledModelsView({ runners, selectedRunner, selectedRunnerHostname }
                           <Cpu className="w-2.5 h-2.5" /> VRAM
                         </span>
                       )}
-                      {m.do_not_evict && (
+                      {isRunnerPinned && (
                         <span className="text-[10px] bg-indigo-900/50 text-indigo-400 px-1.5 py-0.5 rounded-full flex items-center gap-0.5">
                           <Pin className="w-2.5 h-2.5" /> pinned
                         </span>
@@ -811,20 +819,16 @@ function InstalledModelsView({ runners, selectedRunner, selectedRunnerHostname }
                     </p>
                   </div>
                   <div className="flex items-center gap-1.5 flex-shrink-0" onClick={e => e.stopPropagation()}>
-                    {(() => {
-                      const mAny = m as unknown as { is_alias?: boolean; base_model?: string }
-                      const pinTarget = mAny.is_alias ? (mAny.base_model ?? m.name) : m.name
-                      return (
-                        <button
-                          onClick={() => updateSettings.mutate({ model: pinTarget, do_not_evict: !m.do_not_evict })}
-                          disabled={updateSettings.isPending}
-                          title={m.do_not_evict ? 'Pinned — click to unpin' : 'Pin (keep in VRAM)'}
-                          className={`p-1.5 rounded-lg transition-colors disabled:opacity-40 ${m.do_not_evict ? 'bg-indigo-900/50 text-indigo-400 hover:bg-indigo-900/70' : 'bg-gray-800 hover:bg-gray-700 text-gray-500 hover:text-gray-300'}`}
-                        >
-                          <Pin className="w-3.5 h-3.5" />
-                        </button>
-                      )
-                    })()}
+                    {selectedRunner !== undefined && (
+                      <button
+                        onClick={() => pinRunner.mutate({ model_name: realName, runner_id: selectedRunner, do_not_evict: !isRunnerPinned })}
+                        disabled={pinRunner.isPending}
+                        title={isRunnerPinned ? 'Unpin from this runner' : 'Pin to this runner'}
+                        className={`p-1.5 rounded-lg transition-colors disabled:opacity-40 ${isRunnerPinned ? 'bg-indigo-900/50 text-indigo-400 hover:bg-indigo-900/70' : 'bg-gray-800 hover:bg-gray-700 text-gray-500 hover:text-gray-300'}`}
+                      >
+                        <Pin className="w-3.5 h-3.5" />
+                      </button>
+                    )}
                     <button onClick={() => setEditingModel(m)} title="Edit categories / safety"
                       className="p-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-500 hover:text-gray-300 transition-colors">
                       <Settings2 className="w-3.5 h-3.5" />

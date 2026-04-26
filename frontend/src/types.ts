@@ -13,7 +13,7 @@ export interface RunnerStatus {
   disk_used_gb?: number
   disk_free_gb?: number
   disk_path?: string
-  loaded_ollama_models?: { name: string; size_gb: number }[]
+  loaded_ollama_models?: { name: string; size_gb: number; do_not_evict?: boolean }[]
   comfyui_running?: boolean
   gpu_vendor?: string
 }
@@ -28,7 +28,7 @@ export interface LlmStatus {
   cpu_pct: number
   mem_used_gb: number
   mem_total_gb: number
-  loaded_ollama_models: { name: string; size_gb: number; runner?: string }[]
+  loaded_ollama_models: { name: string; size_gb: number; runner?: string; do_not_evict?: boolean }[]
   comfyui_running?: boolean
   comfyui_checkpoints?: string[]
   comfyui_active_checkpoint?: string | null

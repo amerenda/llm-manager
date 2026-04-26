@@ -106,11 +106,13 @@ class ModelRunnerParams(BaseModel):
     hostname: Optional[str] = None
     system_prompt: Optional[str] = None
     parameters: dict = {}
+    do_not_evict: bool = False
 
 
 class ModelRunnerParamsUpsert(BaseModel):
     system_prompt: Optional[str] = None
     parameters: dict = {}
+    do_not_evict: Optional[bool] = None
 
 
 class EvictionError(BaseModel):
