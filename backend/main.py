@@ -717,6 +717,7 @@ async def models_for_agents():
                     "loaded": base["loaded"] if base else False,
                     "fits": base["fits"] if base else False,
                     "fits_on": base["fits_on"] if base else [],
+                    "do_not_evict": base["do_not_evict"] if base else False,
                 })
         except Exception:
             pass
@@ -1995,16 +1996,14 @@ class ModelLoadRequest(BaseModel):
 async def llm_load_model(req: ModelLoadRequest, runner_id: Optional[int] = None):
     """Load a model into VRAM. Runs in background."""
     _inc_request("/api/llm/models/load", "POST", 200)
-    op_id = f"load-{req.model}-{id(req)}"
     pool = app.state.db
-    await db.create_op(pool, op_id, "load", req.model)
+    alias_row = await queue_db.get_model_alias(pool, req.model)
+    model = alias_row["base_model"] if alias_row else req.model
+    op_id = f"load-{model}-{id(req)}"
+    await db.create_op(pool, op_id, "load", model)
 
     async def _do_load():
         try:
-            model = req.model
-            alias_row = await queue_db.get_model_alias(pool, model)
-            if alias_row:
-                model = alias_row["base_model"]
             client = await _get_runner_client(pool, runner_id)
             await client.load_model(model, req.keep_alive)
             await db.update_op(pool, op_id, status="completed")
