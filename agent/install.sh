@@ -357,6 +357,42 @@ log "Pulling images (profile: $PROFILE)..."
 log "Starting services..."
 (cd "$INSTALL_DIR" && docker compose --profile "$PROFILE" up -d)
 
+# ── Systemd service ─────────────────────────────────────────────────────────
+# Create or update the systemd unit so the agent survives reboots.
+# We always rewrite it — the profile and install dir may have changed.
+
+UNIT_FILE="/etc/systemd/system/llm-agent.service"
+UNIT_CONTENT="[Unit]
+Description=LLM Agent (Ollama proxy — ${GPU_VENDOR} GPU)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=${INSTALL_DIR}
+ExecStart=/usr/bin/docker compose --profile ${PROFILE} up -d
+ExecStop=/usr/bin/docker compose --profile ${PROFILE} down
+TimeoutStartSec=120
+
+[Install]
+WantedBy=multi-user.target"
+
+if command -v systemctl >/dev/null 2>&1; then
+    if [[ ! -f "$UNIT_FILE" ]] || [[ "$(cat "$UNIT_FILE")" != "$UNIT_CONTENT" ]]; then
+        log "Writing systemd unit: $UNIT_FILE"
+        echo "$UNIT_CONTENT" | sudo tee "$UNIT_FILE" >/dev/null
+        sudo systemctl daemon-reload
+        sudo systemctl enable llm-agent
+        log "systemd unit updated and enabled."
+    else
+        log "systemd unit already up to date."
+    fi
+else
+    warn "systemctl not found — skipping systemd unit setup."
+fi
+
 # ── Health checks ────────────────────────────────────────────────────────────
 
 log "Waiting for agent to become healthy..."
@@ -399,7 +435,7 @@ echo "  Logs:     docker logs -f llm-agent"
 echo "  Ollama:   docker logs -f ollama"
 echo "  Tunings:  edit in the llm-manager UI (Models page → Ollama settings)."
 echo "            Manual edit fallback: $OLLAMA_ENV_FILE"
-echo "            then: docker compose -f $COMPOSE_FILE --profile $PROFILE up -d --force-recreate ollama"
+echo "            then: docker compose --profile $PROFILE up -d --force-recreate ollama"
 echo "  Stop:     cd $INSTALL_DIR && docker compose --profile $PROFILE down"
 echo "  Restart:  cd $INSTALL_DIR && docker compose --profile $PROFILE restart"
 echo ""
