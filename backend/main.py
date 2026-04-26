@@ -684,6 +684,7 @@ async def models_for_agents():
                 "loaded": name in loaded_names,
                 "fits": len(fits_on) > 0,
                 "fits_on": fits_on,
+                "do_not_evict": bool(ms.get("do_not_evict", False)),
             })
         # Sort: models that fit first, then by VRAM estimate
         models.sort(key=lambda m: (not m["fits"], m["vram_estimate_gb"]))

@@ -114,6 +114,7 @@ export interface ModelInfo {
   loaded: boolean
   fits: boolean
   fits_on: { runner: string; vram_total_gb: number }[]
+  do_not_evict?: boolean
 }
 
 export function useModelList() {
@@ -127,7 +128,7 @@ export function useModelList() {
 export function useUpdateModelSettings() {
   const qc = useQueryClient()
   return useMutation({
-    mutationFn: ({ model, ...body }: { model: string; categories?: string[]; safety?: string; vram_estimate_gb?: number | null }) =>
+    mutationFn: ({ model, ...body }: { model: string; categories?: string[]; safety?: string; vram_estimate_gb?: number | null; do_not_evict?: boolean }) =>
       patch<{ model_name: string }>(`/api/models/${encodeURIComponent(model)}/settings`, body),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['model-list'] }),
   })

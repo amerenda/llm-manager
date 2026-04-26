@@ -1,5 +1,5 @@
 import { useState, type ReactNode } from 'react'
-import { Download, Trash2, Loader2, CheckCircle2, AlertCircle, Image, Layers, Cpu, Upload, Shield, ShieldOff, Play, Square, Search, RefreshCw, BookOpen, Cloud, Settings2, Power, RefreshCcw, Server, X } from 'lucide-react'
+import { Download, Trash2, Loader2, CheckCircle2, AlertCircle, Image, Layers, Cpu, Upload, Shield, ShieldOff, Play, Square, Search, RefreshCw, BookOpen, Cloud, Settings2, Power, RefreshCcw, Server, X, Pin } from 'lucide-react'
 import { usePullModel, useDeleteModel, useCheckpoints, useSwitchCheckpoint, useLlmStatus, useLoadModel, useUnloadFromVram, useStartComfyui, useStopComfyui, useLibrary, useRefreshLibrary, useRefreshRemoteDigests, useUpdateOutdatedModels, useForceUpdateModel, useCommunityModels, useCloudModels, useCloudStatus, useUpdateCloudModel, useCloudKeys, useStoreCloudKey, useDeleteCloudKey, useRunners, useSyncModels, useOps, useDismissOp, useModelList, useUpdateModelSettings, useAliasesForModel, useUpsertAlias, useDeleteAlias, useRunnerParamsForModel, useUpsertRunnerParams, useDeleteRunnerParams } from '../hooks/useBackend'
 import type { ModelAlias, ModelRunnerParams } from '../hooks/useBackend'
 import type { LibraryModel, Runner } from '../types'
@@ -424,6 +424,7 @@ function InstalledModelsView({ runners, selectedRunner, selectedRunnerHostname }
   const del = useDeleteModel()
   const load = useLoadModel()
   const unloadVram = useUnloadFromVram()
+  const updateSettings = useUpdateModelSettings()
   const ops = useOps()
   const [pullInput, setPullInput] = useState('')
   const [pullMsg, setPullMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
@@ -508,6 +509,29 @@ function InstalledModelsView({ runners, selectedRunner, selectedRunnerHostname }
                       style={{ width: `${diskPct}%` }} />
                   </div>
                   {diskFree < 5 && <p className="text-[10px] text-red-400 mt-1">Low disk space</p>}
+                </div>
+              )}
+              {(rs?.loaded_ollama_models ?? []).length > 0 && (
+                <div>
+                  <p className="text-[10px] text-gray-500 font-medium uppercase tracking-wide mb-1.5">In VRAM</p>
+                  <div className="space-y-1">
+                    {(rs?.loaded_ollama_models ?? []).map(lm => (
+                      <div key={lm.name} className="flex items-center justify-between gap-2">
+                        <span className="text-xs text-gray-300 truncate">{lm.name.replace(/:latest$/, '')}</span>
+                        <div className="flex items-center gap-1 shrink-0">
+                          <span className="text-[10px] text-gray-500">{lm.size_gb?.toFixed(1) ?? '?'} GB</span>
+                          <button
+                            onClick={() => unloadVram.mutate({ model: lm.name, runner_id: r.id })}
+                            disabled={unloadVram.isPending}
+                            title="Evict from VRAM"
+                            className="flex items-center gap-1 text-[10px] bg-yellow-900/30 hover:bg-yellow-800/40 text-yellow-400 px-1.5 py-0.5 rounded transition-colors disabled:opacity-40"
+                          >
+                            <Upload className="w-2.5 h-2.5" /> Evict
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               )}
             </div>
@@ -704,6 +728,16 @@ function InstalledModelsView({ runners, selectedRunner, selectedRunnerHostname }
                     </p>
                   </div>
                   <div className="flex items-center gap-1.5 flex-shrink-0" onClick={e => e.stopPropagation()}>
+                    {!(m as unknown as { is_alias?: boolean }).is_alias && (
+                      <button
+                        onClick={() => updateSettings.mutate({ model: m.name, do_not_evict: !m.do_not_evict })}
+                        disabled={updateSettings.isPending}
+                        title={m.do_not_evict ? 'Pinned — click to unpin' : 'Pin (keep in VRAM)'}
+                        className={`p-1.5 rounded-lg transition-colors disabled:opacity-40 ${m.do_not_evict ? 'bg-indigo-900/50 text-indigo-400 hover:bg-indigo-900/70' : 'bg-gray-800 hover:bg-gray-700 text-gray-500 hover:text-gray-300'}`}
+                      >
+                        <Pin className="w-3.5 h-3.5" />
+                      </button>
+                    )}
                     <button onClick={() => setEditingModel(m)} title="Edit categories / safety"
                       className="p-1.5 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-500 hover:text-gray-300 transition-colors">
                       <Settings2 className="w-3.5 h-3.5" />
