@@ -2000,8 +2000,12 @@ async def llm_load_model(req: ModelLoadRequest, runner_id: Optional[int] = None)
 
     async def _do_load():
         try:
+            model = req.model
+            alias_row = await queue_db.get_model_alias(pool, model)
+            if alias_row:
+                model = alias_row["base_model"]
             client = await _get_runner_client(pool, runner_id)
-            await client.load_model(req.model, req.keep_alive)
+            await client.load_model(model, req.keep_alive)
             await db.update_op(pool, op_id, status="completed")
         except Exception as e:
             await db.update_op(pool, op_id, status="failed", error=str(e))
