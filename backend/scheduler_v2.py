@@ -732,6 +732,7 @@ class SimplifiedScheduler:
             runner.in_flight_job_id = job_id
 
         OLLAMA_COOLDOWN = 300  # seconds to skip a runner after a 503
+        MAX_RETRIES = 3       # permanent failure after this many re-queues
 
         try:
             if runner is None:
@@ -740,6 +741,7 @@ class SimplifiedScheduler:
                 await self._run_local(job_id, model, request, runner)
             scheduler_jobs_completed_total.labels(model=model, status="completed").inc()
         except Exception as e:
+            is_5xx = isinstance(e, httpx.HTTPStatusError) and 500 <= e.response.status_code < 600
             is_503 = isinstance(e, httpx.HTTPStatusError) and e.response.status_code == 503
 
             if isinstance(e, httpx.HTTPStatusError):
@@ -747,25 +749,35 @@ class SimplifiedScheduler:
             else:
                 error_msg = str(e) or repr(e)  # str() is empty for some exceptions (e.g. ReadTimeout)
 
-            if is_503 and runner is not None:
-                # Ollama is down on this runner — apply cooldown and re-queue so
-                # the scheduler can retry on another runner next tick.
-                runner.ollama_down_until = time.time() + OLLAMA_COOLDOWN
-                logger.warning(
-                    "Ollama 503 on %s — cooling down for %ds, re-queuing job %s",
-                    runner.hostname, OLLAMA_COOLDOWN, job_id,
-                )
-                # Fetch Ollama logs for the error record before re-queuing
-                try:
-                    client = await self.get_runner_client(runner_id=runner.runner_id)
-                    logs = await client.logs(tail=30, service="ollama")
-                    log_lines = "\n".join(logs.get("ollama_logs") or [])
-                    if log_lines:
-                        error_msg += f"\n\nOllama logs ({runner.hostname}):\n{log_lines}"
-                except Exception:
-                    pass
-                await queue_db.update_job_status(self.pool, job_id, "queued", error=error_msg)
-                scheduler_jobs_completed_total.labels(model=model, status="retried").inc()
+            if is_5xx and runner is not None:
+                # Apply 503-specific runner cooldown (Ollama service down)
+                if is_503:
+                    runner.ollama_down_until = time.time() + OLLAMA_COOLDOWN
+                    # Fetch Ollama logs for the error record
+                    try:
+                        client = await self.get_runner_client(runner_id=runner.runner_id)
+                        logs = await client.logs(tail=30, service="ollama")
+                        log_lines = "\n".join(logs.get("ollama_logs") or [])
+                        if log_lines:
+                            error_msg += f"\n\nOllama logs ({runner.hostname}):\n{log_lines}"
+                    except Exception:
+                        pass
+
+                retry_count = await queue_db.increment_job_retry(self.pool, job_id)
+                if retry_count > MAX_RETRIES:
+                    logger.warning(
+                        "Job %s exhausted %d retries on %s (HTTP %d), failing permanently",
+                        job_id, MAX_RETRIES, runner.hostname, e.response.status_code,
+                    )
+                    await queue_db.update_job_status(self.pool, job_id, "failed", error=error_msg)
+                    scheduler_jobs_completed_total.labels(model=model, status="failed").inc()
+                else:
+                    logger.warning(
+                        "Runner %s returned HTTP %d — re-queuing job %s (retry %d/%d)",
+                        runner.hostname, e.response.status_code, job_id, retry_count, MAX_RETRIES,
+                    )
+                    await queue_db.update_job_status(self.pool, job_id, "queued", error=error_msg)
+                    scheduler_jobs_completed_total.labels(model=model, status="retried").inc()
             else:
                 await queue_db.update_job_status(self.pool, job_id, "failed", error=error_msg)
                 scheduler_jobs_completed_total.labels(model=model, status="failed").inc()

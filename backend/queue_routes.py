@@ -236,6 +236,7 @@ async def get_job(job_id: str, request: Request):
         model=job["model"],
         result=_parse_jsonb(job.get("result")),
         error=job.get("error"),
+        retried=job.get("retried") or 0,
         created_at=job["created_at"].isoformat() if job.get("created_at") else None,
         started_at=job["started_at"].isoformat() if job.get("started_at") else None,
         completed_at=job["completed_at"].isoformat() if job.get("completed_at") else None,

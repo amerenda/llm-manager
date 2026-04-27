@@ -39,6 +39,7 @@ class QueueJobResult(BaseModel):
     model: str
     result: Optional[dict] = None
     error: Optional[str] = None
+    retried: int = 0
     created_at: Optional[str] = None
     started_at: Optional[str] = None
     completed_at: Optional[str] = None

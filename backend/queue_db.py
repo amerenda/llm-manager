@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS queue_jobs (
     model TEXT NOT NULL,
     status TEXT NOT NULL DEFAULT 'queued',
     priority INTEGER DEFAULT 0,
+    retried INTEGER DEFAULT 0,
     request JSONB NOT NULL,
     metadata JSONB,
     result JSONB,
@@ -60,6 +61,9 @@ async def init_queue_tables(pool: asyncpg.Pool):
             # Active Queue UI can show it. Set by the scheduler on
             # loading_model/running transitions.
             "ALTER TABLE queue_jobs ADD COLUMN IF NOT EXISTS runner_id INTEGER REFERENCES llm_runners(id) ON DELETE SET NULL",
+            # Added 2026-04: track how many times a job has been re-queued after
+            # transient failures (5xx from runner). Scheduler fails permanently after MAX_RETRIES.
+            "ALTER TABLE queue_jobs ADD COLUMN IF NOT EXISTS retried INTEGER DEFAULT 0",
         ]:
             try:
                 await conn.execute(stmt)
@@ -137,6 +141,15 @@ async def update_job_status(pool: asyncpg.Pool, job_id: str, status: str,
             else:
                 await conn.execute(
                     "UPDATE queue_jobs SET status = $2 WHERE id = $1", job_id, status)
+
+
+async def increment_job_retry(pool: asyncpg.Pool, job_id: str) -> int:
+    """Atomically increment and return the new retry count for a job."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "UPDATE queue_jobs SET retried = retried + 1 WHERE id = $1 RETURNING retried",
+            job_id)
+    return row["retried"] if row else 1
 
 
 async def get_pending_jobs(pool: asyncpg.Pool, limit: int = 100) -> list[dict]:
