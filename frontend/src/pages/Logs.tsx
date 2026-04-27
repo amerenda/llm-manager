@@ -138,15 +138,7 @@ export function Logs() {
           </div>
           {logs.data?.ollama_available !== false && (
             <div className="flex flex-col flex-1 min-h-0">
-              <LogPane
-                lines={ollamaLines}
-                label="Ollama"
-                empty={
-                  logs.data?.ollama_available === false
-                    ? 'Ollama container logs not available (Docker not configured).'
-                    : 'No Ollama logs.'
-                }
-              />
+              <LogPane lines={ollamaLines} label="Ollama" empty="No Ollama logs." />
             </div>
           )}
         </div>
@@ -157,7 +149,7 @@ export function Logs() {
           lines={ollamaLines}
           label="Ollama"
           empty={
-            logs.data?.ollama_available === false
+            logs.data && !logs.data.ollama_available
               ? 'Ollama container logs not available (Docker not configured).'
               : 'No Ollama logs.'
           }
