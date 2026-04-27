@@ -3,6 +3,21 @@ import { RefreshCw, Pause, Play } from 'lucide-react'
 import { useRunners, useRunnerLogs } from '../hooks/useBackend'
 
 const TAIL_OPTIONS = [50, 100, 200, 500]
+const SEVERITY_OPTIONS = ['all', 'error', 'warning', 'info', 'debug'] as const
+type Severity = typeof SEVERITY_OPTIONS[number]
+
+function lineSeverity(line: string): Severity {
+  if (/\bERROR\b|\berror\b/.test(line)) return 'error'
+  if (/\bWARN(ING)?\b/.test(line)) return 'warning'
+  if (/\bINFO\b/.test(line)) return 'info'
+  if (/\bDEBUG\b/.test(line)) return 'debug'
+  return 'info'
+}
+
+function filterLines(lines: string[], severity: Severity): string[] {
+  if (severity === 'all') return lines
+  return lines.filter(l => lineSeverity(l) === severity)
+}
 
 function LogPane({ lines, label, empty }: { lines: string[]; label: string; empty: string }) {
   const bottomRef = useRef<HTMLDivElement>(null)
@@ -43,6 +58,7 @@ export function Logs() {
   const [service, setService] = useState<'all' | 'agent' | 'ollama'>('all')
   const [tail, setTail] = useState(200)
   const [live, setLive] = useState(true)
+  const [severity, setSeverity] = useState<Severity>('all')
 
   const activeRunners = runners.data ?? []
 
@@ -54,8 +70,8 @@ export function Logs() {
 
   const logs = useRunnerLogs(runnerId, tail, service, live)
 
-  const agentLines = logs.data?.agent_logs ?? []
-  const ollamaLines = logs.data?.ollama_logs ?? []
+  const agentLines = filterLines(logs.data?.agent_logs ?? [], severity)
+  const ollamaLines = filterLines(logs.data?.ollama_logs ?? [], severity)
 
   return (
     <div className="flex flex-col gap-4 h-[calc(100vh-8rem)]">
@@ -91,6 +107,18 @@ export function Logs() {
           ))}
         </select>
 
+        <select
+          value={severity}
+          onChange={e => setSeverity(e.target.value as Severity)}
+          className="bg-gray-900 border border-gray-700 text-gray-200 text-sm rounded-lg px-3 py-1.5 focus:outline-none focus:ring-1 focus:ring-brand-500"
+        >
+          <option value="all">All levels</option>
+          <option value="error">Error</option>
+          <option value="warning">Warning</option>
+          <option value="info">Info</option>
+          <option value="debug">Debug</option>
+        </select>
+
         <button
           onClick={() => setLive(v => !v)}
           className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm transition-colors ${
@@ -114,7 +142,7 @@ export function Logs() {
 
         {logs.data && (
           <span className="text-xs text-gray-600 ml-auto">
-            {agentLines.length} agent · {ollamaLines.length} ollama lines
+            {agentLines.length}/{logs.data.agent_logs.length} agent · {ollamaLines.length}/{logs.data.ollama_logs.length} ollama
           </span>
         )}
       </div>
