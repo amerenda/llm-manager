@@ -1354,6 +1354,9 @@ _OLLAMA_SETTINGS_ALLOWLIST = {
     "OLLAMA_KEEP_ALIVE":         ("duration", None),      # "30s", "5m", "2h", "-1"
     "OLLAMA_MAX_QUEUE":          ("int", lambda v: 1 <= int(v) <= 65535),
     "OLLAMA_HOST":               ("str", None),           # "127.0.0.1:11434" etc
+    # ROCm/HIP override — needed for new AMD GPUs (e.g. gfx1201 RX 9070 XT) whose
+    # Tensile libs aren't bundled yet. Set to "11.0.0" to use gfx1100 (RDNA 3) libs.
+    "HSA_OVERRIDE_GFX_VERSION":  ("str", None),
 }
 
 _OLLAMA_ENV_FILE = "/host-compose/ollama.env"
