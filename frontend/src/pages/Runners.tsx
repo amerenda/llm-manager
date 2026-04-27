@@ -420,7 +420,9 @@ export function Runners() {
                       <span className="text-sm font-medium text-gray-200">{runner.hostname}</span>
                       <span className="text-xs text-gray-600 font-mono">#{runner.id}</span>
                       {isOutdated && (
-                        <AlertCircle className="w-3.5 h-3.5 text-amber-400 shrink-0" title={`Agent outdated: ${caps.agent_version} → ${target}`} />
+                        <span title={`Agent outdated: ${caps.agent_version} → ${target}`} className="flex items-center">
+                          <AlertCircle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                        </span>
                       )}
                     </div>
                     <div className="flex items-center gap-3 shrink-0">
