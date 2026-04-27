@@ -1803,8 +1803,10 @@ async def proxy_chat_completions(request: Request, runner_id: Optional[int] = No
 
     # ── Queue path: scheduler handles model loading and dispatch ───────────
     job_id = str(_uuid.uuid4())[:12]
-    logger.info("queue: submitting job %s (model=%s, app_id=%s)", job_id, model, app_id)
-    await queue_db.insert_job(pool, job_id, None, app_id, model, queue_request, None)
+    job_metadata = {"allowed_runner_ids": app_allowed_runners} if app_allowed_runners else None
+    logger.info("queue: submitting job %s (model=%s, app_id=%s, runners=%s)",
+                job_id, model, app_id, app_allowed_runners or "any")
+    await queue_db.insert_job(pool, job_id, None, app_id, model, queue_request, job_metadata)
 
     # Poll until the scheduler completes the job (timeout after 10 min)
     deadline = time.time() + 600

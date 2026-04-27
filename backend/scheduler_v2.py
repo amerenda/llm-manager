@@ -432,7 +432,18 @@ class SimplifiedScheduler:
                         active_tasks.add(t)
                     continue
 
-                runner = self._pick_runner(model)
+                # Extract per-app runner restriction from job metadata
+                _meta = head.get("metadata") or {}
+                if isinstance(_meta, str):
+                    try:
+                        _meta = json.loads(_meta)
+                    except Exception:
+                        _meta = {}
+                allowed_runner_ids: list[int] | None = _meta.get("allowed_runner_ids") or None
+                if allowed_runner_ids:
+                    logger.debug("job %s: restricting to runners %s", head["id"], allowed_runner_ids)
+
+                runner = self._pick_runner(model, allowed_runner_ids=allowed_runner_ids)
                 if runner is None:
                     # No runner idle right now (all busy or draining). Wait a
                     # beat, try again. Background tasks keep running.
@@ -532,7 +543,9 @@ class SimplifiedScheduler:
 
     # ── routing ──────────────────────────────────────────────────────────────
 
-    def _pick_runner(self, model: str) -> Optional[RunnerState]:
+    def _pick_runner(
+        self, model: str, allowed_runner_ids: list[int] | None = None
+    ) -> Optional[RunnerState]:
         """Return a runner to use for `model`, or None if none is immediately usable.
 
         Policy:
@@ -543,29 +556,25 @@ class SimplifiedScheduler:
           3. Any non-pinned, non-draining idle runner that HAS THE MODEL
              DOWNLOADED and can fit it (swap on that runner).
 
-        A runner marked `draining` is excluded from new work. Its current
-        in-flight job (if any) is unaffected; it finishes and the runner goes
-        idle with draining=True, still excluded.
-
-        Rule 3 used to accept any runner that fit — which picked doomed targets
-        when a model lived on only one runner (forcing a swap that failed, a
-        fallback that ignored drain, and a chat on the wrong runner). It now
-        requires the model to be on disk; if nobody has it, return None and
-        the job waits in queued until someone pulls it.
+        allowed_runner_ids restricts which runners are eligible (from app config).
+        None means all runners are eligible.
         """
+        def _eligible(r: RunnerState) -> bool:
+            return not allowed_runner_ids or r.runner_id in allowed_runner_ids
+
         # 1. Pinned match (skip draining pinned runners — wait for drain to clear)
         pinned = [r for r in self._runners.values() if r.pinned_model == model]
         if pinned:
             for r in pinned:
-                if r.draining:
+                if r.draining or not _eligible(r):
                     continue
                 if r.is_idle and r.has_downloaded(model):
                     return r
-            return None  # pinned but busy / draining / not yet downloaded — wait
+            return None  # pinned but busy / draining / not eligible — wait
 
         # 2. Already-loaded + idle
         for r in self._runners.values():
-            if r.pinned_model is not None or r.draining:
+            if r.pinned_model is not None or r.draining or not _eligible(r):
                 continue
             if r.current_model == model and r.is_idle:
                 return r
@@ -573,7 +582,7 @@ class SimplifiedScheduler:
         # 3. Idle + has it downloaded + fits
         need = vram_for_model(model)
         for r in self._runners.values():
-            if r.pinned_model is not None or r.draining:
+            if r.pinned_model is not None or r.draining or not _eligible(r):
                 continue
             if not r.is_idle:
                 continue

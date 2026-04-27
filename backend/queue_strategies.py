@@ -38,6 +38,20 @@ logger = logging.getLogger(__name__)
 DEFAULT_BATCH_SIZE = 5
 
 
+def _allowed_runners_key(job: dict) -> frozenset:
+    """Extract the app's allowed_runner_ids from job metadata as a frozenset
+    for equality comparison. frozenset() means 'all runners allowed'."""
+    import json as _json
+    meta = job.get("metadata") or {}
+    if isinstance(meta, str):
+        try:
+            meta = _json.loads(meta)
+        except Exception:
+            meta = {}
+    runners = meta.get("allowed_runner_ids")
+    return frozenset(runners) if runners else frozenset()
+
+
 class QueueStrategy(Protocol):
     """A strategy returns the next set of jobs to dispatch together.
 
@@ -85,10 +99,17 @@ class PriorityBatchingStrategy:
         if not jobs:
             return []
 
-        head_model = jobs[0]["model"]
+        head = jobs[0]
+        head_model = head["model"]
+        head_runners = _allowed_runners_key(head)
         batch = []
         for job in jobs:
             if job["model"] != head_model:
+                break
+            # Don't mix jobs with different runner restrictions — each restriction
+            # set requires a potentially different runner, so batching them together
+            # would cause later jobs to run on the wrong runner.
+            if _allowed_runners_key(job) != head_runners:
                 break
             batch.append(job)
             if len(batch) >= self.batch_size:
