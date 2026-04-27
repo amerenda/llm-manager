@@ -191,6 +191,26 @@ bash install.sh   # installs systemd user service
 | POST | `/api/runners/register` | PSK | Agent self-registration on startup |
 | POST | `/api/runners/heartbeat` | PSK | Agent heartbeat (every 30s) |
 | GET  | `/api/runners` | PSK | List active runners (last 90s) |
+| PATCH | `/api/runners/{id}` | Bearer | Update runner config (e.g. `pinned_model`) |
+
+**Runner pinning** — set `pinned_model` to dedicate a runner exclusively to one model:
+
+```bash
+# Pin qwen3:14b to murderbot (runner_id=1)
+curl -X PATCH https://llm-manager-backend.amer.dev/api/runners/1 \
+  -H "Authorization: Bearer <api_key>" \
+  -H "Content-Type: application/json" \
+  -d '{"pinned_model": "qwen3:14b"}'
+
+# Unpin
+curl -X PATCH https://llm-manager-backend.amer.dev/api/runners/1 \
+  -d '{"pinned_model": ""}'
+```
+
+**Pinning guarantees (simplified scheduler):**
+- The pinned model can never be evicted from that runner
+- No other model can ever be scheduled on that runner
+- The fast-path will only use the pinned runner for the pinned model; if it's busy, requests wait in queue rather than going to another runner
 
 ### LLM Management
 
@@ -229,6 +249,22 @@ parameters (context window, temperature, etc).
 | POST | `/api/profiles/{id}/deactivate` | Return runner to ad-hoc mode |
 | GET | `/api/profiles/activations` | List all runner-profile mappings |
 | GET | `/api/profiles/list` | App-authenticated profile discovery |
+
+### Model Aliases
+
+Aliases map a short name to a base model with optional parameter overrides (system prompt, temperature, num_ctx, etc.). Parameters are injected per-request at inference time — no model reload needed when you change them.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/models/aliases` | List all aliases |
+| POST | `/api/models/aliases` | Create alias |
+| GET | `/api/models/aliases/{alias}` | Get alias config |
+| PATCH | `/api/models/aliases/{alias}` | Update alias parameters |
+| DELETE | `/api/models/aliases/{alias}` | Delete alias |
+
+Apps can use an alias name anywhere a model name is accepted (e.g. `/v1/chat/completions`, queue submit). The backend resolves the alias to its base model and merges parameters before dispatching.
+
+**Note:** `num_ctx` changes require a model reload (Ollama limitation). All other parameters (temperature, system prompt, top_p, etc.) are applied without any reload.
 
 ### OpenAI-Compatible Inference
 
@@ -311,6 +347,9 @@ Auto-discovery requires a shared registration secret (Bitwarden: `llm-manager-re
 | `DISABLE_SCHEDULER` | Deployment env | Set `true` to disable the job scheduler (UAT) |
 | `UAT_TEST_RUNNER` | Deployment env | Runner name for UAT connectivity tests |
 | `UAT_TEST_MODEL` | Deployment env | Model name for UAT connectivity tests |
+| `SIMPLIFIED_SCHEDULER` | Deployment env | Set `1` to use the v2 simplified scheduler (recommended) |
+| `QUEUE_STRATEGY` | Deployment env | `priority_batching` (default) or `fifo` — controls job dispatch order |
+| `QUEUE_BATCH_SIZE` | Deployment env | Max same-model jobs to dispatch together (default: 5, priority_batching only) |
 
 ---
 
@@ -412,6 +451,30 @@ to `main`, then updates the image tags in `gitops/backend/deployment.yaml` and
 
 ---
 
+## Scheduler
+
+### Simplified Scheduler v2 (recommended)
+
+Enable with `SIMPLIFIED_SCHEDULER=1`. Designed around one-model-per-GPU semantics:
+
+- **Fast-path** — when the requested model is already loaded on an idle runner, the request bypasses the queue entirely. The scheduler atomically claims the runner, proxies directly to Ollama with true streaming (token-by-token), then releases. Zero DB overhead.
+- **Queue path** — when the model is not loaded (swap required), the request enters the DB queue. The scheduler dispatches a batch, swaps the model, runs the jobs, then checks the queue again.
+- **Batching** — `PriorityBatchingStrategy` (default) dequeues up to `QUEUE_BATCH_SIZE` consecutive same-model jobs from the head of the priority-ordered queue, minimizing swap frequency. Switch to `fifo` via `QUEUE_STRATEGY=fifo` for strict single-job dispatch.
+- **Runner restrictions** — if an app has `allowed_runner_ids` configured, that restriction is enforced on both the fast-path and the queue path. Batching will not mix jobs with different runner restriction sets.
+- **Runner pinning** — pinned runners are dedicated exclusively to their pinned model. A pinned runner will never accept any other model. A pinned model can never be evicted from its runner.
+
+```
+request → fast-path check → model loaded + runner idle?
+              yes → claim runner → stream → release
+              no  → insert into queue DB
+                      ↓ scheduler loop
+                    pick runner → swap if needed → run batch → mark complete
+```
+
+### Legacy Scheduler (v1)
+
+The default scheduler (no `SIMPLIFIED_SCHEDULER` flag) supports multi-model concurrent loading and VRAM-based eviction. It batches jobs by model, handles eviction policies, and supports `do_not_evict` and `evictable` flags on model settings. Use this if running multiple models concurrently on a single GPU.
+
 ## Queue System
 
 The queue system provides async job submission with VRAM-aware scheduling. Instead
@@ -503,9 +566,9 @@ The scheduler handles model loading and VRAM automatically:
 4. **Pre-check** -- On submission, the scheduler validates that the model can fit
    (either immediately or after eviction) and returns a warning if eviction is needed.
 
-### Model Settings
+### Model Settings (Legacy Scheduler)
 
-Per-model eviction and scheduling behavior is configurable via the model settings API.
+Per-model eviction behavior for the legacy v1 scheduler. Not used by the simplified v2 scheduler — use runner pinning (`PATCH /api/runners/{id}`) instead.
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -517,18 +580,21 @@ Per-model eviction and scheduling behavior is configurable via the model setting
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `do_not_evict` | `false` | Prevent this model from ever being evicted |
-| `evictable` | `true` | Whether the scheduler can evict this model |
-| `wait_for_completion` | `true` | Wait for active jobs to finish before evicting |
+| `do_not_evict` | `false` | Prevent eviction (legacy scheduler only) |
+| `evictable` | `true` | Whether the scheduler can evict this model (legacy only) |
+| `wait_for_completion` | `true` | Wait for active jobs before evicting (legacy only) |
 | `vram_estimate_gb` | *(auto)* | Manual VRAM override for scheduling |
 
-**Example -- pin a model in VRAM:**
+### Per-Runner Model Parameters
 
-```bash
-curl -X PATCH https://llm-manager-backend.amer.dev/api/models/llama3.2:latest/settings \
-  -H "Content-Type: application/json" \
-  -d '{"do_not_evict": true}'
-```
+Override inference parameters (system prompt, temperature, num_ctx, etc.) for a specific model on a specific runner. Applied on both fast-path and queue-path requests.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/models/runner-params` | List all runner-model overrides |
+| POST | `/api/models/runner-params` | Create override |
+| PATCH | `/api/models/runner-params/{id}` | Update override |
+| DELETE | `/api/models/runner-params/{id}` | Remove override |
 
 ### App Integration
 
@@ -555,6 +621,92 @@ result = httpx.get(f"{API}/api/queue/jobs/{job_id}", headers=headers)
 
 Rate limits are enforced per-app: max queue depth and max jobs per minute. Exceeding
 limits returns HTTP 429.
+
+---
+
+## Prometheus Metrics
+
+The backend exposes metrics at `GET /metrics`. The `servicemonitor.yaml` in GitOps
+configures Prometheus scraping.
+
+### Scheduler v2 Metrics
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `llm_queue_depth` | Gauge | — | Jobs currently in `queued` state |
+| `llm_queue_active_jobs` | Gauge | — | Jobs currently in `running` state |
+| `llm_backend_active_runners` | Gauge | — | Runners with heartbeat < 90s |
+| `llm_backend_runner_last_seen_seconds` | Gauge | `runner` | Seconds since last heartbeat |
+| `llm_queue_jobs_submitted_total` | Counter | `model`, `app` | Total jobs submitted to queue |
+| `llm_scheduler_v2_jobs_completed_total` | Counter | `status` | Jobs completed (status: completed/failed) |
+| `llm_scheduler_v2_job_wait_seconds` | Histogram | — | Time from submit to dispatch |
+| `llm_scheduler_v2_job_wait_by_app_seconds` | Histogram | `app` | Wait time broken down by app |
+| `llm_scheduler_v2_model_swap_total` | Counter | `runner`, `from_model`, `to_model` | Model swap events |
+| `llm_scheduler_v2_model_swap_seconds` | Histogram | `runner` | Swap duration |
+| `llm_queue_job_duration_seconds` | Histogram | — | Inference time for queue-path jobs |
+
+### Fast-path Metrics
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `llm_fastpath_requests_total` | Counter | `model`, `status` | Fast-path requests (status: completed/failed) |
+| `llm_fastpath_duration_seconds` | Histogram | `model` | End-to-end fast-path latency |
+
+### Runner Metrics
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `llm_runner_is_idle` | Gauge | `runner` | 1 = idle, 0 = has in-flight job |
+| `llm_runner_vram_used_bytes` | Gauge | `runner` | Live VRAM used (updated at reconcile + post-swap) |
+| `llm_runner_vram_total_bytes` | Gauge | `runner` | Total VRAM capacity |
+| `llm_inference_prompt_tokens_total` | Counter | `model`, `runner` | Prompt tokens processed |
+| `llm_inference_completion_tokens_total` | Counter | `model`, `runner` | Completion tokens generated |
+
+### Config Metrics (info-style)
+
+These are refreshed every 30 seconds by a background task. Value is always 1; data is in labels.
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `llm_alias_info` | Gauge | `alias`, `base_model`, `has_system_prompt` | Active alias configuration |
+| `llm_alias_param` | Gauge | `alias`, `param` | Numeric parameters per alias |
+| `llm_runner_model_param` | Gauge | `model`, `runner`, `param` | Per-runner model parameter overrides |
+
+---
+
+## Grafana Dashboards
+
+Two dashboards are committed to `k3s-dean-gitops/apps/llm-manager/backend/` as
+ConfigMaps with the `grafana_dashboard: "1"` label, which the Grafana sidecar
+auto-discovers.
+
+### LLM Manager Overview (`llm-manager-overview`)
+
+Fleet-wide view. Panels:
+
+- **Queue Depth / Active Jobs / Online Runners / Fast-path req/min** — stat row
+- **Job Completions** — rate of completed/failed queue jobs + fast-path
+- **Fast-path vs Queue** — relative request volume split
+- **Inference Duration** — fast-path and queue-path p50/p95 latency
+- **Queue Wait Time** — p50/p95 wait, broken down by app
+- **VRAM Used % by Runner** — horizontal bar gauge, all runners
+- **Token Throughput** — prompt/completion tokens/s by model
+- **Model Swaps / hr** — swap frequency by runner
+- **Swap Duration P95** — swap time by runner
+- **Runner Idle State** — BUSY/IDLE indicator per runner
+- **Alias Config / Alias Parameters / Runner Model Parameter Overrides** — config tables (30s refresh)
+
+### LLM Manager — Runner (`llm-manager-runner`)
+
+Per-runner drill-down with `$runner` template variable. Panels:
+
+- **Status / Heartbeat Age / VRAM Used / VRAM %** — stat row
+- **VRAM Over Time** — used vs total over the time window
+- **Token Throughput** — per-model tok/s for this runner
+- **Inference Duration (fast-path)** — p50/p95 by model
+- **Model Swap Rate / Swap Duration P95** — swap behavior on this runner
+- **Queue Wait by App** — per-app wait time p50/p95
+- **Recent Swaps** — table of swap pairs with count over last 6h
 
 ---
 
