@@ -1023,10 +1023,10 @@ export function usePinModelOnRunner() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: ({ model_name, runner_id, do_not_evict }: { model_name: string; runner_id: number; do_not_evict: boolean }) =>
-      patch<{ ok: boolean }>(`/api/models/${encodeURIComponent(model_name)}/runner-params/${runner_id}/pin`, { do_not_evict }),
+      patch<{ ok: boolean }>(`/api/runners/${runner_id}`, { pinned_model: do_not_evict ? model_name : '' }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ['llm-status'] })
-      qc.invalidateQueries({ queryKey: ['runner-params'] })
+      qc.invalidateQueries({ queryKey: ['runners'] })
     },
   })
 }
