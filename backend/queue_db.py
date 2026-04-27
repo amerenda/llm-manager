@@ -122,10 +122,18 @@ async def update_job_status(pool: asyncpg.Pool, job_id: str, status: str,
                 WHERE id = $1
             """, job_id, status, json.dumps(result) if result else None, error)
         else:
-            if runner_id is not None:
+            if runner_id is not None and error is not None:
+                await conn.execute(
+                    "UPDATE queue_jobs SET status = $2, runner_id = $3, error = $4 WHERE id = $1",
+                    job_id, status, runner_id, error)
+            elif runner_id is not None:
                 await conn.execute(
                     "UPDATE queue_jobs SET status = $2, runner_id = $3 WHERE id = $1",
                     job_id, status, runner_id)
+            elif error is not None:
+                await conn.execute(
+                    "UPDATE queue_jobs SET status = $2, error = $3 WHERE id = $1",
+                    job_id, status, error)
             else:
                 await conn.execute(
                     "UPDATE queue_jobs SET status = $2 WHERE id = $1", job_id, status)

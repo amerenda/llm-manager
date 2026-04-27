@@ -153,10 +153,17 @@ class RunnerState:
     # 2026-04-22: archlinux drained + only-copy of qwen3.6:35b → every job
     # fallback-loaded on it, making it unresponsive).
     downloaded_models: set[str] = field(default_factory=set)
+    # Ollama cooldown: set when Ollama returns 503 on this runner. _pick_runner
+    # skips the runner until the timestamp expires, giving Ollama time to recover.
+    ollama_down_until: Optional[float] = None
 
     @property
     def is_idle(self) -> bool:
         return self.in_flight_job_id is None
+
+    @property
+    def is_ollama_down(self) -> bool:
+        return self.ollama_down_until is not None and time.time() < self.ollama_down_until
 
     def has_downloaded(self, model: str) -> bool:
         """Model-tag downloaded. Also matches :latest tag as an alias for the
@@ -562,19 +569,22 @@ class SimplifiedScheduler:
         def _eligible(r: RunnerState) -> bool:
             return not allowed_runner_ids or r.runner_id in allowed_runner_ids
 
-        # 1. Pinned match (skip draining pinned runners — wait for drain to clear)
+        def _skip(r: RunnerState) -> bool:
+            return r.draining or r.is_ollama_down or not _eligible(r)
+
+        # 1. Pinned match (skip draining/down pinned runners — wait for drain to clear)
         pinned = [r for r in self._runners.values() if r.pinned_model == model]
         if pinned:
             for r in pinned:
-                if r.draining or not _eligible(r):
+                if _skip(r):
                     continue
                 if r.is_idle and r.has_downloaded(model):
                     return r
-            return None  # pinned but busy / draining / not eligible — wait
+            return None  # pinned but busy / draining / down / not eligible — wait
 
         # 2. Already-loaded + idle
         for r in self._runners.values():
-            if r.pinned_model is not None or r.draining or not _eligible(r):
+            if r.pinned_model is not None or _skip(r):
                 continue
             if r.current_model == model and r.is_idle:
                 return r
@@ -582,7 +592,7 @@ class SimplifiedScheduler:
         # 3. Idle + has it downloaded + fits
         need = vram_for_model(model)
         for r in self._runners.values():
-            if r.pinned_model is not None or r.draining or not _eligible(r):
+            if r.pinned_model is not None or _skip(r):
                 continue
             if not r.is_idle:
                 continue
@@ -721,6 +731,8 @@ class SimplifiedScheduler:
         if runner is not None:
             runner.in_flight_job_id = job_id
 
+        OLLAMA_COOLDOWN = 300  # seconds to skip a runner after a 503
+
         try:
             if runner is None:
                 await self._run_cloud(job_id, model, request)
@@ -728,13 +740,36 @@ class SimplifiedScheduler:
                 await self._run_local(job_id, model, request, runner)
             scheduler_jobs_completed_total.labels(model=model, status="completed").inc()
         except Exception as e:
+            is_503 = isinstance(e, httpx.HTTPStatusError) and e.response.status_code == 503
+
             if isinstance(e, httpx.HTTPStatusError):
                 error_msg = f"{e}: {e.response.text}"
             else:
                 error_msg = str(e) or repr(e)  # str() is empty for some exceptions (e.g. ReadTimeout)
-            await queue_db.update_job_status(self.pool, job_id, "failed", error=error_msg)
-            scheduler_jobs_completed_total.labels(model=model, status="failed").inc()
-            logger.exception("Job %s failed", job_id)
+
+            if is_503 and runner is not None:
+                # Ollama is down on this runner — apply cooldown and re-queue so
+                # the scheduler can retry on another runner next tick.
+                runner.ollama_down_until = time.time() + OLLAMA_COOLDOWN
+                logger.warning(
+                    "Ollama 503 on %s — cooling down for %ds, re-queuing job %s",
+                    runner.hostname, OLLAMA_COOLDOWN, job_id,
+                )
+                # Fetch Ollama logs for the error record before re-queuing
+                try:
+                    client = await self.get_runner_client(runner_id=runner.runner_id)
+                    logs = await client.logs(tail=30, service="ollama")
+                    log_lines = "\n".join(logs.get("ollama_logs") or [])
+                    if log_lines:
+                        error_msg += f"\n\nOllama logs ({runner.hostname}):\n{log_lines}"
+                except Exception:
+                    pass
+                await queue_db.update_job_status(self.pool, job_id, "queued", error=error_msg)
+                scheduler_jobs_completed_total.labels(model=model, status="retried").inc()
+            else:
+                await queue_db.update_job_status(self.pool, job_id, "failed", error=error_msg)
+                scheduler_jobs_completed_total.labels(model=model, status="failed").inc()
+                logger.exception("Job %s failed", job_id)
         finally:
             self._current_job_id = None
             if runner is not None:
