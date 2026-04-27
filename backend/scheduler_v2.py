@@ -305,6 +305,14 @@ class SimplifiedScheduler:
                     rs.current_model = loaded[0].get("name") or None
                     if rs.current_model:
                         rs.model_loaded_at = time.time()
+                # Seed live VRAM gauges from status (caps don't carry used_bytes)
+                runner_vram_total_bytes.labels(runner=r["hostname"]).set(
+                    (status.get("gpu_vram_total_gb") or 0) * 1e9
+                )
+                runner_vram_used_bytes.labels(runner=r["hostname"]).set(
+                    (status.get("gpu_vram_used_gb") or 0) * 1e9
+                )
+                runner_is_idle.labels(runner=r["hostname"]).set(1)
             except Exception:
                 logger.warning(
                     "reconcile: runner %s unreachable — gpu_total_gb=%s from capabilities",
@@ -369,11 +377,11 @@ class SimplifiedScheduler:
                 # as soon as the heartbeat lands.
                 rs.downloaded_models = _dl_set_from_caps(caps)
 
-            # Update per-runner Prometheus gauges from latest capabilities
+            # Update static gauges from capabilities (applies to new and existing runners).
+            # vram_used is NOT in capabilities — it's live state updated by
+            # _reconcile_runners and _swap_model via client.status().
             vram_total = caps.get("gpu_vram_total_bytes", 0) or 0
-            vram_used = caps.get("gpu_vram_used_bytes", 0) or 0
             runner_vram_total_bytes.labels(runner=rs.hostname).set(vram_total)
-            runner_vram_used_bytes.labels(runner=rs.hostname).set(vram_used)
             runner_is_idle.labels(runner=rs.hostname).set(1 if rs.is_idle else 0)
 
     # ── main loop ────────────────────────────────────────────────────────────
@@ -641,6 +649,14 @@ class SimplifiedScheduler:
             scheduler_model_swap_seconds.labels(runner=runner.hostname).observe(elapsed)
             logger.info("swap: %s → %s on %s in %.1fs",
                         old or "none", new_model, runner.hostname, elapsed)
+            # Refresh VRAM used gauge — VRAM state changed significantly after swap
+            try:
+                post_status = await client.status()
+                runner_vram_used_bytes.labels(runner=runner.hostname).set(
+                    (post_status.get("gpu_vram_used_gb") or 0) * 1e9
+                )
+            except Exception:
+                pass
             return runner
         except Exception:
             logger.exception("swap: load %s on %s failed", new_model, runner.hostname)
@@ -787,21 +803,23 @@ class SimplifiedScheduler:
         Returns the RunnerState with in_flight_job_id set, or None if no
         suitable runner is available (caller should fall back to the queue).
 
-        Only matches already-loaded runners (steps 1+2 of _pick_runner).
-        A swap is slow — let the queue handle those."""
-        # Pinned runner first
-        for r in self._runners.values():
-            if r.pinned_model != model:
-                continue
-            if r.draining or not r.is_idle or r.current_model != model:
-                continue
-            if allowed_runner_ids and r.runner_id not in allowed_runner_ids:
-                continue
-            r.in_flight_job_id = "__fast_path__"
-            runner_is_idle.labels(runner=r.hostname).set(0)
-            logger.debug("fast-path: claimed pinned runner %s for %s", r.hostname, model)
-            return r
-        # Any idle runner with the model already loaded
+        Mirrors _pick_runner steps 1+2 (already-loaded only — no swap)."""
+        # Step 1: pinned runner for this model. If one exists but is busy,
+        # return None — same as _pick_runner; don't fall through to other runners.
+        pinned = [r for r in self._runners.values() if r.pinned_model == model]
+        if pinned:
+            for r in pinned:
+                if r.draining or not r.is_idle or r.current_model != model:
+                    continue
+                if allowed_runner_ids and r.runner_id not in allowed_runner_ids:
+                    continue
+                r.in_flight_job_id = "__fast_path__"
+                runner_is_idle.labels(runner=r.hostname).set(0)
+                logger.debug("fast-path: claimed pinned runner %s for %s", r.hostname, model)
+                return r
+            return None  # pinned runner exists but not ready — don't use others
+
+        # Step 2: any non-pinned, non-draining idle runner with model loaded
         for r in self._runners.values():
             if r.pinned_model is not None or r.draining:
                 continue
