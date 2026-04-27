@@ -2287,6 +2287,14 @@ async def put_runner_ollama_settings(runner_id: int, req: OllamaSettingsUpdateRe
         raise HTTPException(e.response.status_code, detail)
 
 
+@app.get("/api/llm/runners/{runner_id}/logs")
+async def get_runner_logs(runner_id: int, tail: int = 200, service: str = "all"):
+    """Return recent log lines from the agent and/or Ollama container on this runner."""
+    _inc_request(f"/api/llm/runners/{runner_id}/logs", "GET", 200)
+    client = await _get_runner_client(app.state.db, runner_id)
+    return await client.logs(tail=tail, service=service)
+
+
 @app.get("/api/llm/runners/{runner_id}/ollama-version")
 async def get_runner_ollama_version(runner_id: int):
     """Return the running Ollama version, configured image tag, and git commit hash."""

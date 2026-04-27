@@ -894,6 +894,23 @@ export function useAgents() {
   })
 }
 
+// ── Runner logs ───────────────────────────────────────────────────────────────
+
+export interface RunnerLogs {
+  agent_logs: string[]
+  ollama_logs: string[]
+  ollama_available: boolean
+}
+
+export function useRunnerLogs(runnerId: number | null, tail: number, service: string, enabled: boolean) {
+  return useQuery<RunnerLogs>({
+    queryKey: ['runner-logs', runnerId, tail, service],
+    queryFn: () => get(`/api/llm/runners/${runnerId}/logs?tail=${tail}&service=${encodeURIComponent(service)}`),
+    enabled: enabled && runnerId != null,
+    refetchInterval: enabled ? 5_000 : false,
+  })
+}
+
 // ── Queue ────────────────────────────────────────────────────────────────────
 
 export function useQueueJobs() {

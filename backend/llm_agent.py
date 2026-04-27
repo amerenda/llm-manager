@@ -74,6 +74,17 @@ class LLMAgentClient:
             r.raise_for_status()
             return r.text
 
+    async def logs(self, tail: int = 200, service: str = "all") -> dict:
+        """Return recent log lines for agent and/or ollama container."""
+        async with self._client(timeout=self._timeout) as c:
+            r = await c.get(
+                f"{self.base_url}/v1/logs",
+                params={"tail": tail, "service": service},
+                headers=self._headers,
+            )
+            r.raise_for_status()
+            return r.json()
+
     # ── LLM operations ────────────────────────────────────────────────────────
 
     async def chat(

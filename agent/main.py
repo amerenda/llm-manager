@@ -35,10 +35,24 @@ from prometheus_client import (
 )
 from pydantic import BaseModel
 
+import collections
+
+_LOG_BUFFER: collections.deque = collections.deque(maxlen=500)
+
+
+class _BufferHandler(logging.Handler):
+    def emit(self, record: logging.LogRecord) -> None:
+        _LOG_BUFFER.append(self.format(record))
+
+
+_buf_handler = _BufferHandler()
+_buf_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+
 logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     level=logging.INFO,
 )
+logging.getLogger().addHandler(_buf_handler)
 logger = logging.getLogger(__name__)
 
 # ── GPU backend detection (NVIDIA via pynvml, AMD via sysfs) ─────────────────
@@ -1739,6 +1753,40 @@ async def upgrade_ollama(req: OllamaUpgradeRequest):
         "tag": tag,
         "commit": commit,
         "message": f"Ollama upgraded to {tag}",
+    }
+
+
+@app.get("/v1/logs")
+async def get_logs(tail: int = 200, service: str = "all"):
+    """Return recent log lines for agent and/or ollama container.
+
+    service: "all" | "agent" | "ollama"
+    tail: number of lines to return per service (max 500)
+    """
+    tail = max(1, min(tail, 500))
+    agent_lines: list[str] = []
+    ollama_lines: list[str] = []
+    ollama_available = False
+
+    if service in ("all", "agent"):
+        agent_lines = list(_LOG_BUFFER)[-tail:]
+
+    if service in ("all", "ollama") and OLLAMA_CONTAINER and _DOCKER_OK:
+        try:
+            container = _docker.containers.get(OLLAMA_CONTAINER)
+            raw: bytes = container.logs(tail=tail, timestamps=True, stream=False)
+            ollama_available = True
+            for line in raw.decode("utf-8", errors="replace").splitlines():
+                if line.strip():
+                    ollama_lines.append(line)
+        except Exception as e:
+            ollama_lines = [f"[error reading ollama logs: {e}]"]
+            ollama_available = True
+
+    return {
+        "agent_logs": agent_lines,
+        "ollama_logs": ollama_lines,
+        "ollama_available": ollama_available,
     }
 
 
