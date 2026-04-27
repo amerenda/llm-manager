@@ -2292,7 +2292,14 @@ async def get_runner_logs(runner_id: int, tail: int = 200, service: str = "all")
     """Return recent log lines from the agent and/or Ollama container on this runner."""
     _inc_request(f"/api/llm/runners/{runner_id}/logs", "GET", 200)
     client = await _get_runner_client(app.state.db, runner_id)
-    return await client.logs(tail=tail, service=service)
+    try:
+        return await client.logs(tail=tail, service=service)
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 404:
+            # Agent is an older version that doesn't support /v1/logs yet
+            return {"agent_logs": [], "ollama_logs": [], "ollama_available": False,
+                    "_note": "Agent does not support log streaming — update the agent to enable this feature."}
+        raise
 
 
 @app.get("/api/llm/runners/{runner_id}/ollama-version")

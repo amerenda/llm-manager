@@ -419,6 +419,9 @@ export function Runners() {
                       <StatusDot online={online && enabled} />
                       <span className="text-sm font-medium text-gray-200">{runner.hostname}</span>
                       <span className="text-xs text-gray-600 font-mono">#{runner.id}</span>
+                      {isOutdated && (
+                        <AlertCircle className="w-3.5 h-3.5 text-amber-400 shrink-0" title={`Agent outdated: ${caps.agent_version} → ${target}`} />
+                      )}
                     </div>
                     <div className="flex items-center gap-3 shrink-0">
                       {!expanded && isGpu && (
@@ -432,10 +435,15 @@ export function Runners() {
                   {/* Bottom row: version + badges */}
                   <div className="flex items-center gap-2 pl-6">
                     {caps.agent_version && (
-                      <span className="text-[10px] text-gray-500 font-mono">{caps.agent_version}</span>
+                      <span className={`text-[10px] font-mono ${isOutdated ? 'text-amber-400' : 'text-gray-500'}`}>
+                        {caps.agent_version}
+                      </span>
                     )}
                     {isOutdated && (
-                      <span className="text-[10px] bg-amber-900/40 text-amber-400 px-1.5 py-0.5 rounded">Update pending</span>
+                      <span className="flex items-center gap-0.5 text-[10px] bg-amber-900/40 text-amber-400 border border-amber-800/50 px-1.5 py-0.5 rounded">
+                        <AlertCircle className="w-2.5 h-2.5" />
+                        outdated
+                      </span>
                     )}
                     <div className="flex gap-1">
                       {isGpu && (
