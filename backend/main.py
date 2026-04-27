@@ -111,6 +111,25 @@ queue_job_wait_seconds = Histogram("llm_queue_job_wait_seconds", "Time job spent
 queue_submission_errors_total = Counter(
     "llm_queue_submission_errors_total", "Queue submission errors", ["reason"])
 
+# Config info metrics — refreshed by background task every 30s.
+# Numeric params exposed as gauge values so they can be graphed/alerted on.
+# String metadata (alias→base_model) carried as labels on the info gauge.
+alias_info_gauge = Gauge(
+    "llm_alias_info",
+    "Alias metadata (value=1, use label values for config display)",
+    ["alias", "base_model", "has_system_prompt"],
+)
+alias_param_gauge = Gauge(
+    "llm_alias_param",
+    "Numeric parameter for an alias (temperature, num_ctx, etc.)",
+    ["alias", "param"],
+)
+runner_model_param_gauge = Gauge(
+    "llm_runner_model_param",
+    "Per-runner model parameter override",
+    ["model", "runner", "param"],
+)
+
 
 def _inc_request(endpoint: str, method: str, status: int):
     api_requests_total.labels(endpoint=endpoint, method=method, status=str(status)).inc()
@@ -275,10 +294,102 @@ async def lifespan(app: FastAPI):
 
     lock_retry_task = asyncio.create_task(_retry_lock()) if not got_lock and not DISABLE_SCHEDULER else None
 
+    # Track which label sets we've written so we can remove stale ones on refresh
+    _alias_info_labels: set[tuple] = set()
+    _alias_param_labels: set[tuple] = set()
+    _runner_param_labels: set[tuple] = set()
+
+    async def _refresh_config_metrics():
+        nonlocal _alias_info_labels, _alias_param_labels, _runner_param_labels
+        _NUMERIC_PARAMS = ("temperature", "top_p", "top_k", "num_ctx",
+                           "repeat_penalty", "seed", "max_tokens", "num_predict",
+                           "top_k", "frequency_penalty", "presence_penalty")
+        while True:
+            try:
+                aliases = await queue_db.get_all_model_aliases(pool)
+                new_info: set[tuple] = set()
+                new_param: set[tuple] = set()
+
+                for a in aliases:
+                    alias = a["alias_name"]
+                    base = a["base_model"]
+                    has_sp = "1" if a.get("system_prompt") else "0"
+                    key = (alias, base, has_sp)
+                    alias_info_gauge.labels(alias=alias, base_model=base, has_system_prompt=has_sp).set(1)
+                    new_info.add(key)
+
+                    params = a.get("parameters") or {}
+                    if isinstance(params, str):
+                        import json as _j; params = _j.loads(params)
+                    for p in _NUMERIC_PARAMS:
+                        if p in params:
+                            try:
+                                alias_param_gauge.labels(alias=alias, param=p).set(float(params[p]))
+                                new_param.add((alias, p))
+                            except (TypeError, ValueError):
+                                pass
+
+                # Remove stale alias entries
+                for key in _alias_info_labels - new_info:
+                    try:
+                        alias_info_gauge.remove(*key)
+                    except Exception:
+                        pass
+                for key in _alias_param_labels - new_param:
+                    try:
+                        alias_param_gauge.remove(*key)
+                    except Exception:
+                        pass
+                _alias_info_labels = new_info
+                _alias_param_labels = new_param
+
+                # Runner-level model param overrides
+                # Query all model_runner_params rows via the DB directly
+                new_rp: set[tuple] = set()
+                async with pool.acquire() as conn:
+                    rows = await conn.fetch(
+                        """SELECT mrp.model_name, r.hostname, mrp.parameters
+                           FROM model_runner_params mrp
+                           JOIN llm_runners r ON r.id = mrp.runner_id
+                           WHERE mrp.parameters IS NOT NULL AND mrp.parameters != 'null'"""
+                    )
+                for row in rows:
+                    m = row["model_name"]
+                    runner = row["hostname"]
+                    params = row["parameters"]
+                    if isinstance(params, str):
+                        import json as _j
+                        try:
+                            params = _j.loads(params)
+                        except Exception:
+                            params = {}
+                    if not isinstance(params, dict):
+                        continue
+                    for p in _NUMERIC_PARAMS:
+                        if p in params:
+                            try:
+                                runner_model_param_gauge.labels(model=m, runner=runner, param=p).set(float(params[p]))
+                                new_rp.add((m, runner, p))
+                            except (TypeError, ValueError):
+                                pass
+                for key in _runner_param_labels - new_rp:
+                    try:
+                        runner_model_param_gauge.remove(*key)
+                    except Exception:
+                        pass
+                _runner_param_labels = new_rp
+
+            except Exception:
+                logger.exception("config metrics refresh failed")
+            await asyncio.sleep(30)
+
+    config_metrics_task = asyncio.create_task(_refresh_config_metrics())
+
     yield
 
     if lock_retry_task and not lock_retry_task.done():
         lock_retry_task.cancel()
+    config_metrics_task.cancel()
 
     scheduler.stop()
     if got_lock:
