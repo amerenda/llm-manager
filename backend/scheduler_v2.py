@@ -25,7 +25,7 @@ from typing import Optional
 
 import asyncpg
 import httpx
-from prometheus_client import Counter, Histogram
+from prometheus_client import Counter, Gauge, Histogram
 
 import queue_db
 from gpu import vram_for_model
@@ -71,6 +71,48 @@ scheduler_jobs_completed_total = Counter(
     ["model", "status"],  # status: completed|failed
 )
 scheduler_runner_current_model_v2 = None  # populated only after start; see init
+
+# Per-runner live state gauges (updated every _refresh_runners tick)
+runner_vram_used_bytes = Gauge(
+    "llm_runner_vram_used_bytes",
+    "VRAM currently used on runner (bytes)",
+    ["runner"],
+)
+runner_vram_total_bytes = Gauge(
+    "llm_runner_vram_total_bytes",
+    "Total VRAM capacity of runner (bytes)",
+    ["runner"],
+)
+runner_is_idle = Gauge(
+    "llm_runner_is_idle",
+    "1 if runner has no in-flight job, 0 if busy",
+    ["runner"],
+)
+
+# Inference token accounting (from Ollama response usage field)
+inference_prompt_tokens_total = Counter(
+    "llm_inference_prompt_tokens_total",
+    "Prompt tokens processed",
+    ["model", "runner"],
+)
+inference_completion_tokens_total = Counter(
+    "llm_inference_completion_tokens_total",
+    "Completion tokens generated",
+    ["model", "runner"],
+)
+
+# Fast-path (direct proxy, bypassing the job queue)
+fastpath_requests_total = Counter(
+    "llm_fastpath_requests_total",
+    "Requests served via direct-proxy fast path (no queue)",
+    ["model", "status"],  # status: completed|failed
+)
+fastpath_duration_seconds = Histogram(
+    "llm_fastpath_duration_seconds",
+    "End-to-end wall time of fast-path requests",
+    ["model"],
+    buckets=[1, 5, 10, 30, 60, 120, 300, 600],
+)
 
 
 def _dl_set_from_caps(caps: dict) -> set[str]:
@@ -326,6 +368,13 @@ class SimplifiedScheduler:
                 # models in the background and we need _pick_runner to see it
                 # as soon as the heartbeat lands.
                 rs.downloaded_models = _dl_set_from_caps(caps)
+
+            # Update per-runner Prometheus gauges from latest capabilities
+            vram_total = caps.get("gpu_vram_total_bytes", 0) or 0
+            vram_used = caps.get("gpu_vram_used_bytes", 0) or 0
+            runner_vram_total_bytes.labels(runner=rs.hostname).set(vram_total)
+            runner_vram_used_bytes.labels(runner=rs.hostname).set(vram_used)
+            runner_is_idle.labels(runner=rs.hostname).set(1 if rs.is_idle else 0)
 
     # ── main loop ────────────────────────────────────────────────────────────
 
@@ -675,17 +724,18 @@ class SimplifiedScheduler:
         await queue_db.update_job_status(self.pool, job_id, "completed", result=result)
         logger.info("Job %s completed (model=%s, cloud)", job_id, model)
 
-    async def _run_local(self, job_id: str, model: str, request: dict, runner: RunnerState):
-        client = await self.get_runner_client(runner_id=runner.runner_id)
+    async def _apply_runner_params(
+        self, request: dict, model: str, runner: RunnerState
+    ) -> tuple[list, dict]:
+        """Return (messages, kwargs) with runner-level param overrides applied.
+        Runner params take precedence over alias/request params (physical constraints)."""
         messages = list(request.get("messages", []))
-        kwargs = {}
+        kwargs: dict = {}
         for key in ("temperature", "max_tokens", "tools", "top_p", "top_k",
                     "frequency_penalty", "presence_penalty", "stop",
                     "seed", "repeat_penalty", "num_ctx", "num_predict"):
             if key in request:
                 kwargs[key] = request[key]
-
-        # Runner params override alias/request params (runner has physical constraints)
         try:
             rp = await queue_db.get_model_runner_params(self.pool, model, runner.runner_id)
             if rp:
@@ -699,16 +749,77 @@ class SimplifiedScheduler:
                     messages.insert(0, {"role": "system", "content": sys_prompt})
         except Exception:
             logger.debug("Failed to fetch runner params for %s on runner %d", model, runner.runner_id)
+        return messages, kwargs
 
+    def _record_token_usage(self, result: dict, model: str, runner_hostname: str) -> None:
+        """Extract token counts from an Ollama response and update counters."""
+        try:
+            usage = result.get("usage") or {}
+            pt = usage.get("prompt_tokens") or usage.get("prompt_eval_count", 0)
+            ct = usage.get("completion_tokens") or usage.get("eval_count", 0)
+            if pt:
+                inference_prompt_tokens_total.labels(model=model, runner=runner_hostname).inc(pt)
+            if ct:
+                inference_completion_tokens_total.labels(model=model, runner=runner_hostname).inc(ct)
+        except Exception:
+            pass
+
+    async def _run_local(self, job_id: str, model: str, request: dict, runner: RunnerState):
+        client = await self.get_runner_client(runner_id=runner.runner_id)
+        messages, kwargs = await self._apply_runner_params(request, model, runner)
+
+        logger.info("Job %s starting on %s (model=%s, msgs=%d)",
+                    job_id, runner.hostname, model, len(messages))
         t0 = time.time()
-        result = await client.chat(
-            messages=messages,
-            model=model, stream=False, **kwargs,
-        )
+        result = await client.chat(messages=messages, model=model, stream=False, **kwargs)
         elapsed = time.time() - t0
+        self._record_token_usage(result, model, runner.hostname)
         await queue_db.update_job_status(self.pool, job_id, "completed", result=result)
-        logger.info("Job %s completed (model=%s, %.1fs on %s)",
+        logger.info("Job %s done (model=%s, %.1fs, runner=%s)",
                     job_id, model, elapsed, runner.hostname)
+
+    # ── fast-path (direct proxy, no queue) ───────────────────────────────────
+
+    def try_claim_for_fast_path(
+        self, model: str, allowed_runner_ids: list[int] | None = None
+    ) -> Optional[RunnerState]:
+        """Atomically claim an idle runner that already has `model` loaded.
+        Returns the RunnerState with in_flight_job_id set, or None if no
+        suitable runner is available (caller should fall back to the queue).
+
+        Only matches already-loaded runners (steps 1+2 of _pick_runner).
+        A swap is slow — let the queue handle those."""
+        # Pinned runner first
+        for r in self._runners.values():
+            if r.pinned_model != model:
+                continue
+            if r.draining or not r.is_idle or r.current_model != model:
+                continue
+            if allowed_runner_ids and r.runner_id not in allowed_runner_ids:
+                continue
+            r.in_flight_job_id = "__fast_path__"
+            runner_is_idle.labels(runner=r.hostname).set(0)
+            logger.debug("fast-path: claimed pinned runner %s for %s", r.hostname, model)
+            return r
+        # Any idle runner with the model already loaded
+        for r in self._runners.values():
+            if r.pinned_model is not None or r.draining:
+                continue
+            if r.current_model != model or not r.is_idle:
+                continue
+            if allowed_runner_ids and r.runner_id not in allowed_runner_ids:
+                continue
+            r.in_flight_job_id = "__fast_path__"
+            runner_is_idle.labels(runner=r.hostname).set(0)
+            logger.debug("fast-path: claimed runner %s for %s", r.hostname, model)
+            return r
+        return None
+
+    def release_fast_path_claim(self, runner: RunnerState) -> None:
+        if runner.in_flight_job_id == "__fast_path__":
+            runner.in_flight_job_id = None
+            runner_is_idle.labels(runner=runner.hostname).set(1)
+            logger.debug("fast-path: released runner %s", runner.hostname)
 
     # ── submission pre-check ─────────────────────────────────────────────────
 

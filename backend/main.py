@@ -41,9 +41,12 @@ from llm_agent import LLMAgentClient
 # (plans/queue-one-model-per-gpu.md). Default off until UAT soak validates it.
 if os.getenv("SIMPLIFIED_SCHEDULER", "").lower() in ("1", "true", "yes"):
     from scheduler_v2 import SimplifiedScheduler as Scheduler
+    from scheduler_v2 import fastpath_requests_total, fastpath_duration_seconds
     _SCHEDULER_VARIANT = "simplified"
 else:
     from scheduler import Scheduler
+    fastpath_requests_total = None
+    fastpath_duration_seconds = None
     _SCHEDULER_VARIANT = "legacy"
 from queue_routes import router as queue_router, model_router, alias_router
 from library_routes import router as library_router, safety_router
@@ -1595,10 +1598,7 @@ async def proxy_chat_completions(request: Request, runner_id: Optional[int] = No
             _inc_request("/v1/chat/completions", "POST", 503)
             raise HTTPException(503, f"Cloud model error: {e}")
 
-    # ── Local model routing (Ollama) — all requests go through the queue ─
-    # The scheduler handles model loading, VRAM management, and eviction.
-    # For streaming callers the queue result is re-emitted as an OpenAI
-    # streaming response (single content chunk + [DONE]).
+    # ── Local model routing (Ollama) ──────────────────────────────────────
     import uuid as _uuid
 
     pool = app.state.db
@@ -1621,7 +1621,6 @@ async def proxy_chat_completions(request: Request, runner_id: Optional[int] = No
     if not check["ok"]:
         raise HTTPException(422, check)
 
-    job_id = str(_uuid.uuid4())[:12]
     queue_request = {
         "messages": body.get("messages", []),
     }
@@ -1630,6 +1629,70 @@ async def proxy_chat_completions(request: Request, runner_id: Optional[int] = No
         if key in body:
             queue_request[key] = body[key]
 
+    # ── Fast path: direct proxy when model is already loaded + runner idle ─
+    # Bypasses the job queue entirely — no DB write, no poll loop, real streaming.
+    # Falls through to the queue when no idle runner has the model loaded (swap needed).
+    if fastpath_requests_total is not None and hasattr(scheduler, "try_claim_for_fast_path"):
+        fp_runner = scheduler.try_claim_for_fast_path(
+            model, app_allowed_runners if app_allowed_runners else None
+        )
+        if fp_runner is not None:
+            t0_fp = time.time()
+            try:
+                fp_client = await _get_runner_client(pool, runner_id=fp_runner.runner_id)
+                fp_messages, fp_kwargs = await scheduler._apply_runner_params(
+                    queue_request, model, fp_runner
+                )
+                logger.info(
+                    "fast-path: %s on %s (stream=%s, msgs=%d)",
+                    model, fp_runner.hostname, stream, len(fp_messages),
+                )
+            except Exception:
+                scheduler.release_fast_path_claim(fp_runner)
+                logger.exception("fast-path setup failed for %s — falling back to queue", model)
+                fp_runner = None  # fall through
+
+            if fp_runner is not None:
+                if stream:
+                    async def _fast_stream():
+                        nonlocal t0_fp
+                        try:
+                            stream_ctx = await fp_client.chat(
+                                messages=fp_messages, model=model, stream=True, **fp_kwargs
+                            )
+                            async with stream_ctx as resp:
+                                async for chunk in resp.aiter_bytes():
+                                    yield chunk
+                            elapsed = time.time() - t0_fp
+                            fastpath_duration_seconds.labels(model=model).observe(elapsed)
+                            fastpath_requests_total.labels(model=model, status="completed").inc()
+                            logger.info("fast-path done: %s on %s (%.1fs)", model, fp_runner.hostname, elapsed)
+                        except Exception:
+                            fastpath_requests_total.labels(model=model, status="failed").inc()
+                            logger.exception("fast-path stream error: %s on %s", model, fp_runner.hostname)
+                        finally:
+                            scheduler.release_fast_path_claim(fp_runner)
+                    return StreamingResponse(_fast_stream(), media_type="text/event-stream")
+                else:
+                    try:
+                        fp_result = await fp_client.chat(
+                            messages=fp_messages, model=model, stream=False, **fp_kwargs
+                        )
+                        elapsed = time.time() - t0_fp
+                        fastpath_duration_seconds.labels(model=model).observe(elapsed)
+                        fastpath_requests_total.labels(model=model, status="completed").inc()
+                        logger.info("fast-path done: %s on %s (%.1fs)", model, fp_runner.hostname, elapsed)
+                        return fp_result
+                    except Exception:
+                        fastpath_requests_total.labels(model=model, status="failed").inc()
+                        logger.exception("fast-path failed: %s on %s", model, fp_runner.hostname)
+                        raise
+                    finally:
+                        scheduler.release_fast_path_claim(fp_runner)
+
+    # ── Queue path: scheduler handles model loading and dispatch ───────────
+    job_id = str(_uuid.uuid4())[:12]
+    logger.info("queue: submitting job %s (model=%s, app_id=%s)", job_id, model, app_id)
     await queue_db.insert_job(pool, job_id, None, app_id, model, queue_request, None)
 
     # Poll until the scheduler completes the job (timeout after 10 min)
