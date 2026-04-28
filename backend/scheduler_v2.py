@@ -405,6 +405,7 @@ class SimplifiedScheduler:
         await self._reconcile_runners()
         idle_counter = 0
         active_tasks: set[asyncio.Task] = set()
+        consecutive_errors = 0
         while self._running:
             try:
                 # Reap completed dispatch tasks so the set doesn't grow unbounded
@@ -480,7 +481,35 @@ class SimplifiedScheduler:
                 break
             except Exception:
                 logger.exception("Scheduler loop error")
+                consecutive_errors += 1
+                # If the loop keeps failing (e.g. pool connection reset that
+                # asyncpg can't auto-recover from), release the advisory lock
+                # explicitly so the standby pod can take over immediately —
+                # no pod restart required. lock_conn is a dedicated connection
+                # separate from the pool; it's usually still alive when the pool
+                # breaks, so the unlock should succeed.
+                if consecutive_errors >= 10:
+                    logger.critical(
+                        "Scheduler loop: %d consecutive errors — releasing advisory "
+                        "lock so standby pod can take over",
+                        consecutive_errors,
+                    )
+                    if self.lock_conn:
+                        try:
+                            await self.lock_conn.execute(
+                                "SELECT pg_advisory_unlock($1)", SCHEDULER_LOCK_ID
+                            )
+                        except Exception:
+                            logger.warning(
+                                "Failed to release advisory lock explicitly — "
+                                "standby pod will acquire it on next pod restart"
+                            )
+                        self.lock_conn = None
+                    self._running = False
+                    break
                 await asyncio.sleep(5)
+            else:
+                consecutive_errors = 0
 
     async def _dispatch_batch(
         self,
