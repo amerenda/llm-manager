@@ -249,50 +249,96 @@ async def lifespan(app: FastAPI):
     else:
         logger.info("Scheduler skipped — another pod holds the lock")
 
-    # Background task: retry lock acquisition if scheduler isn't running
+    # Background watchdog: acquire the advisory lock (if not held) and start the
+    # scheduler. Runs on ALL pods for the lifetime of the process so that:
+    # 1. A standby pod picks up the lock when the primary loses it.
+    # 2. The primary pod can recover if its own lock_conn dies while idle.
+    #
+    # Root-cause of the 2026-04-28 outage: the old _retry_lock returned after
+    # first acquiring the lock, leaving the scheduler unmonitored. When the
+    # primary pod's lock_conn was eventually closed by PostgreSQL (idle
+    # connection cleanup), the advisory lock was released but no pod attempted
+    # to re-acquire it. The standby pod's _retry_lock had a dead lock_conn from
+    # an earlier disconnect and silently ate every exception, making it
+    # permanently stuck. Result: scheduler dead on all pods, jobs stuck queued.
     async def _retry_lock():
-        nonlocal got_lock
-        while not DISABLE_SCHEDULER and not got_lock:
+        nonlocal got_lock, lock_conn
+        while not DISABLE_SCHEDULER:
             await asyncio.sleep(15)
+
+            # If we hold the lock and the scheduler is running, nothing to do.
+            if got_lock and scheduler._running:
+                continue
+
+            # We either don't hold the lock, or the scheduler stopped. In either
+            # case, try to acquire the lock on a fresh connection — the existing
+            # lock_conn may be dead (that's often why we're here).
+            if got_lock and not scheduler._running:
+                logger.warning(
+                    "Scheduler stopped unexpectedly — releasing lock state "
+                    "and attempting to re-acquire"
+                )
+                got_lock = False
+
+            fresh_conn = None
             try:
-                acquired = await lock_conn.fetchval(
+                fresh_conn = await asyncpg.connect(DATABASE_URL)
+                acquired = await fresh_conn.fetchval(
                     "SELECT pg_try_advisory_lock($1)", SCHEDULER_LOCK_ID
                 )
-                if acquired:
-                    got_lock = True
-                    scheduler.lock_conn = lock_conn
-                    # Recover jobs the previous lock holder may have orphaned
-                    # mid-swap/mid-run. Without this, jobs stuck in
-                    # 'loading_model' or 'running' are never picked up since
-                    # get_pending_jobs only returns 'queued' statuses.
-                    try:
-                        recovered = await queue_db.recover_stuck_jobs(pool)
-                        if recovered:
-                            logger.warning(
-                                "Recovered %d jobs stuck in loading_model/running → queued",
-                                recovered,
-                            )
-                    except Exception:
-                        logger.exception("recover_stuck_jobs failed on lock retry")
-                    # Same for background_ops (pull/update/sync): asyncio tasks
-                    # don't survive a pod restart, so any op still marked
-                    # 'running' from the previous pod is a zombie.
-                    try:
-                        orphaned = await db.recover_stuck_ops(pool)
-                        if orphaned:
-                            logger.warning(
-                                "Marked %d background ops as failed (orphaned by previous pod)",
-                                orphaned,
-                            )
-                    except Exception:
-                        logger.exception("recover_stuck_ops failed on lock retry")
-                    scheduler.start()
-                    logger.info("Queue scheduler started (advisory lock acquired on retry)")
-                    return
-            except Exception:
-                pass
+                if not acquired:
+                    # Another pod holds the lock — check again next tick.
+                    await fresh_conn.close()
+                    continue
 
-    lock_retry_task = asyncio.create_task(_retry_lock()) if not got_lock and not DISABLE_SCHEDULER else None
+                # We acquired the lock. Replace the old (possibly dead) lock_conn.
+                try:
+                    await lock_conn.close()
+                except Exception:
+                    pass
+                lock_conn = fresh_conn
+                app.state.lock_conn = lock_conn
+                scheduler.lock_conn = lock_conn
+                got_lock = True
+                fresh_conn = None  # don't double-close in finally
+
+                # Recover jobs the previous lock holder may have orphaned
+                # mid-swap/mid-run. Without this, jobs stuck in
+                # 'loading_model' or 'running' are never picked up since
+                # get_pending_jobs only returns 'queued' statuses.
+                try:
+                    recovered = await queue_db.recover_stuck_jobs(pool)
+                    if recovered:
+                        logger.warning(
+                            "Recovered %d jobs stuck in loading_model/running → queued",
+                            recovered,
+                        )
+                except Exception:
+                    logger.exception("recover_stuck_jobs failed on lock retry")
+                # Same for background_ops (pull/update/sync): asyncio tasks
+                # don't survive a pod restart, so any op still marked
+                # 'running' from the previous pod is a zombie.
+                try:
+                    orphaned = await db.recover_stuck_ops(pool)
+                    if orphaned:
+                        logger.warning(
+                            "Marked %d background ops as failed (orphaned by previous pod)",
+                            orphaned,
+                        )
+                except Exception:
+                    logger.exception("recover_stuck_ops failed on lock retry")
+                scheduler.start()
+                logger.info("Queue scheduler started (advisory lock acquired on retry)")
+
+            except Exception:
+                logger.exception("lock_retry: error attempting to acquire scheduler lock")
+                if fresh_conn is not None:
+                    try:
+                        await fresh_conn.close()
+                    except Exception:
+                        pass
+
+    lock_retry_task = asyncio.create_task(_retry_lock()) if not DISABLE_SCHEDULER else None
 
     # Track which label sets we've written so we can remove stale ones on refresh
     _alias_info_labels: set[tuple] = set()

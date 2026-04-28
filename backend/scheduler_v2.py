@@ -265,12 +265,17 @@ class SimplifiedScheduler:
         if not self.lock_conn:
             return True  # single-replica or no lock configured
         try:
-            held = await self.lock_conn.fetchval(
-                "SELECT pg_try_advisory_lock($1)", SCHEDULER_LOCK_ID
-            )
-            return bool(held)
+            # Simple liveness check — if the connection is alive, the session-level
+            # advisory lock is still held. Don't call pg_try_advisory_lock here:
+            # it increments the lock nesting count on every call (advisory locks are
+            # reentrant within a session), bloating it to thousands after hours of
+            # operation. When the connection eventually dies, PostgreSQL releases all
+            # nested acquisitions at once and the lock becomes free — meaning the
+            # standby pod can acquire it.
+            await self.lock_conn.fetchval("SELECT 1")
+            return True
         except Exception:
-            logger.warning("Failed to verify scheduler lock")
+            logger.warning("Failed to verify scheduler lock — connection lost")
             return False
 
     # ── runner state management ──────────────────────────────────────────────
