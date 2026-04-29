@@ -222,8 +222,17 @@ async def lifespan(app: FastAPI):
     await queue_db.init_queue_tables(pool)
     logger.info("Database connected: %s", DATABASE_URL)
 
-    # Acquire advisory lock for scheduler — only one pod runs it
-    lock_conn = await asyncpg.connect(DATABASE_URL)
+    # Acquire advisory lock for scheduler — only one pod runs it.
+    # TCP keepalives ensure the server-side session dies within ~90s if the
+    # client disappears (network blip). Without this, PostgreSQL keeps the
+    # zombie session alive for hours, holding the advisory lock and silently
+    # blocking all watchdog re-acquisition attempts.
+    _LOCK_CONN_KA = {"server_settings": {
+        "tcp_keepalives_idle": "60",
+        "tcp_keepalives_interval": "10",
+        "tcp_keepalives_count": "3",
+    }}
+    lock_conn = await asyncpg.connect(DATABASE_URL, **_LOCK_CONN_KA)
     got_lock = await lock_conn.fetchval(
         "SELECT pg_try_advisory_lock($1)", SCHEDULER_LOCK_ID
     )
@@ -282,7 +291,7 @@ async def lifespan(app: FastAPI):
 
             fresh_conn = None
             try:
-                fresh_conn = await asyncpg.connect(DATABASE_URL)
+                fresh_conn = await asyncpg.connect(DATABASE_URL, **_LOCK_CONN_KA)
                 acquired = await fresh_conn.fetchval(
                     "SELECT pg_try_advisory_lock($1)", SCHEDULER_LOCK_ID
                 )
