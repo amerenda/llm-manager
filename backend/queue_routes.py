@@ -126,50 +126,58 @@ async def submit_job(body: QueueJobRequest, request: Request,
         raise HTTPException(503, "Queue submissions disabled — scheduler is not running")
     pool = _get_pool(request)
     scheduler = _get_scheduler(request)
-    app_id = await _resolve_app(request, authorization)
-    allowed_runner_ids = None
-    if app_id is not None:
-        app_row = await db.get_app_by_id(pool, app_id)
-        allowed_runner_ids = list((app_row or {}).get("allowed_runner_ids") or [])
+    try:
+        app_id = await _resolve_app(request, authorization)
+        allowed_runner_ids = None
+        if app_id is not None:
+            app_row = await db.get_app_by_id(pool, app_id)
+            allowed_runner_ids = list((app_row or {}).get("allowed_runner_ids") or [])
 
-    # Category access check
-    if app_id is not None:
-        perms = await queue_db.get_app_category_perms(pool, app_id)
-        if perms["allowed_categories"] or perms["excluded_categories"]:
-            model_settings = await queue_db.get_model_settings(pool, body.model)
-            model_cats = list(model_settings.get("categories") or [])
-            if not _model_passes_category_filter(model_cats, perms["allowed_categories"], perms["excluded_categories"]):
-                raise HTTPException(403, "Model not accessible under app category restrictions")
+        # Category access check
+        if app_id is not None:
+            perms = await queue_db.get_app_category_perms(pool, app_id)
+            if perms["allowed_categories"] or perms["excluded_categories"]:
+                model_settings = await queue_db.get_model_settings(pool, body.model)
+                model_cats = list(model_settings.get("categories") or [])
+                if not _model_passes_category_filter(
+                    model_cats, perms["allowed_categories"], perms["excluded_categories"]
+                ):
+                    raise HTTPException(403, "Model not accessible under app category restrictions")
 
-    # Pre-check VRAM
-    check = await scheduler.check_submission(body.model, allowed_runner_ids=allowed_runner_ids)
-    if not check["ok"]:
-        raise HTTPException(422, check)
-    await _check_rate_limit(pool, app_id)
+        # Pre-check VRAM
+        check = await scheduler.check_submission(body.model, allowed_runner_ids=allowed_runner_ids)
+        if not check["ok"]:
+            raise HTTPException(422, check)
+        await _check_rate_limit(pool, app_id)
 
-    job_id = str(uuid.uuid4())[:12]
-    priority = await _priority_for_app(pool, app_id)
-    await queue_db.insert_job(
-        pool, job_id, None, app_id, body.model,
-        body.model_dump(exclude={"model", "metadata"}),
-        body.metadata,
-        priority=priority,
-    )
+        job_id = str(uuid.uuid4())[:12]
+        priority = await _priority_for_app(pool, app_id)
+        await queue_db.insert_job(
+            pool, job_id, None, app_id, body.model,
+            body.model_dump(exclude={"model", "metadata"}),
+            body.metadata,
+            priority=priority,
+        )
 
-    # Count position in queue
-    pending = await queue_db.get_pending_jobs(pool)
-    position = next((i for i, j in enumerate(pending) if j["id"] == job_id), len(pending))
+        # Count position in queue
+        pending = await queue_db.get_pending_jobs(pool)
+        position = next((i for i, j in enumerate(pending) if j["id"] == job_id), len(pending))
 
-    resp = QueueJobResponse(
-        job_id=job_id,
-        status="queued",
-        model=body.model,
-        position=position,
-    )
-    if check.get("warning"):
-        resp.warning = check["message"]
-        resp.evicting = check.get("evicting")
-    return resp
+        resp = QueueJobResponse(
+            job_id=job_id,
+            status="queued",
+            model=body.model,
+            position=position,
+        )
+        if check.get("warning"):
+            resp.warning = check["message"]
+            resp.evicting = check.get("evicting")
+        return resp
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("queue submit failed model=%s", getattr(body, "model", ""))
+        raise HTTPException(500, detail=f"queue submit failed: {type(e).__name__}: {e}") from e
 
 
 @router.post("/submit-batch", response_model=QueueBatchResponse)
