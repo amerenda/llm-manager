@@ -55,6 +55,19 @@ class TestPickRunner:
         sched = _make_sched([a])
         assert sched._pick_runner("qwen3:14b") is None
 
+    def test_pinned_loaded_without_download_still_picked(self):
+        # Regression: heartbeat downloaded_models can be stale/missing a tag.
+        # If the model is already loaded on an idle pinned runner, use it.
+        a = RunnerState(
+            runner_id=1,
+            hostname="a",
+            gpu_total_gb=17,
+            pinned_model="qwen3:14b",
+            current_model="qwen3:14b",
+        )
+        sched = _make_sched([a])
+        assert sched._pick_runner("qwen3:14b") is a
+
     def test_already_loaded_idle_wins_over_idle_empty(self):
         # Rule 2: current_model match bypasses the downloaded_models check
         # (loaded implies downloaded).

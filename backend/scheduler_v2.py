@@ -607,12 +607,14 @@ class SimplifiedScheduler:
             return r.draining or r.is_ollama_down or not _eligible(r)
 
         # 1. Pinned match (skip draining/down pinned runners — wait for drain to clear)
+        # If the model is already loaded, trust live scheduler state even if
+        # downloaded_models from heartbeat is stale/missing that tag.
         pinned = [r for r in self._runners.values() if r.pinned_model == model]
         if pinned:
             for r in pinned:
                 if _skip(r):
                     continue
-                if r.is_idle and r.has_downloaded(model):
+                if r.is_idle and (r.current_model == model or r.has_downloaded(model)):
                     return r
             return None  # pinned but busy / draining / down / not eligible — wait
 
