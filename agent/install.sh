@@ -143,7 +143,7 @@ stop_host_ollama() {
             read -rp "Stop and disable it now? [y/N] " ans
             case "$ans" in
                 y|Y|yes) ;;
-                *) die "Refusing to proceed while host Ollama is running. Re-run with --migrate to auto-stop, or --host-ollama to skip managed mode." ;;
+                *) die "Refusing to proceed while host Ollama is running. Re-run with --migrate to auto-stop." ;;
             esac
         fi
         log "Stopping and disabling systemd ollama.service..."

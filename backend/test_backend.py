@@ -207,6 +207,24 @@ class TestAuthEnforcement:
         resp = unauthed_client.get("/api/cloud/models")
         assert resp.status_code == 401
 
+    @patch("main.db.get_app_by_api_key", new_callable=AsyncMock)
+    def test_app_key_cannot_access_admin_api(self, mock_get_app, unauthed_client):
+        mock_get_app.return_value = {"id": 1, "status": "active"}
+        resp = unauthed_client.get(
+            "/api/apps",
+            headers={"Authorization": "Bearer test-app-key"},
+        )
+        assert resp.status_code == 401
+
+    @patch("main.db.get_app_by_api_key", new_callable=AsyncMock)
+    def test_app_key_still_allowed_for_v1_routes(self, mock_get_app, unauthed_client):
+        mock_get_app.return_value = {"id": 1, "status": "active"}
+        resp = unauthed_client.get(
+            "/v1/models",
+            headers={"Authorization": "Bearer test-app-key"},
+        )
+        assert resp.status_code == 200
+
 
 class TestGpuEndpoint:
     def test_gpu_returns_zeros_when_no_runner(self, client):

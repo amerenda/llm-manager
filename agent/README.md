@@ -134,5 +134,6 @@ All routes except `/health` and `/metrics` require `X-Agent-PSK`.
 - `POST /v1/models/pull` — Ollama pull, streams NDJSON progress
 - `DELETE /v1/models/{model}` — unload from VRAM
 - `POST /v1/ollama/restart` — restart Ollama container (clears stuck VRAM)
-- `POST /v1/ollama/config` — rewrite `ollama.env` + recreate container
+- `GET /v1/ollama/settings` — read current Ollama tunables + allowlist
+- `PUT /v1/ollama/settings` — rewrite `ollama.env` + recreate container
 - `GET /metrics` — Prometheus (no PSK)

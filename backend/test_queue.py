@@ -205,6 +205,7 @@ class TestUpdateJobStatus:
         _run(queue_db.update_job_status(pool, "j1", "completed", result={"choices": []}))
         sql = conn.execute.call_args[0][0]
         assert "completed_at" in sql
+        assert "status NOT IN ('completed', 'failed', 'cancelled')" in sql
         # Args: sql, job_id, status, result_json, error
         args = conn.execute.call_args[0]
         assert json.loads(args[3]) == {"choices": []}
@@ -221,6 +222,7 @@ class TestUpdateJobStatus:
         _run(queue_db.update_job_status(pool, "j1", "cancelled"))
         sql = conn.execute.call_args[0][0]
         assert "completed_at" in sql
+        assert "status NOT IN ('completed', 'failed', 'cancelled')" in sql
 
     def test_update_to_other_status(self):
         pool, conn = _make_mock_pool()

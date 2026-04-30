@@ -60,7 +60,7 @@ from cloud_providers import (
 import api_keys
 from auth import (
     GITHUB_CLIENT_ID, COOKIE_NAME, SESSION_TTL,
-    create_session_token, get_current_user, require_admin,
+    create_session_token, get_current_user,
     exchange_code_for_user,
 )
 
@@ -502,6 +502,15 @@ _PUBLIC_PREFIXES = (
     "/api/library/refresh",    # CronJob-triggered Ollama library refresh (no secrets)
 )
 
+_APP_KEY_AUTH_PREFIXES = (
+    "/v1/",
+    "/api/apps/heartbeat",
+    "/api/queue/submit",
+    "/api/queue/jobs/",
+    "/api/queue/batches/",
+    "/api/profiles/list",
+)
+
 
 @app.middleware("http")
 async def admin_auth_middleware(request: Request, call_next):
@@ -524,9 +533,9 @@ async def admin_auth_middleware(request: Request, call_next):
     if not path.startswith("/api/"):
         return await call_next(request)
 
-    # Allow through if request has a valid app API key
+    # Allow app API key auth only on explicitly app-authenticated routes.
     auth_header = request.headers.get("Authorization", "")
-    if auth_header.startswith("Bearer "):
+    if path.startswith(_APP_KEY_AUTH_PREFIXES) and auth_header.startswith("Bearer "):
         api_key = auth_header[7:].strip()
         app_row = await db.get_app_by_api_key(request.app.state.db, api_key)
         if app_row and app_row.get("status") == "active":

@@ -10,12 +10,14 @@ import ipaddress
 import json
 import logging
 import os
+import random
 import shutil
 import socket
 import time
 import uuid
 from pathlib import Path
 from typing import AsyncGenerator, Optional
+from urllib.parse import urlparse
 
 import httpx
 import psutil
@@ -108,6 +110,7 @@ except Exception:
 
 # PSK auth + self-registration
 AGENT_PSK = os.environ.get("LLM_MANAGER_AGENT_PSK", "")
+ALLOW_INSECURE_NO_PSK = os.environ.get("ALLOW_INSECURE_NO_PSK", "").lower() in ("1", "true", "yes")
 BACKEND_URL = os.environ.get("BACKEND_URL", "")
 AGENT_VERSION = os.environ.get("AGENT_VERSION", "unknown")
 COMPOSE_DIR = os.environ.get("COMPOSE_DIR", "")  # host path — used in docker compose -f
@@ -120,6 +123,7 @@ def _detect_host_ip() -> str:
     Works correctly when the agent runs with network_mode: host.
     Falls back to hostname if detection fails.
     """
+    s = None
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
@@ -127,7 +131,8 @@ def _detect_host_ip() -> str:
     except Exception:
         return socket.gethostname()
     finally:
-        s.close()
+        if s is not None:
+            s.close()
 
 
 TLS_CERT_DIR = os.environ.get("TLS_CERT_DIR", "/data/tls")
@@ -219,6 +224,16 @@ _ensure_tls_cert(_DETECTED_IP)
 AGENT_ADDRESS = os.environ.get("AGENT_ADDRESS") or f"https://{_DETECTED_IP}:8090"
 
 _RUNNER_ID: int | None = None
+_register_retry_task: Optional[asyncio.Task] = None
+
+
+def _agent_auth_headers() -> dict:
+    return {"X-Agent-PSK": AGENT_PSK}
+
+
+def _agent_address_port() -> int:
+    parsed = urlparse(AGENT_ADDRESS)
+    return parsed.port or 8090
 
 # ── Prometheus metrics ────────────────────────────────────────────────────────
 
@@ -259,10 +274,10 @@ async def _register_once() -> bool:
                 json={
                     "hostname": NODE,
                     "address": AGENT_ADDRESS,
-                    "port": int(AGENT_ADDRESS.rsplit(":", 1)[-1]) if ":" in AGENT_ADDRESS.rsplit("/", 1)[-1] else 8090,
+                    "port": _agent_address_port(),
                     "capabilities": caps,
                 },
-                headers={"X-Agent-PSK": AGENT_PSK} if AGENT_PSK else {},
+                headers=_agent_auth_headers(),
             )
             r.raise_for_status()
             _RUNNER_ID = r.json()["runner_id"]
@@ -283,14 +298,25 @@ async def _register_retry_loop():
     Backoff starts at 5s, doubles up to 5min, then stays there. Stops as
     soon as _RUNNER_ID is set."""
     delay = 5.0
+    global _register_retry_task
     while _RUNNER_ID is None:
         await asyncio.sleep(delay)
         ok = await _register_once()
         if ok:
             # Fire an immediate heartbeat so the backend sees fresh state now
             asyncio.create_task(_heartbeat_once())
+            _register_retry_task = None
             return
+        # Jitter avoids synchronized retries after backend outages.
         delay = min(delay * 2, 300.0)
+        delay = random.uniform(0.0, delay)
+
+
+def _ensure_register_retry_task() -> None:
+    global _register_retry_task
+    if _register_retry_task and not _register_retry_task.done():
+        return
+    _register_retry_task = asyncio.create_task(_register_retry_loop())
 
 
 def _check_ollama_compose_managed() -> None:
@@ -322,12 +348,17 @@ def _check_ollama_compose_managed() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    if not AGENT_PSK and not ALLOW_INSECURE_NO_PSK:
+        raise RuntimeError(
+            "LLM_MANAGER_AGENT_PSK is required. "
+            "Set ALLOW_INSECURE_NO_PSK=true only for local development."
+        )
     _check_ollama_compose_managed()
     ok = await _register_once()
     if not ok:
         # Background retry — the periodic heartbeat loop already skips when
         # _RUNNER_ID is None, but without this loop the agent never recovers.
-        asyncio.create_task(_register_retry_loop())
+        _ensure_register_retry_task()
 
     # Fire an eager heartbeat immediately so the backend has fresh state
     # (downloaded_models, loaded_models, GPU counters) right after register,
@@ -388,14 +419,16 @@ async def _heartbeat_once():
         _ensure_tls_cert(_DETECTED_IP)
     except Exception:
         pass
+    global _RUNNER_ID
     try:
         caps = await _build_capabilities()
         async with httpx.AsyncClient(timeout=5) as c:
             resp = await c.post(
                 f"{BACKEND_URL}/api/runners/heartbeat",
                 json={"runner_id": _RUNNER_ID, "capabilities": caps},
-                headers={"X-Agent-PSK": AGENT_PSK} if AGENT_PSK else {},
+                headers=_agent_auth_headers(),
             )
+            resp.raise_for_status()
             try:
                 data = resp.json()
                 if data.get("update_to") and data["update_to"] != AGENT_VERSION:
@@ -406,6 +439,12 @@ async def _heartbeat_once():
                         logger.info("Update available: %s -> %s (manual trigger required)", AGENT_VERSION, data["update_to"])
             except Exception:
                 pass
+    except httpx.HTTPStatusError as e:
+        code = e.response.status_code
+        logger.warning("Heartbeat rejected (%d): %s", code, e.response.text[:200])
+        if code in (401, 403, 404, 410):
+            _RUNNER_ID = None
+            _ensure_register_retry_task()
     except Exception as e:
         logger.debug("Heartbeat failed: %s", e)
 
@@ -419,22 +458,26 @@ async def _heartbeat_loop():
 _updating = False
 
 
-def _write_env_tag(env_path: str, tag: str):
-    """Set AGENT_IMAGE_TAG in the .env file so compose uses the pinned tag."""
+def _upsert_env_key(env_path: str, key: str, value: str) -> None:
     lines = []
     found = False
     if os.path.isfile(env_path):
         with open(env_path) as f:
             for line in f:
-                if line.startswith("AGENT_IMAGE_TAG="):
-                    lines.append(f"AGENT_IMAGE_TAG={tag}\n")
+                if line.startswith(f"{key}="):
+                    lines.append(f"{key}={value}\n")
                     found = True
                 else:
                     lines.append(line)
     if not found:
-        lines.append(f"AGENT_IMAGE_TAG={tag}\n")
+        lines.append(f"{key}={value}\n")
     with open(env_path, "w") as f:
         f.writelines(lines)
+
+
+def _write_env_tag(env_path: str, tag: str):
+    """Set AGENT_IMAGE_TAG in the .env file so compose uses the pinned tag."""
+    _upsert_env_key(env_path, "AGENT_IMAGE_TAG", tag)
 
 
 def _get_own_image_prefix() -> str:
@@ -1026,6 +1069,8 @@ class ImageGenRequest(BaseModel):
 
 @app.post("/v1/images/generations")
 async def generate_image(req: ImageGenRequest):
+    if req.n != 1:
+        raise HTTPException(status_code=400, detail="Only n=1 is supported")
     t0 = time.time()
     requests_total.labels(node=NODE, endpoint="/v1/images/generations", model=req.model).inc()
 
@@ -1491,20 +1536,7 @@ def _write_ollama_image_tag(tag: str) -> None:
         raise RuntimeError("COMPOSE_DIR not configured")
     key = _get_ollama_tag_env_key()
     env_file = os.path.join(local_dir, ".env")
-    lines = []
-    found = False
-    if os.path.isfile(env_file):
-        with open(env_file) as f:
-            for line in f:
-                if line.startswith(f"{key}="):
-                    lines.append(f"{key}={tag}\n")
-                    found = True
-                else:
-                    lines.append(line)
-    if not found:
-        lines.append(f"{key}={tag}\n")
-    with open(env_file, "w") as f:
-        f.writelines(lines)
+    _upsert_env_key(env_file, key, tag)
 
 
 def _ollama_image_commit(image: str) -> Optional[str]:

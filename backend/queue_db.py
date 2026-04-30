@@ -124,6 +124,7 @@ async def update_job_status(pool: asyncpg.Pool, job_id: str, status: str,
             await conn.execute("""
                 UPDATE queue_jobs SET status = $2, result = $3::jsonb, error = $4, completed_at = now()
                 WHERE id = $1
+                AND status NOT IN ('completed', 'failed', 'cancelled')
             """, job_id, status, json.dumps(result) if result else None, error)
         else:
             if runner_id is not None and error is not None:

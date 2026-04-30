@@ -15,7 +15,7 @@ from typing import Optional
 
 import httpx
 import jwt
-from fastapi import HTTPException, Request
+from fastapi import Request
 
 logger = logging.getLogger(__name__)
 
@@ -59,16 +59,6 @@ def get_current_user(request: Request) -> Optional[str]:
     if not payload:
         return None
     return payload.get("sub")
-
-
-def require_admin(request: Request) -> str:
-    """FastAPI dependency: require authenticated admin user."""
-    user = get_current_user(request)
-    if not user:
-        raise HTTPException(401, "Not authenticated")
-    if user not in GITHUB_ALLOWED_USERS:
-        raise HTTPException(403, "Forbidden")
-    return user
 
 
 async def exchange_code_for_user(code: str) -> Optional[str]:
