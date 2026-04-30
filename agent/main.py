@@ -412,6 +412,7 @@ async def _heartbeat_once():
     """One heartbeat POST. Silently skips if not yet registered or no backend.
     Extracted so both the periodic loop and the eager post-register call go
     through the same code path."""
+    global _RUNNER_ID
     if not _RUNNER_ID or not BACKEND_URL:
         return
     # Auto-rotate TLS cert if expiring within 30 days
@@ -419,7 +420,6 @@ async def _heartbeat_once():
         _ensure_tls_cert(_DETECTED_IP)
     except Exception:
         pass
-    global _RUNNER_ID
     try:
         caps = await _build_capabilities()
         async with httpx.AsyncClient(timeout=5) as c:
