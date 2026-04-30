@@ -231,6 +231,13 @@ class TestCheckSubmission:
         result = _run(sched.check_submission("qwen3:14b"))
         assert result["ok"] is True
 
+    def test_allowed_runner_filter_no_candidates_returns_unschedulable(self):
+        a = RunnerState(runner_id=1, hostname="a", gpu_total_gb=17)
+        sched = _make_sched([a])
+        result = _run(sched.check_submission("qwen3:14b", allowed_runner_ids=[99]))
+        assert result["ok"] is False
+        assert result["error"] == "no_schedulable_runners"
+
 
 # ── loaded_models property compat ────────────────────────────────────────────
 

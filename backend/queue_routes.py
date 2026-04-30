@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from fastapi.responses import StreamingResponse
 
 import queue_db
+import db
 from queue_models import (
     QueueJobRequest, QueueBatchRequest, QueueJobResponse,
     QueueBatchResponse, QueueJobResult, QueueBatchStatus,
@@ -126,7 +127,10 @@ async def submit_job(body: QueueJobRequest, request: Request,
     pool = _get_pool(request)
     scheduler = _get_scheduler(request)
     app_id = await _resolve_app(request, authorization)
-    await _check_rate_limit(pool, app_id)
+    allowed_runner_ids = None
+    if app_id is not None:
+        app_row = await db.get_app_by_id(pool, app_id)
+        allowed_runner_ids = list((app_row or {}).get("allowed_runner_ids") or [])
 
     # Category access check
     if app_id is not None:
@@ -138,9 +142,10 @@ async def submit_job(body: QueueJobRequest, request: Request,
                 raise HTTPException(403, "Model not accessible under app category restrictions")
 
     # Pre-check VRAM
-    check = await scheduler.check_submission(body.model)
+    check = await scheduler.check_submission(body.model, allowed_runner_ids=allowed_runner_ids)
     if not check["ok"]:
         raise HTTPException(422, check)
+    await _check_rate_limit(pool, app_id)
 
     job_id = str(uuid.uuid4())[:12]
     priority = await _priority_for_app(pool, app_id)
@@ -176,7 +181,10 @@ async def submit_batch(body: QueueBatchRequest, request: Request,
     pool = _get_pool(request)
     scheduler = _get_scheduler(request)
     app_id = await _resolve_app(request, authorization)
-    await _check_rate_limit(pool, app_id)
+    allowed_runner_ids = None
+    if app_id is not None:
+        app_row = await db.get_app_by_id(pool, app_id)
+        allowed_runner_ids = list((app_row or {}).get("allowed_runner_ids") or [])
 
     batch_id = f"batch_{str(uuid.uuid4())[:8]}"
     jobs = []
@@ -198,14 +206,16 @@ async def submit_batch(body: QueueBatchRequest, request: Request,
                 raise HTTPException(403, f"Model {job_req.model} not accessible under app category restrictions")
 
         # Pre-check VRAM for each unique model
-        check = await scheduler.check_submission(job_req.model)
+        check = await scheduler.check_submission(job_req.model, allowed_runner_ids=allowed_runner_ids)
         if not check["ok"]:
             raise HTTPException(422, {
                 "error": check["error"],
                 "message": f"Model {job_req.model}: {check['message']}",
                 "batch_id": batch_id,
             })
+    await _check_rate_limit(pool, app_id)
 
+    for job_req in body.jobs:
         job_id = str(uuid.uuid4())[:12]
         await queue_db.insert_job(
             pool, job_id, batch_id, app_id, job_req.model,

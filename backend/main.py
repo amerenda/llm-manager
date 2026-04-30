@@ -2036,6 +2036,9 @@ async def list_apps():
         a_copy["excluded_categories"] = list(a_copy["excluded_categories"] or [])
         a_copy["allowed_models"] = await db.get_app_allowed_models(app.state.db, a_copy["id"])
         a_copy["excluded_models"] = await db.get_app_excluded_models(app.state.db, a_copy["id"])
+        limits = await queue_db.get_rate_limit(app.state.db, a_copy["id"])
+        a_copy["max_queue_depth"] = int(limits.get("max_queue_depth", 50))
+        a_copy["max_jobs_per_minute"] = int(limits.get("max_jobs_per_minute", 10))
         result.append(a_copy)
     return result
 
@@ -2159,6 +2162,11 @@ class AppPermissionsRequest(BaseModel):
     excluded_categories: Optional[list[str]] = None
 
 
+class AppRateLimitsRequest(BaseModel):
+    max_queue_depth: int
+    max_jobs_per_minute: int
+
+
 @app.patch("/api/apps/{app_id}/permissions")
 async def update_app_permissions_endpoint(app_id: int, req: AppPermissionsRequest):
     """Update permissions for an app."""
@@ -2169,6 +2177,24 @@ async def update_app_permissions_endpoint(app_id: int, req: AppPermissionsReques
     )
     if not found:
         raise HTTPException(404, "App not found")
+    return {"ok": True}
+
+
+@app.put("/api/apps/{app_id}/rate-limits")
+async def update_app_rate_limits_endpoint(app_id: int, req: AppRateLimitsRequest):
+    if req.max_queue_depth < 1:
+        raise HTTPException(422, "max_queue_depth must be >= 1")
+    if req.max_jobs_per_minute < 1:
+        raise HTTPException(422, "max_jobs_per_minute must be >= 1")
+    app_row = await db.get_app_by_id(app.state.db, app_id)
+    if not app_row:
+        raise HTTPException(404, "App not found")
+    await queue_db.set_rate_limit(
+        app.state.db,
+        app_id,
+        req.max_queue_depth,
+        req.max_jobs_per_minute,
+    )
     return {"ok": True}
 
 

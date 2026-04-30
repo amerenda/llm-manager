@@ -1,6 +1,6 @@
-import { useState } from 'react'
-import { AppWindow, Plus, Loader2, CheckCircle2, AlertCircle, Copy, Check, Shield, RefreshCw, Cpu, X, Cloud, Server, Trash2, Ban } from 'lucide-react'
-import { useApps, useRegisterApp, useApproveApp, useUpdateAppPermissions, useUpdateAppAllowedModels, useUpdateAppExcludedModels, useModelList, useCloudModels, useRunners, useUpdateAppAllowedRunners, useUpdateAppCategories, useDeleteApp } from '../hooks/useBackend'
+import { Fragment, useState } from 'react'
+import { AppWindow, Plus, Loader2, CheckCircle2, AlertCircle, Copy, Check, Shield, RefreshCw, Cpu, X, Cloud, Server, Trash2, Ban, ChevronDown, ChevronUp } from 'lucide-react'
+import { useApps, useRegisterApp, useApproveApp, useUpdateAppPermissions, useUpdateAppAllowedModels, useUpdateAppExcludedModels, useModelList, useCloudModels, useRunners, useUpdateAppAllowedRunners, useUpdateAppCategories, useDeleteApp, useUpdateAppRateLimits } from '../hooks/useBackend'
 import { StatusDot } from '../components/StatusDot'
 import type { RegisteredApp, Runner } from '../types'
 
@@ -44,6 +44,7 @@ function CopyButton({ text }: { text: string }) {
 
 function ModelRestrictionEditor({ appId, currentModels }: { appId: number; currentModels: string[] }) {
   const [open, setOpen] = useState(false)
+  const [showAvailable, setShowAvailable] = useState(false)
   const [selected, setSelected] = useState<string[]>(currentModels)
   const [customPattern, setCustomPattern] = useState('')
   const updateModels = useUpdateAppAllowedModels()
@@ -141,6 +142,17 @@ function ModelRestrictionEditor({ appId, currentModels }: { appId: number; curre
             </p>
             <p className="text-[10px] text-gray-600 mb-2">Includes models added in the future.</p>
             <div className="flex gap-1.5 flex-wrap">
+              <button
+                onClick={() => setSelected(['*'])}
+                title="Allow all local and cloud models via wildcard"
+                className={`text-xs px-2.5 py-1.5 rounded-lg transition-colors ${
+                  selected.length === 1 && selected[0] === '*'
+                    ? 'bg-brand-900 text-brand-300 border border-brand-700'
+                    : 'bg-gray-800 text-gray-400 hover:bg-gray-700 hover:text-gray-200 border border-transparent'
+                }`}
+              >
+                All models
+              </button>
               {([
                 { id: null, label: 'None', desc: 'No local models (use custom patterns or cloud only)' },
                 { id: '@safe' as const, label: 'Safe only', desc: 'All safe local models, current + future' },
@@ -166,6 +178,23 @@ function ModelRestrictionEditor({ appId, currentModels }: { appId: number; curre
                 )
               })}
             </div>
+          </div>
+
+          <div className="border border-gray-800 rounded-lg p-2">
+            <button
+              onClick={() => setShowAvailable(prev => !prev)}
+              className="w-full flex items-center justify-between text-xs text-gray-400 hover:text-gray-200"
+            >
+              <span>Available models</span>
+              {showAvailable ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+            </button>
+            {showAvailable && (
+              <div className="mt-2 space-y-1 max-h-32 overflow-y-auto">
+                {[...cloudModelList].sort().map((name: string) => (
+                  <div key={name} className="text-[11px] text-gray-500 font-mono">{name}</div>
+                ))}
+              </div>
+            )}
           </div>
 
           {/* Cloud models — individual opt-in */}
@@ -486,6 +515,7 @@ function RunnerAffinityEditor({ appId, currentRunnerIds }: { appId: number; curr
 
 function ModelExclusionEditor({ appId, currentExcluded }: { appId: number; currentExcluded: string[] }) {
   const [open, setOpen] = useState(false)
+  const [showAvailable, setShowAvailable] = useState(false)
   const [selected, setSelected] = useState<string[]>(currentExcluded)
   const [customPattern, setCustomPattern] = useState('')
   const updateExcluded = useUpdateAppExcludedModels()
@@ -551,9 +581,16 @@ function ModelExclusionEditor({ appId, currentExcluded }: { appId: number; curre
             <p className="text-[10px] text-gray-500 uppercase tracking-wide mb-2 flex items-center gap-1">
               <Server className="w-3 h-3" /> Local models
             </p>
-            {localModelNames.length === 0 ? (
+            <button
+              onClick={() => setShowAvailable(prev => !prev)}
+              className="mb-2 text-xs text-gray-500 hover:text-gray-300 flex items-center gap-1"
+            >
+              {showAvailable ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+              {showAvailable ? 'Hide available models' : 'View available models'}
+            </button>
+            {showAvailable && localModelNames.length === 0 ? (
               <p className="text-xs text-gray-600 py-2 text-center">No local models available</p>
-            ) : (
+            ) : showAvailable ? (
               <div className="space-y-1">
                 {localModelNames.sort().map((name: string) => (
                   <label key={name} className="flex items-center gap-2 px-3 py-1.5 rounded-lg hover:bg-gray-800 cursor-pointer">
@@ -567,6 +604,9 @@ function ModelExclusionEditor({ appId, currentExcluded }: { appId: number; curre
                   </label>
                 ))}
               </div>
+            ) : null}
+            {!showAvailable && (
+              <p className="text-xs text-gray-600">Use patterns below, or expand to pick from available models.</p>
             )}
           </div>
 
@@ -633,6 +673,53 @@ function ModelExclusionEditor({ appId, currentExcluded }: { appId: number; curre
   )
 }
 
+function AppRateLimitsEditor({ app }: { app: RegisteredApp }) {
+  const updateLimits = useUpdateAppRateLimits()
+  const [maxQueueDepth, setMaxQueueDepth] = useState<number>(app.max_queue_depth ?? 50)
+  const [maxJobsPerMinute, setMaxJobsPerMinute] = useState<number>(app.max_jobs_per_minute ?? 10)
+
+  function save() {
+    updateLimits.mutate({ appId: app.id, max_queue_depth: maxQueueDepth, max_jobs_per_minute: maxJobsPerMinute })
+  }
+
+  return (
+    <div className="bg-gray-950 border border-gray-800 rounded-lg p-3">
+      <p className="text-xs text-gray-400 mb-2">Queue settings</p>
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+        <label className="text-xs text-gray-500">
+          Max queue depth
+          <input
+            type="number"
+            min={1}
+            value={maxQueueDepth}
+            onChange={e => setMaxQueueDepth(Math.max(1, Number(e.target.value) || 1))}
+            className="mt-1 w-full bg-gray-900 border border-gray-700 rounded px-2 py-1 text-gray-200"
+          />
+        </label>
+        <label className="text-xs text-gray-500">
+          Max jobs per minute
+          <input
+            type="number"
+            min={1}
+            value={maxJobsPerMinute}
+            onChange={e => setMaxJobsPerMinute(Math.max(1, Number(e.target.value) || 1))}
+            className="mt-1 w-full bg-gray-900 border border-gray-700 rounded px-2 py-1 text-gray-200"
+          />
+        </label>
+      </div>
+      <div className="mt-3">
+        <button
+          onClick={save}
+          disabled={updateLimits.isPending}
+          className="text-xs px-3 py-1.5 rounded bg-brand-600 text-white hover:bg-brand-500 disabled:opacity-40"
+        >
+          {updateLimits.isPending ? 'Saving…' : 'Save queue limits'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
 export function Apps() {
   const apps = useApps()
   const register = useRegisterApp()
@@ -643,10 +730,15 @@ export function Apps() {
   const [url, setUrl] = useState('')
   const [generatedKey, setGeneratedKey] = useState<string | null>(null)
   const [regMsg, setRegMsg] = useState<{ type: 'ok' | 'err'; text: string } | null>(null)
+  const [expandedAppIds, setExpandedAppIds] = useState<number[]>([])
 
   const appList = apps.data ?? []
   const pendingApps = appList.filter((a: RegisteredApp) => a.status === 'pending')
   const activeApps = appList.filter((a: RegisteredApp) => a.status !== 'pending')
+
+  function toggleExpanded(appId: number) {
+    setExpandedAppIds(prev => prev.includes(appId) ? prev.filter(id => id !== appId) : [...prev, appId])
+  }
 
   async function handleRegister() {
     const trimName = name.trim()
@@ -697,6 +789,20 @@ export function Apps() {
                 {approve.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <CheckCircle2 className="w-3 h-3" />}
                 Approve
               </button>
+              <button
+                onClick={() => {
+                  if (confirm(`Deny and remove pending app "${a.name}"?`)) {
+                    deleteApp.mutate(a.id)
+                  }
+                }}
+                disabled={deleteApp.isPending}
+                className="ml-2 flex items-center gap-1.5 bg-red-900/50 hover:bg-red-800/60 disabled:opacity-40 text-red-300 text-xs px-3 py-1.5 rounded-lg transition-colors"
+              >
+                {deleteApp.isPending && deleteApp.variables === a.id
+                  ? <Loader2 className="w-3 h-3 animate-spin" />
+                  : <Trash2 className="w-3 h-3" />}
+                Deny
+              </button>
             </div>
           ))}
         </div>
@@ -723,7 +829,8 @@ export function Apps() {
             </thead>
             <tbody>
               {activeApps.map((a: RegisteredApp) => (
-                <tr key={a.id} className="border-b border-gray-800 last:border-0 hover:bg-gray-800/40 transition-colors">
+                <Fragment key={a.id}>
+                <tr className="border-b border-gray-800 hover:bg-gray-800/40 transition-colors">
                   <td className="px-4 py-3">
                     <div className="flex items-center gap-2">
                       <StatusDot online={isOnline(a.last_seen)} />
@@ -732,7 +839,12 @@ export function Apps() {
                       </span>
                     </div>
                   </td>
-                  <td className="px-4 py-3 text-gray-200 font-medium">{a.name}</td>
+                  <td className="px-4 py-3 text-gray-200 font-medium">
+                    <button onClick={() => toggleExpanded(a.id)} className="flex items-center gap-1 hover:text-brand-300">
+                      {expandedAppIds.includes(a.id) ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+                      {a.name}
+                    </button>
+                  </td>
                   <td className="px-4 py-3 text-gray-500 text-xs truncate max-w-xs hidden md:table-cell">
                     {a.base_url}
                   </td>
@@ -754,15 +866,13 @@ export function Apps() {
                         <Shield className="w-3 h-3" />
                         {a.allow_profile_switch ? 'Profiles' : 'No profiles'}
                       </button>
-                      <ModelRestrictionEditor appId={a.id} currentModels={a.allowed_models ?? []} />
-                      <ModelExclusionEditor appId={a.id} currentExcluded={a.excluded_models ?? []} />
-                      <CategoryFilterEditor
-                        appId={a.id}
-                        currentAllowed={a.allowed_categories ?? []}
-                        currentExcluded={a.excluded_categories ?? []}
-                        allowProfileSwitch={a.allow_profile_switch}
-                      />
-                      <RunnerAffinityEditor appId={a.id} currentRunnerIds={a.allowed_runner_ids ?? []} />
+                      <span className="text-xs text-gray-500">
+                        {a.allowed_runner_ids?.length === 1
+                          ? 'Single-runner restricted'
+                          : a.allowed_runner_ids?.length
+                            ? `${a.allowed_runner_ids.length} runners allowed`
+                            : 'Any runner'}
+                      </span>
                       <button
                         onClick={() => {
                           if (confirm(`Delete registered app "${a.name}"? Historical queue jobs are preserved (app_id becomes null), but its permissions and rate limits are removed. The app will need to re-register to come back.`)) {
@@ -781,6 +891,27 @@ export function Apps() {
                     </div>
                   </td>
                 </tr>
+                {expandedAppIds.includes(a.id) && (
+                  <tr className="border-b border-gray-800 last:border-0">
+                    <td colSpan={5} className="px-4 py-4 bg-gray-900/40">
+                      <div className="space-y-3">
+                        <AppRateLimitsEditor app={a} />
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <ModelRestrictionEditor appId={a.id} currentModels={a.allowed_models ?? []} />
+                          <ModelExclusionEditor appId={a.id} currentExcluded={a.excluded_models ?? []} />
+                          <CategoryFilterEditor
+                            appId={a.id}
+                            currentAllowed={a.allowed_categories ?? []}
+                            currentExcluded={a.excluded_categories ?? []}
+                            allowProfileSwitch={a.allow_profile_switch}
+                          />
+                          <RunnerAffinityEditor appId={a.id} currentRunnerIds={a.allowed_runner_ids ?? []} />
+                        </div>
+                      </div>
+                    </td>
+                  </tr>
+                )}
+                </Fragment>
               ))}
             </tbody>
           </table>

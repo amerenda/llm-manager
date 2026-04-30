@@ -552,7 +552,9 @@ class Scheduler:
 
     # ── Public methods for VRAM analysis ──────────────────────────────────────
 
-    async def check_submission(self, model: str) -> dict:
+    async def check_submission(
+        self, model: str, allowed_runner_ids: list[int] | None = None
+    ) -> dict:
         """Pre-check a job submission against ALL runners. A model is accepted
         if at least one runner can fit it (directly, or after eviction)."""
         if detect_provider(model) != ModelProvider.LOCAL:
@@ -562,6 +564,15 @@ class Scheduler:
         vram_needed = await self._vram_for_model(model)
 
         runners = await _db.get_active_runners(self.pool)
+        if allowed_runner_ids:
+            allowed = set(allowed_runner_ids)
+            runners = [r for r in runners if r.get("id") in allowed]
+            if not runners:
+                return {
+                    "ok": False,
+                    "error": "no_schedulable_runners",
+                    "message": "No schedulable runners available for this app.",
+                }
         if not runners:
             return {"ok": True}
 

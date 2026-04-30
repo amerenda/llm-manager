@@ -933,7 +933,9 @@ class SimplifiedScheduler:
 
     # ── submission pre-check ─────────────────────────────────────────────────
 
-    async def check_submission(self, model: str) -> dict:
+    async def check_submission(
+        self, model: str, allowed_runner_ids: list[int] | None = None
+    ) -> dict:
         """Trivial: accept if the model fits on any runner's total VRAM.
 
         Reads gpu_total from the scheduler's RunnerState cache (if populated)
@@ -946,7 +948,18 @@ class SimplifiedScheduler:
         need = vram_for_model(model)
 
         # Prefer in-memory state if we have it
-        totals = [rs.gpu_total_gb for rs in self._runners.values() if rs.gpu_total_gb > 0]
+        candidate_runners = list(self._runners.values())
+        if allowed_runner_ids:
+            allowed = set(allowed_runner_ids)
+            candidate_runners = [rs for rs in candidate_runners if rs.runner_id in allowed]
+            if not candidate_runners and self._runners:
+                return {
+                    "ok": False,
+                    "error": "no_schedulable_runners",
+                    "message": "No schedulable runners available for this app.",
+                }
+
+        totals = [rs.gpu_total_gb for rs in candidate_runners if rs.gpu_total_gb > 0]
 
         if not totals:
             # Fall back to DB (the replica without the scheduler won't have _runners populated)
@@ -954,6 +967,15 @@ class SimplifiedScheduler:
             rows = await _db.get_active_runners(self.pool)
             if not rows:
                 return {"ok": True}  # no runners visible yet — defer
+            if allowed_runner_ids:
+                allowed = set(allowed_runner_ids)
+                rows = [r for r in rows if r.get("id") in allowed]
+                if not rows:
+                    return {
+                        "ok": False,
+                        "error": "no_schedulable_runners",
+                        "message": "No schedulable runners available for this app.",
+                    }
             for r in rows:
                 caps = r.get("capabilities") or {}
                 if isinstance(caps, str):

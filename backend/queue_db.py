@@ -670,3 +670,21 @@ async def get_rate_limit(pool: asyncpg.Pool, app_id: int) -> dict:
     if row:
         return dict(row)
     return {"app_id": app_id, "max_queue_depth": 50, "max_jobs_per_minute": 10}
+
+
+async def set_rate_limit(
+    pool: asyncpg.Pool, app_id: int, max_queue_depth: int, max_jobs_per_minute: int
+) -> None:
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """
+            INSERT INTO app_rate_limits (app_id, max_queue_depth, max_jobs_per_minute)
+            VALUES ($1, $2, $3)
+            ON CONFLICT (app_id) DO UPDATE SET
+                max_queue_depth = EXCLUDED.max_queue_depth,
+                max_jobs_per_minute = EXCLUDED.max_jobs_per_minute
+            """,
+            app_id,
+            max_queue_depth,
+            max_jobs_per_minute,
+        )

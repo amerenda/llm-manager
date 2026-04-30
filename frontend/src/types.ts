@@ -95,6 +95,8 @@ export interface RegisteredApp {
   allowed_runner_ids: number[] // empty = any runner
   allowed_categories: string[] // empty = no restriction
   excluded_categories: string[] // empty = no restriction
+  max_queue_depth: number
+  max_jobs_per_minute: number
   api_key_preview?: string
   last_seen: string | null   // ISO timestamp or null
   metadata: Record<string, unknown>

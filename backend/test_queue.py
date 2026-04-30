@@ -630,6 +630,22 @@ class TestSubmitJob:
         })
         assert resp.status_code == 422
 
+    @patch("queue_routes._check_rate_limit", new_callable=AsyncMock)
+    def test_submit_unschedulable_runner_returns_422_before_rate_limit(self, mock_rate_limit, client):
+        mock_rate_limit.side_effect = AssertionError("rate limit should not be evaluated first")
+        client.app.state.scheduler.check_submission = AsyncMock(return_value={
+            "ok": False,
+            "error": "no_schedulable_runners",
+            "message": "No schedulable runners available for this app.",
+        })
+        resp = client.post("/api/queue/submit", json={
+            "model": "qwen2.5:7b",
+            "messages": [{"role": "user", "content": "hello"}],
+        })
+        assert resp.status_code == 422
+        data = resp.json()
+        assert data["detail"]["error"] == "no_schedulable_runners"
+
     def test_submit_missing_messages_returns_422(self, client):
         resp = client.post("/api/queue/submit", json={
             "model": "qwen2.5:7b",
@@ -667,6 +683,23 @@ class TestSubmitBatch:
             ]
         })
         assert resp.status_code == 422
+
+    @patch("queue_routes._check_rate_limit", new_callable=AsyncMock)
+    def test_submit_batch_unschedulable_runner_returns_422_before_rate_limit(self, mock_rate_limit, client):
+        mock_rate_limit.side_effect = AssertionError("rate limit should not be evaluated first")
+        client.app.state.scheduler.check_submission = AsyncMock(return_value={
+            "ok": False,
+            "error": "no_schedulable_runners",
+            "message": "No schedulable runners available for this app.",
+        })
+        resp = client.post("/api/queue/submit-batch", json={
+            "jobs": [
+                {"model": "qwen2.5:7b", "messages": [{"role": "user", "content": "x"}]},
+            ]
+        })
+        assert resp.status_code == 422
+        data = resp.json()
+        assert data["detail"]["error"] == "no_schedulable_runners"
 
     def test_submit_empty_batch(self, client):
         resp = client.post("/api/queue/submit-batch", json={"jobs": []})

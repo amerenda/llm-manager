@@ -461,6 +461,19 @@ export function useUpdateAppPermissions() {
   })
 }
 
+export function useUpdateAppRateLimits() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: ({ appId, max_queue_depth, max_jobs_per_minute }: {
+      appId: number
+      max_queue_depth: number
+      max_jobs_per_minute: number
+    }) =>
+      put<{ ok: boolean }>(`/api/apps/${appId}/rate-limits`, { max_queue_depth, max_jobs_per_minute }),
+    onSuccess: () => qc.invalidateQueries({ queryKey: ['apps'] }),
+  })
+}
+
 export function useUpdateAppCategories() {
   const qc = useQueryClient()
   return useMutation({
