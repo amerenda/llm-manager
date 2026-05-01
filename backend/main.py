@@ -533,25 +533,6 @@ _PUBLIC_PATHS = {
     "/health", "/metrics", "/auth/login", "/auth/callback", "/auth/me",
     "/auth/logout", "/api/stats",
 }
-_PUBLIC_PREFIXES = (
-    "/v1/",                    # OpenAI-compat proxy (app API key auth)
-    "/api/runners",            # Agent PSK auth + runner list
-    "/api/apps/discover",      # Registration secret auth
-    "/api/apps/heartbeat",     # App API key auth
-    "/api/queue/jobs/",        # Job status (app API key or public)
-    "/api/queue/batches/",     # Batch status
-    "/api/queue/submit",       # Job submission (app API key)
-    "/api/profiles/list",      # App profile discovery (API key auth)
-    "/api/queue/status",       # Queue overview
-    "/api/agents",             # Ecdysis agent management (behind its own Tailscale ingress)
-    "/api/gpu",                # GPU info (used by ecdysis)
-    "/api/models",             # Model list (used by ecdysis config)
-    "/api/vram-check",         # VRAM check (used by ecdysis)
-    "/api/llm/",               # LLM status, models, load/unload (UI + ecdysis)
-    "/api/ops",                # Background operations status
-    "/api/profiles",           # Profile management
-    "/api/library/refresh",    # CronJob-triggered Ollama library refresh (no secrets)
-)
 
 _APP_KEY_AUTH_PREFIXES = (
     "/v1/",
@@ -563,6 +544,84 @@ _APP_KEY_AUTH_PREFIXES = (
 )
 
 
+def _session_admin_user(request: Request) -> Optional[str]:
+    user = get_current_user(request)
+    if user and user in auth.GITHUB_ALLOWED_USERS:
+        return user
+    return None
+
+
+def _allow_anonymous_request(path: str, method: str) -> bool:
+    """True if this request may proceed without a GitHub admin session.
+
+    Mutations (load/unload, runner settings, profiles, library writes, etc.)
+    still require admin auth or an app API key on the specific routes below.
+    """
+    m = method.upper()
+
+    # Runner agents (PSK validated inside the route handlers)
+    if path == "/api/runners/register" and m == "POST":
+        return True
+    if path == "/api/runners/heartbeat" and m == "POST":
+        return True
+
+    # Public read — fleet / catalog (GET /api/runners redacts internal agent URLs
+    # when the caller is not an admin; see list_runners).
+    if path == "/api/runners" and m == "GET":
+        return True
+    if path == "/api/runners/target-version" and m == "GET":
+        return True
+
+    if path == "/api/models" and m == "GET":
+        return True
+    if path == "/api/gpu" and m == "GET":
+        return True
+    if path == "/api/vram-check" and m == "POST":
+        return True
+
+    # LLM aggregate read-only (per-runner admin tools stay session-gated)
+    if path == "/api/llm/status" and m == "GET":
+        return True
+    if path == "/api/llm/models" and m == "GET":
+        return True
+    if path == "/api/llm/checkpoints" and m == "GET":
+        return True
+
+    # Cron / automation — exact path only (avoid exposing other /api/library/* writes)
+    if path == "/api/library/refresh" and m == "POST":
+        return True
+
+    # OpenAI-compatible proxy (app API key inside route / v1 handlers)
+    if path.startswith("/v1/"):
+        return True
+
+    # Queue — reads and app-key submission; cancel/priority need admin (handled below)
+    if path.startswith("/api/queue/jobs/") and m not in ("DELETE", "PATCH"):
+        return True
+    if path.startswith("/api/queue/batches/"):
+        return True
+    if path.startswith("/api/queue/submit") and m == "POST":
+        return True
+    if path == "/api/queue/status" and m == "GET":
+        return True
+
+    # App self-service (credentials in body or Bearer token)
+    if path == "/api/apps/discover" and m == "POST":
+        return True
+    if path == "/api/apps/heartbeat" and m == "POST":
+        return True
+
+    # App profile discovery (Bearer app API key)
+    if path == "/api/profiles/list" and m == "GET":
+        return True
+
+    # Moltbook / agent slots (separate ingress hardening in prod)
+    if path.startswith("/api/agents"):
+        return True
+
+    return False
+
+
 @app.middleware("http")
 async def admin_auth_middleware(request: Request, call_next):
     """Require admin auth for management API routes."""
@@ -570,11 +629,11 @@ async def admin_auth_middleware(request: Request, call_next):
         return await call_next(request)
 
     path = request.url.path
+    method = request.method
 
     # Skip auth for public/self-authenticated routes
     # Queue job cancel (DELETE) and priority (PATCH) require admin auth
-    if path in _PUBLIC_PATHS or any(path.startswith(p) for p in _PUBLIC_PREFIXES):
-        method = request.method
+    if path in _PUBLIC_PATHS or _allow_anonymous_request(path, method):
         if path.startswith("/api/queue/jobs/") and method in ("DELETE", "PATCH"):
             pass  # fall through to admin auth check below
         else:
@@ -1170,14 +1229,25 @@ async def set_target_version(req: SetTargetVersionRequest):
     return {"ok": True, "target_version": ver}
 
 
+def _public_runner_row(r: dict) -> dict:
+    """Strip internal agent URLs for unauthenticated /api/runners consumers."""
+    out = dict(r)
+    out["address"] = None
+    out["port"] = None
+    return out
+
+
 @app.get("/api/runners")
-async def list_runners():
+async def list_runners(request: Request):
     """Return all recent runners (including disabled) for UI display.
 
     Enriches each row with live scheduler state (current_model,
     in_flight_job_id) when this pod is the scheduler-holding pod. The
     non-scheduler replica returns those fields as None — the UI polls
-    the scheduler pod often enough that it picks up the right state."""
+    the scheduler pod often enough that it picks up the right state.
+
+    Unauthenticated callers receive the same fields except ``address`` and
+    ``port`` are nulled so internal agent endpoints are not exposed publicly."""
     rows = await db.get_all_runners(app.state.db)
     scheduler = getattr(app.state, "scheduler", None)
     runner_state = getattr(scheduler, "_runners", {}) if scheduler else {}
@@ -1185,7 +1255,9 @@ async def list_runners():
         rs = runner_state.get(r["id"])
         r["current_model"] = rs.current_model if rs else None
         r["in_flight_job_id"] = rs.in_flight_job_id if rs else None
-    return rows
+    if _session_admin_user(request):
+        return rows
+    return [_public_runner_row(r) for r in rows]
 
 
 class RunnerUpdateRequest(BaseModel):

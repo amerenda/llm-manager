@@ -184,14 +184,31 @@ bash install.sh   # installs systemd user service
 
 ## Backend API
 
+### Public catalog (no GitHub admin session)
+
+These endpoints are reachable without the admin UI cookie so integrations can discover capacity. **Mutations** (load/unload, runner settings, profiles, library writes, queue cancel, etc.) still require a GitHub admin session or the route’s own credentials (app API key, agent PSK).
+
+| Method | Path | Notes |
+|--------|------|--------|
+| GET | `/api/runners` | Runner list; **`address` and `port` are `null` without admin** |
+| GET | `/api/runners/target-version` | Global agent target version string |
+| GET | `/api/models` | Installed-model catalog (+ aliases, fit hints) |
+| GET | `/api/llm/status` | Aggregated GPU / loaded-model status |
+| GET | `/api/llm/models` | Per-runner model list (UI-style) |
+| GET | `/api/llm/checkpoints` | ComfyUI checkpoints |
+| GET | `/api/gpu` | Simple VRAM snapshot |
+| POST | `/api/vram-check` | Fit check for a list of model names |
+
+Queue **reads** (`GET /api/queue/jobs/…`, batches, `GET /api/queue/status`) and **submit** (`POST /api/queue/submit*`) use **app API keys** where documented; `DELETE`/`PATCH` on jobs stay admin-only.
+
 ### Runner Management
 
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
 | POST | `/api/runners/register` | PSK | Agent self-registration on startup |
 | POST | `/api/runners/heartbeat` | PSK | Agent heartbeat (every 30s) |
-| GET  | `/api/runners` | PSK | List active runners (last 90s) |
-| PATCH | `/api/runners/{id}` | Bearer | Update runner config (e.g. `pinned_model`) |
+| GET  | `/api/runners` | Public / Admin | List runners (~7d lookback); admin session includes agent `address`/`port` |
+| PATCH | `/api/runners/{id}` | Admin | Update runner config (e.g. `pinned_model`, `draining`) |
 
 **Runner pinning** — set `pinned_model` to dedicate a runner exclusively to one model:
 

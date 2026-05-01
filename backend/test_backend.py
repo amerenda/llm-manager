@@ -195,6 +195,32 @@ class TestAuthEnforcement:
         # 200 or empty — depends on runner availability, but not 401
         assert resp.status_code != 401
 
+    def test_runners_list_public_no_auth(self, unauthed_client):
+        """Runner presence is public; internal agent URLs are redacted."""
+        resp = unauthed_client.get("/api/runners")
+        assert resp.status_code == 200
+        assert resp.json() == []
+
+    def test_runners_patch_requires_auth(self, unauthed_client):
+        resp = unauthed_client.patch("/api/runners/1", json={"enabled": True})
+        assert resp.status_code == 401
+
+    def test_llm_load_requires_auth(self, unauthed_client):
+        resp = unauthed_client.post("/api/llm/models/load", json={"model": "x"})
+        assert resp.status_code == 401
+
+    def test_model_settings_requires_auth(self, unauthed_client):
+        resp = unauthed_client.get("/api/models/settings")
+        assert resp.status_code == 401
+
+    def test_profiles_list_requires_admin_or_app_key(self, unauthed_client):
+        resp = unauthed_client.get("/api/profiles")
+        assert resp.status_code == 401
+
+    def test_ops_requires_auth(self, unauthed_client):
+        resp = unauthed_client.get("/api/ops")
+        assert resp.status_code == 401
+
     def test_apps_requires_auth(self, unauthed_client):
         resp = unauthed_client.get("/api/apps")
         assert resp.status_code == 401
