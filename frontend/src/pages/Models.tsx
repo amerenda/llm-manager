@@ -521,6 +521,7 @@ function InstalledModelsView({ runners, selectedRunner, selectedRunnerHostname }
   const displayRunners = selectedRunner !== undefined
     ? runners.filter(r => r.id === selectedRunner)
     : runners
+  const schedulingRunnerIds = new Set(runners.map(r => r.id))
 
   return (
     <section className="space-y-4">
@@ -799,11 +800,13 @@ function InstalledModelsView({ runners, selectedRunner, selectedRunnerHostname }
                     </div>
                     <p className="text-[10px] text-gray-600 mt-0.5">
                       ~{m.vram_estimate_gb} GB VRAM{m.size_gb ? ` · ${m.size_gb} GB disk` : ''}
-                      {selectedRunner === undefined && (m.runners ?? []).length > 0 && (
+                      {selectedRunner === undefined && (m.runners ?? []).some(r => schedulingRunnerIds.has(r.runner_id)) && (
                         <span className="ml-2">
-                          {(m.runners ?? []).map(r => (
-                            <span key={r.runner_id} className="text-[10px] bg-gray-800 text-gray-500 px-1.5 py-0.5 rounded mr-1">{r.hostname}</span>
-                          ))}
+                          {(m.runners ?? [])
+                            .filter(r => schedulingRunnerIds.has(r.runner_id))
+                            .map(r => (
+                              <span key={r.runner_id} className="text-[10px] bg-gray-800 text-gray-500 px-1.5 py-0.5 rounded mr-1">{r.hostname}</span>
+                            ))}
                         </span>
                       )}
                     </p>

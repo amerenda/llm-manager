@@ -1,9 +1,10 @@
-import { useEffect, useState } from 'react'
+import { Fragment, useEffect, useState } from 'react'
 import { Server, Cpu, HardDrive, MemoryStick, Volume2, RefreshCw, Power, Upload, AlertCircle, ChevronDown, ChevronRight, Play, Loader2, Zap, Settings2, CheckCircle2 } from 'lucide-react'
 import { useRunners, useUpdateRunner, useAgentTargetVersion, useSetAgentTargetVersion, useRunnerStatus, useTriggerRunnerUpdate, useFlushRunnerVram, useRestartOllama, useOllamaSettings, useUpdateOllamaSettings, useOllamaVersion, useUpgradeOllama } from '../hooks/useBackend'
 import { StatusDot } from '../components/StatusDot'
 import type { Runner } from '../types'
 import { agentVersionsEquivalent } from '../utils/agentVersion'
+import { isRunnerInSchedulerPool } from '../utils/runnerActive'
 
 function relativeTime(iso: string | null): string {
   if (!iso) return 'Never'
@@ -352,10 +353,15 @@ export function Runners() {
   const setTarget = useSetAgentTargetVersion()
   const [versionInput, setVersionInput] = useState('')
   const [expandedId, setExpandedId] = useState<number | null>(null)
+  const [showStaleRunners, setShowStaleRunners] = useState(false)
   const list = runners.data ?? []
   const target = targetVersion.data?.target_version || ''
 
-  const outdatedRunners = list.filter((r: Runner) =>
+  const activeRunners = list.filter(isRunnerInSchedulerPool)
+  const staleRunners = list.filter(r => !isRunnerInSchedulerPool(r))
+  const bodyRunners = showStaleRunners ? [...activeRunners, ...staleRunners] : activeRunners
+
+  const outdatedRunners = activeRunners.filter((r: Runner) =>
     Boolean(
       target &&
         r.capabilities.agent_version &&
@@ -369,9 +375,23 @@ export function Runners() {
         <div className="flex items-center gap-2">
           <Server className="w-4 h-4 text-brand-400" />
           <h1 className="text-base font-semibold text-gray-200">Runners</h1>
-          <span className="text-xs text-gray-500">{list.length} active</span>
+          <span className="text-xs text-gray-500">
+            {activeRunners.length} online
+            {staleRunners.length > 0 ? ` · ${staleRunners.length} stale` : ''}
+          </span>
         </div>
-        {runners.isFetching && <RefreshCw className="w-3 h-3 text-gray-600 animate-spin" />}
+        <div className="flex items-center gap-3">
+          {staleRunners.length > 0 && (
+            <button
+              type="button"
+              onClick={() => setShowStaleRunners(v => !v)}
+              className="text-xs text-gray-500 hover:text-gray-300 underline-offset-2 hover:underline"
+            >
+              {showStaleRunners ? 'Hide' : 'Show'} stale runners ({staleRunners.length})
+            </button>
+          )}
+          {runners.isFetching && <RefreshCw className="w-3 h-3 text-gray-600 animate-spin" />}
+        </div>
       </div>
 
       {/* Global agent version control */}
@@ -412,10 +432,24 @@ export function Runners() {
       {runners.isLoading ? (
         <div className="py-12 text-center text-gray-600 text-sm">Loading runners...</div>
       ) : list.length === 0 ? (
-        <div className="py-12 text-center text-gray-600 text-sm">No active runners</div>
+        <div className="py-12 text-center text-gray-600 text-sm">No runners registered</div>
+      ) : bodyRunners.length === 0 ? (
+        <div className="py-12 text-center text-gray-600 text-sm space-y-2">
+          <p>No runners with a recent heartbeat (~90s).</p>
+          {staleRunners.length > 0 && (
+            <p className="text-xs text-gray-500">
+              <button type="button" onClick={() => setShowStaleRunners(true)} className="text-brand-400 hover:underline">
+                Show {staleRunners.length} stale row{staleRunners.length !== 1 ? 's' : ''}
+              </button>
+              {' '}from the last 7 days (e.g. old Docker hostnames after RUNNER_HOSTNAME changed).
+            </p>
+          )}
+        </div>
       ) : (
         <div className="space-y-3">
-          {list.map((runner: Runner) => {
+          {bodyRunners.map((runner: Runner, idx: number) => {
+            const showStaleHeader =
+              showStaleRunners && staleRunners.length > 0 && idx === activeRunners.length
             const online = isOnline(runner.last_seen)
             const enabled = runner.enabled !== false
             const caps = runner.capabilities
@@ -427,12 +461,17 @@ export function Runners() {
   )
 
             return (
-              <div
-                key={runner.id}
-                className={`bg-gray-900 border rounded-xl transition-opacity ${
-                  enabled ? 'border-gray-800' : 'border-gray-800/50 opacity-50'
-                }`}
-              >
+              <Fragment key={runner.id}>
+                {showStaleHeader && (
+                  <p className="text-xs text-gray-500 uppercase tracking-wide pt-2 border-t border-gray-800">
+                    Stale / offline (no ~90s heartbeat)
+                  </p>
+                )}
+                <div
+                  className={`bg-gray-900 border rounded-xl transition-opacity ${
+                    enabled ? 'border-gray-800' : 'border-gray-800/50 opacity-50'
+                  } ${!isRunnerInSchedulerPool(runner) ? 'opacity-70' : ''}`}
+                >
                 {/* Clickable header */}
                 <button
                   onClick={() => setExpandedId(expanded ? null : runner.id)}
@@ -500,6 +539,7 @@ export function Runners() {
                   </div>
                 )}
               </div>
+              </Fragment>
             )
           })}
         </div>
