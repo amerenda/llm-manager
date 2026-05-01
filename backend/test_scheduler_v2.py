@@ -215,6 +215,12 @@ class TestPlacementHelpers:
         sched = _make_sched([a])
         assert sched._waiting_on_pinned_busy_runner("m") is False
 
+    def test_model_has_exclusive_pin(self):
+        a = RunnerState(runner_id=1, hostname="a", pinned_model="mistral:7b")
+        sched = _make_sched([a])
+        assert sched._model_has_exclusive_pin("mistral:7b") is True
+        assert sched._model_has_exclusive_pin("qwen3:14b") is False
+
 
 # ── check_submission ────────────────────────────────────────────────────────
 

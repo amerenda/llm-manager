@@ -349,7 +349,7 @@ Auto-discovery requires a shared registration secret (Bitwarden: `llm-manager-re
 | `UAT_TEST_MODEL` | Deployment env | Model name for UAT connectivity tests |
 | `QUEUE_STRATEGY` | Deployment env | `priority_batching` (default) or `fifo` — controls job dispatch order |
 | `QUEUE_BATCH_SIZE` | Deployment env | Max same-model jobs to dispatch together (default: 5, priority_batching only) |
-| `SCHEDULER_UNPLACEABLE_FAIL_SEC` | Deployment env | After this many seconds, fail the head batch if a runner still cannot be picked while idle GPUs exist (default: `180`; `0` disables) |
+| `SCHEDULER_UNPLACEABLE_FAIL_SEC` | Deployment env | After this many seconds, fail the head batch if a runner still cannot be picked while idle GPUs exist (default: `180`; `0` disables). Never applies when the model is **pinned** to a runner (wait for pull/drain/busy there). |
 | `SCHEDULER_LIVE_MODEL_SYNC_SEC` | Deployment env | How often idle runners re-sync loaded model from the agent (default: `30`; `0` disables) |
 
 ---

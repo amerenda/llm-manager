@@ -462,6 +462,14 @@ class SimplifiedScheduler:
                 return True
         return False
 
+    def _model_has_exclusive_pin(self, model: str) -> bool:
+        """True if any runner is pinned to this model (work must go there only).
+
+        When the pinned runner is idle but the blob is still pulling, or the
+        runner is draining, _pick_runner returns None — not the same as fleet
+        unplaceable; do not fail-fast those head jobs."""
+        return any(r.pinned_model == model for r in self._runners.values())
+
     def _log_pick_runner_miss_throttled(
         self,
         model: str,
@@ -469,6 +477,7 @@ class SimplifiedScheduler:
         allowed_runner_ids: list[int] | None,
         has_idle: bool,
         pinned_wait: bool,
+        exclusive_pin: bool,
     ) -> None:
         now = time.monotonic()
         if now - self._last_no_runner_log_mono < 30:
@@ -480,12 +489,13 @@ class SimplifiedScheduler:
         ]
         logger.info(
             "scheduler: no runner for model=%r head_job=%s allowed_runners=%s "
-            "eligible_idle=%s pinned_busy_wait=%s runners=%s",
+            "eligible_idle=%s pinned_busy_wait=%s exclusive_pin=%s runners=%s",
             model,
             head_job_id,
             allowed_runner_ids,
             has_idle,
             pinned_wait,
+            exclusive_pin,
             summary,
         )
 
@@ -620,10 +630,21 @@ class SimplifiedScheduler:
                     )
                     has_idle = self._any_eligible_idle_runner(allowed_runner_ids)
                     pinned_wait = self._waiting_on_pinned_busy_runner(model)
+                    exclusive_pin = self._model_has_exclusive_pin(model)
                     self._log_pick_runner_miss_throttled(
-                        model, head["id"], allowed_runner_ids, has_idle, pinned_wait
+                        model,
+                        head["id"],
+                        allowed_runner_ids,
+                        has_idle,
+                        pinned_wait,
+                        exclusive_pin,
                     )
-                    if fail_sec <= 0 or not has_idle or pinned_wait:
+                    if (
+                        fail_sec <= 0
+                        or not has_idle
+                        or pinned_wait
+                        or exclusive_pin
+                    ):
                         head_unplaceable_key = None
                         head_unplaceable_since = None
                     else:
