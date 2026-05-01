@@ -14,7 +14,7 @@ Enable **`AGENT_UNIFIED_MEMORY_VRAM=true`** so VRAM metrics use the **same pool 
 
 **Note:** Registering under a new hostname creates a **new** llm-manager runner row; remove the old runner (short-id hostname) in the UI if it lingers.
 
-For a manual compose file outside that repo, mirror the same pattern: publish `8090:8090`, `extra_hosts: host.docker.internal:host-gateway`, bind-mount the host Ollama models directory read-only at `/host-ollama-models`, set `MODEL_STORAGE_PATH=/host-ollama-models`, and leave `COMPOSE_PROFILE` / `COMPOSE_DIR` unset so fleet **self-update** (which assumes GPU compose profiles) stays disabled — use image bumps via compose or Komodo instead.
+For a manual compose file outside that repo, mirror the same pattern: publish `8090:8090`, `extra_hosts: host.docker.internal:host-gateway`, bind-mount the host Ollama models directory read-only at `/host-ollama-models`, set `MODEL_STORAGE_PATH=/host-ollama-models`. To enable **auto self-update** (heartbeat-driven `AGENT_IMAGE_TAG` pin + `compose up`): set **`COMPOSE_DIR`** to the **host** path of the directory that contains `compose.yaml`, **`COMPOSE_DIR_LOCAL`** to the **in-container** mount of that same directory (rw), bind-mount it, and leave **`COMPOSE_PROFILE`** empty if you do not use compose profiles. The [`mac-mini-compose` `llm` stack](https://github.com/amerenda/mac-mini-compose) does this via `HOST_LLM_COMPOSE_DIR` + `/host/llm-compose`; turn on **auto update** for the runner in llm-manager so the agent recreates itself when the global target changes.
 
 ## Prerequisites
 

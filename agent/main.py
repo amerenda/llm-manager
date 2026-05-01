@@ -538,8 +538,8 @@ async def _self_update(target_version: str):
     global _updating
     if _updating:
         return
-    if not COMPOSE_DIR or not COMPOSE_PROFILE:
-        logger.warning("Cannot self-update: COMPOSE_DIR or COMPOSE_PROFILE not set")
+    if not COMPOSE_DIR:
+        logger.warning("Cannot self-update: COMPOSE_DIR not set (host path to compose directory)")
         return
     if not _DOCKER_OK:
         logger.warning("Cannot self-update: Docker client not available")
@@ -577,10 +577,12 @@ async def _self_update(target_version: str):
         # silently rolls back the entire update. The agent was stuck in a
         # 35s retry loop for a day because of this.
         compose_file = os.path.join(COMPOSE_DIR, "compose.yaml")
-        agent_service = "llm-agent-amd" if COMPOSE_PROFILE.startswith("amd") else "llm-agent"
+        prof = (COMPOSE_PROFILE or "").strip()
+        agent_service = "llm-agent-amd" if prof.startswith("amd") else "llm-agent"
+        profile_arg = f" --profile {prof}" if prof else ""
         cmd = (
             f"sleep 2 && "
-            f"docker compose -f {compose_file} --profile {COMPOSE_PROFILE} "
+            f"docker compose -f {compose_file}{profile_arg} "
             f"up -d --no-deps --force-recreate {agent_service}"
         )
         logger.info("Launching helper container to recreate with new image...")
