@@ -1322,8 +1322,10 @@ async def llm_status(request: Request, runner_id: Optional[int] = None):
             total_vram += rv_total
             used_vram += rv_used
             total_cpu += status.get("cpu_pct", 0)
-            total_mem += status.get("mem_total_gb", 0)
-            used_mem += status.get("mem_used_gb", 0)
+            # Unified-memory runners: pool is already counted in gpu_vram_*; skip mem_* to avoid double sum.
+            if status.get("gpu_vendor") != "unified":
+                total_mem += status.get("mem_total_gb", 0)
+                used_mem += status.get("mem_used_gb", 0)
 
             for m in status.get("loaded_ollama_models", []):
                 m["runner"] = r["hostname"]

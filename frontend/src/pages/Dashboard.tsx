@@ -28,6 +28,7 @@ function progressColor(pct: number): string {
 }
 
 function RunnerCard({ r }: { r: RunnerStatus }) {
+  const isUnified = r.gpu_vendor === 'unified'
   const vramPct = r.gpu_vram_total_gb > 0
     ? Math.round((r.gpu_vram_used_gb / r.gpu_vram_total_gb) * 100)
     : 0
@@ -55,10 +56,10 @@ function RunnerCard({ r }: { r: RunnerStatus }) {
         <p className="text-xs text-gray-600">Runner is not responding</p>
       ) : (
         <div className="space-y-2.5">
-          {/* GPU VRAM */}
+          {/* GPU VRAM or unified memory (Apple Silicon — same pool as RAM) */}
           <div>
             <div className="flex items-center justify-between text-xs mb-1">
-              <span className="text-gray-500">GPU VRAM</span>
+              <span className="text-gray-500">{isUnified ? 'Unified memory' : 'GPU VRAM'}</span>
               <span className="text-gray-300 tabular-nums">
                 {r.gpu_vram_used_gb.toFixed(1)} / {r.gpu_vram_total_gb.toFixed(1)} GB
               </span>
@@ -69,7 +70,7 @@ function RunnerCard({ r }: { r: RunnerStatus }) {
             </div>
           </div>
 
-          {/* CPU + Memory inline */}
+          {/* CPU + system RAM (skip RAM bar for unified — already counted above) */}
           <div className="flex gap-4">
             {r.cpu_pct !== undefined && (
               <div className="flex-1">
@@ -83,7 +84,7 @@ function RunnerCard({ r }: { r: RunnerStatus }) {
                 </div>
               </div>
             )}
-            {r.mem_total_gb !== undefined && (
+            {!isUnified && r.mem_total_gb !== undefined && (
               <div className="flex-1">
                 <div className="flex items-center justify-between text-xs mb-1">
                   <span className="text-gray-500">Memory</span>
@@ -120,6 +121,9 @@ export function Dashboard() {
   const appList = apps.data ?? []
   const loadedModels = s?.loaded_ollama_models ?? []
   const runners = s?.runners ?? []
+  const allUnifiedOnline =
+    runners.length > 0 &&
+    runners.every(r => r.error || r.gpu_vendor === 'unified')
 
   return (
     <div className="space-y-6">
@@ -131,9 +135,9 @@ export function Dashboard() {
           ))}
         </div>
       ) : (
-        <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
+        <div className={`grid gap-3 ${(s?.mem_total_gb ?? 0) > 0 ? 'grid-cols-2 sm:grid-cols-3' : 'grid-cols-2'}`}>
           <StatCard
-            label="Total GPU VRAM"
+            label={allUnifiedOnline ? 'Unified memory' : 'Total GPU VRAM'}
             value={s ? `${s.gpu_vram_used_gb.toFixed(1)} / ${s.gpu_vram_total_gb.toFixed(1)} GB` : '—'}
             sub={s ? `${s.gpu_vram_pct.toFixed(0)}% used across ${runners.length} runners` : undefined}
             progress={s?.gpu_vram_pct}
@@ -146,11 +150,13 @@ export function Dashboard() {
             progress={s?.cpu_pct}
             icon={<Cpu className="w-4 h-4" />}
           />
-          <StatCard
-            label="Memory"
-            value={s ? `${s.mem_used_gb.toFixed(1)} / ${s.mem_total_gb.toFixed(1)} GB` : '—'}
-            icon={<MemoryStick className="w-4 h-4" />}
-          />
+          {(s?.mem_total_gb ?? 0) > 0 && (
+            <StatCard
+              label="Memory"
+              value={s ? `${s.mem_used_gb.toFixed(1)} / ${s.mem_total_gb.toFixed(1)} GB` : '—'}
+              icon={<MemoryStick className="w-4 h-4" />}
+            />
+          )}
         </div>
       )}
 

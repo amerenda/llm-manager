@@ -49,6 +49,15 @@ function RunnerDetail({ runner, target }: { runner: Runner; target: string }) {
   const caps = runner.capabilities
   const s = status.data
   const isGpu = !!caps.gpu_vram_total_bytes
+  const isUnifiedMem = caps.gpu_vendor === 'unified'
+  const unifiedTotalBytes =
+    s?.mem_total_gb != null && s.mem_total_gb > 0
+      ? s.mem_total_gb * 1e9
+      : (caps.gpu_vram_total_bytes ?? 0)
+  const unifiedUsedBytes =
+    s?.mem_total_gb != null && s.mem_total_gb > 0
+      ? (s.mem_used_gb ?? 0) * 1e9
+      : (caps.gpu_vram_used_bytes ?? 0)
 
   const isOutdated = Boolean(
     target && caps.agent_version && !agentVersionsEquivalent(caps.agent_version, target),
@@ -58,8 +67,19 @@ function RunnerDetail({ runner, target }: { runner: Runner; target: string }) {
     <div className="border-t border-gray-800 pt-3 mt-3 space-y-4">
       {/* Resource bars from live status */}
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-        {/* VRAM */}
-        {caps.gpu_vram_total_bytes ? (
+        {/* VRAM or unified memory (same pool as RAM on Apple Silicon) */}
+        {isUnifiedMem && caps.gpu_vram_total_bytes ? (
+          <div className="space-y-1">
+            <div className="flex justify-between text-xs text-gray-500">
+              <span className="flex items-center gap-1"><MemoryStick className="w-3 h-3" />Unified memory</span>
+              <span>{fmtBytes(unifiedUsedBytes)} / {fmtBytes(unifiedTotalBytes)}</span>
+            </div>
+            <ProgressBar
+              pct={unifiedTotalBytes > 0 ? Math.round((unifiedUsedBytes / unifiedTotalBytes) * 100) : 0}
+              thresholds={{ red: 90, yellow: 75 }}
+            />
+          </div>
+        ) : caps.gpu_vram_total_bytes ? (
           <div className="space-y-1">
             <div className="flex justify-between text-xs text-gray-500">
               <span className="flex items-center gap-1"><Cpu className="w-3 h-3" />VRAM</span>
@@ -94,8 +114,8 @@ function RunnerDetail({ runner, target }: { runner: Runner; target: string }) {
           </div>
         )}
 
-        {/* Memory — from live status */}
-        {s?.mem_total_gb ? (
+        {/* System RAM — discrete-GPU runners only (unified pool is shown above) */}
+        {!isUnifiedMem && s?.mem_total_gb ? (
           <div className="space-y-1">
             <div className="flex justify-between text-xs text-gray-500">
               <span className="flex items-center gap-1"><MemoryStick className="w-3 h-3" />Memory</span>

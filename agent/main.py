@@ -658,7 +658,9 @@ def _gpu_stats(*, ollama_loaded_bytes: int = 0) -> dict:
     if _unified_vram_enabled():
         vm = psutil.virtual_memory()
         total = _unified_vram_total_override_bytes() or int(vm.total)
-        used = min(max(0, ollama_loaded_bytes), total)
+        # Same physical pool as system RAM — use vm.used so VRAM matches /v1/status mem_*
+        # and schedulers/UI don't treat Ollama weights-only as "free" RAM.
+        used = min(max(0, int(vm.used)), total)
         pct = round(used / total * 100, 1) if total else 0.0
         return {
             "vram_used_bytes": used,

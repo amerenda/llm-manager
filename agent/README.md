@@ -10,7 +10,7 @@ On the home-lab Mac Mini, Ollama runs **on the host** for Metal. Deploy **only**
 
 Set **`RUNNER_HOSTNAME`** (or `AGENT_NODE_NAME`) to the Mac’s stable name (e.g. `mac-mini-m4`). Otherwise Docker sets the container hostname to a short id and llm-manager shows that hex as the runner name.
 
-Enable **`AGENT_UNIFIED_MEMORY_VRAM=true`** so VRAM bars use **container-visible RAM** as the unified pool and **Ollama `/api/ps` model sizes** as “used”. There is no NVML/AMD sysfs for Metal from a Linux agent container. If `psutil`’s total does not match real unified RAM (some VM limits), set **`AGENT_UNIFIED_VRAM_TOTAL_BYTES`** to the pool size in bytes.
+Enable **`AGENT_UNIFIED_MEMORY_VRAM=true`** so VRAM metrics use the **same pool as system RAM** (`psutil.virtual_memory()` used/total). There is no NVML/AMD sysfs for Metal from a Linux agent container. If `psutil`’s total does not match real unified RAM (some VM limits), set **`AGENT_UNIFIED_VRAM_TOTAL_BYTES`** to the pool size in bytes.
 
 **Note:** Registering under a new hostname creates a **new** llm-manager runner row; remove the old runner (short-id hostname) in the UI if it lingers.
 

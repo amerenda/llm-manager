@@ -69,6 +69,7 @@ export interface Runner {
     disk_used_bytes?: number
     disk_free_bytes?: number
     loaded_models?: string[]
+    gpu_vendor?: string
     comfyui_running?: boolean
     agent_version?: string
     auto_update?: boolean
