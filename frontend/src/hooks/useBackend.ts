@@ -1,4 +1,4 @@
-import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
+import { useQuery, useMutation, useQueryClient, type QueryClient } from '@tanstack/react-query'
 import type { LlmStatus, LlmModel, RegisteredApp, Agent, Runner, RunnerStatus, Profile, ProfileActivation, LibraryModel, SafetyTag, QueueJob, QueueMetrics } from '../types'
 
 // nginx proxies /api to the backend service
@@ -367,6 +367,35 @@ export function useUpdateRunner() {
       qc.invalidateQueries({ queryKey: ['runners'] })
       qc.invalidateQueries({ queryKey: ['llm-status'] })
     },
+  })
+}
+
+function invalidateRunnerFleet(qc: QueryClient) {
+  qc.invalidateQueries({ queryKey: ['runners'] })
+  qc.invalidateQueries({ queryKey: ['apps'] })
+  qc.invalidateQueries({ queryKey: ['llm-status'] })
+  qc.invalidateQueries({ queryKey: ['model-list'] })
+  qc.invalidateQueries({ queryKey: ['llm-models'] })
+}
+
+export function useDeleteRunner() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: (runnerId: number) =>
+      del<{ ok: boolean; deleted_id: number }>(`/api/runners/${runnerId}`),
+    onSuccess: () => invalidateRunnerFleet(qc),
+  })
+}
+
+export function useDeleteStaleRunners() {
+  const qc = useQueryClient()
+  return useMutation({
+    mutationFn: () =>
+      post<{ ok: boolean; deleted: number; runner_ids: number[] }>(
+        '/api/runners/delete-stale',
+        {},
+      ),
+    onSuccess: () => invalidateRunnerFleet(qc),
   })
 }
 

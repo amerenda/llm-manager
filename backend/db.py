@@ -688,6 +688,65 @@ async def get_runner_by_id(pool: asyncpg.Pool, runner_id: int) -> Optional[dict]
     return _deserialize_runner(row)
 
 
+async def _prune_runner_from_app_allowlists(conn: asyncpg.Connection, runner_id: int) -> None:
+    """Remove runner_id from every registered_apps.allowed_runner_ids array."""
+    await conn.execute(
+        """
+        UPDATE registered_apps
+        SET allowed_runner_ids = array_remove(allowed_runner_ids, $1)
+        WHERE $1 = ANY(allowed_runner_ids)
+        """,
+        runner_id,
+    )
+
+
+async def delete_runner(pool: asyncpg.Pool, runner_id: int) -> bool:
+    """Delete a runner row and scrub app allowlists. Returns False if not found.
+
+    CASCADE removes profile_activations, model_runner_params, etc.
+    """
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow("SELECT id FROM llm_runners WHERE id = $1", runner_id)
+            if row is None:
+                return False
+            await _prune_runner_from_app_allowlists(conn, runner_id)
+            await conn.execute("DELETE FROM llm_runners WHERE id = $1", runner_id)
+    return True
+
+
+async def delete_stale_runners(pool: asyncpg.Pool) -> list[int]:
+    """Delete runners in the admin UI \"stale\" bucket (same as get_all_runners vs get_active).
+
+    Only rows returned by get_all_runners (last_seen within 7 days) are considered.
+    Stale means not eligible for get_active_runners: disabled, missing last_seen,
+    or last heartbeat older than 90 seconds.
+    """
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            rows = await conn.fetch(
+                """
+                SELECT id FROM llm_runners
+                WHERE last_seen > NOW() - INTERVAL '7 days'
+                  AND NOT (
+                    enabled = TRUE
+                    AND last_seen IS NOT NULL
+                    AND last_seen > NOW() - INTERVAL '90 seconds'
+                  )
+                """
+            )
+            id_list = [int(r["id"]) for r in rows]
+            if not id_list:
+                return []
+            for rid in id_list:
+                await _prune_runner_from_app_allowlists(conn, rid)
+            await conn.execute(
+                "DELETE FROM llm_runners WHERE id = ANY($1::int[])",
+                id_list,
+            )
+            return id_list
+
+
 def _deserialize_runner(row) -> dict:
     """Convert a runner DB row to dict with deserialized capabilities."""
     d = dict(row)

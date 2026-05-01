@@ -1224,6 +1224,22 @@ async def update_runner(runner_id: int, req: RunnerUpdateRequest):
     return {"ok": True}
 
 
+@app.delete("/api/runners/{runner_id}")
+async def delete_runner_endpoint(runner_id: int):
+    """Remove a runner from the fleet (DB row + app allowlist scrub)."""
+    ok = await db.delete_runner(app.state.db, runner_id)
+    if not ok:
+        raise HTTPException(404, "Runner not found")
+    return {"ok": True, "deleted_id": runner_id}
+
+
+@app.post("/api/runners/delete-stale")
+async def delete_stale_runners_endpoint():
+    """Delete all runners in the admin \"stale\" bucket (disabled or no ~90s heartbeat)."""
+    ids = await db.delete_stale_runners(app.state.db)
+    return {"ok": True, "deleted": len(ids), "runner_ids": ids}
+
+
 class TriggerRunnerUpdateRequest(BaseModel):
     target_version: Optional[str] = None
 

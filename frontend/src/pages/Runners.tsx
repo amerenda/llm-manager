@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useState } from 'react'
-import { Server, Cpu, HardDrive, MemoryStick, Volume2, RefreshCw, Power, Upload, AlertCircle, ChevronDown, ChevronRight, Play, Loader2, Zap, Settings2, CheckCircle2 } from 'lucide-react'
-import { useRunners, useUpdateRunner, useAgentTargetVersion, useSetAgentTargetVersion, useRunnerStatus, useTriggerRunnerUpdate, useFlushRunnerVram, useRestartOllama, useOllamaSettings, useUpdateOllamaSettings, useOllamaVersion, useUpgradeOllama } from '../hooks/useBackend'
+import { Server, Cpu, HardDrive, MemoryStick, Volume2, RefreshCw, Power, Upload, AlertCircle, ChevronDown, ChevronRight, Play, Loader2, Zap, Settings2, CheckCircle2, Trash2 } from 'lucide-react'
+import { useRunners, useUpdateRunner, useAgentTargetVersion, useSetAgentTargetVersion, useRunnerStatus, useTriggerRunnerUpdate, useFlushRunnerVram, useRestartOllama, useOllamaSettings, useUpdateOllamaSettings, useOllamaVersion, useUpgradeOllama, useDeleteRunner, useDeleteStaleRunners } from '../hooks/useBackend'
 import { StatusDot } from '../components/StatusDot'
 import type { Runner } from '../types'
 import { agentVersionsEquivalent } from '../utils/agentVersion'
@@ -39,6 +39,7 @@ function ProgressBar({ pct, thresholds }: { pct: number; thresholds?: { red: num
 function RunnerDetail({ runner, target }: { runner: Runner; target: string }) {
   const status = useRunnerStatus(runner.id)
   const update = useUpdateRunner()
+  const delRunner = useDeleteRunner()
   const triggerUpdate = useTriggerRunnerUpdate()
   const flushVram = useFlushRunnerVram()
   const restartOllama = useRestartOllama()
@@ -340,6 +341,31 @@ function RunnerDetail({ runner, target }: { runner: Runner; target: string }) {
         </div>
       )}
 
+      {/* Remove ghost / offline row (same bucket as "stale" in the list header) */}
+      {!isRunnerInSchedulerPool(runner) && (
+        <div className="border-t border-gray-800 pt-3">
+          <button
+            type="button"
+            onClick={() => {
+              if (!window.confirm(
+                `Remove runner "${runner.hostname}" (#${runner.id}) from the fleet?\n\n`
+                + 'This deletes the database row (disabled, or no heartbeat in ~90s). '
+                + 'App allowlists are updated. Cannot be undone.',
+              )) return
+              delRunner.mutate(runner.id)
+            }}
+            disabled={delRunner.isPending}
+            className="flex items-center gap-1 text-xs bg-red-950/50 hover:bg-red-900/50 text-red-400 border border-red-900/60 px-3 py-1.5 rounded-lg transition-colors disabled:opacity-40"
+          >
+            {delRunner.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
+            Remove from fleet
+          </button>
+          {delRunner.isError && (
+            <p className="text-xs text-red-400 mt-1">{(delRunner.error as Error).message}</p>
+          )}
+        </div>
+      )}
+
       {/* Address */}
       <div className="text-xs text-gray-600 font-mono truncate">{runner.address}</div>
     </div>
@@ -348,7 +374,7 @@ function RunnerDetail({ runner, target }: { runner: Runner; target: string }) {
 
 export function Runners() {
   const runners = useRunners()
-  const update = useUpdateRunner()
+  const deleteStale = useDeleteStaleRunners()
   const targetVersion = useAgentTargetVersion()
   const setTarget = useSetAgentTargetVersion()
   const [versionInput, setVersionInput] = useState('')
@@ -389,6 +415,30 @@ export function Runners() {
             >
               {showStaleRunners ? 'Hide' : 'Show'} stale runners ({staleRunners.length})
             </button>
+          )}
+          {staleRunners.length > 0 && (
+            <button
+              type="button"
+              onClick={() => {
+                const names = staleRunners.map(r => `${r.hostname} (#${r.id})`).join(', ')
+                if (!window.confirm(
+                  `Delete all ${staleRunners.length} stale runner(s)?\n\n${names}\n\n`
+                  + 'Stale means disabled or no heartbeat in ~90s (same rows as when you expand the stale list). '
+                  + 'App allowlists are updated. Cannot be undone.',
+                )) return
+                deleteStale.mutate()
+              }}
+              disabled={deleteStale.isPending}
+              className="flex items-center gap-1 text-xs text-red-400 hover:text-red-300 border border-red-900/50 hover:border-red-800 rounded-lg px-2 py-1 disabled:opacity-40"
+            >
+              {deleteStale.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <Trash2 className="w-3 h-3" />}
+              Delete all stale
+            </button>
+          )}
+          {deleteStale.isError && (
+            <span className="text-xs text-red-400 max-w-xs truncate" title={(deleteStale.error as Error).message}>
+              {(deleteStale.error as Error).message}
+            </span>
           )}
           {runners.isFetching && <RefreshCw className="w-3 h-3 text-gray-600 animate-spin" />}
         </div>
