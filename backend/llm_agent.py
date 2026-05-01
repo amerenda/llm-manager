@@ -3,6 +3,7 @@ HTTP client for the llm-agent service.
 Supports TLS with certificate pinning when a PEM cert is provided.
 """
 
+import json
 import logging
 import os
 import ssl
@@ -146,7 +147,7 @@ class LLMAgentClient:
 
     async def pull_model(self, model: str) -> AsyncGenerator[bytes, None]:
         """Stream NDJSON progress lines while pulling a model."""
-        async with self._client(timeout=httpx.Timeout(30.0, read=600.0)) as c:
+        async with self._client(timeout=httpx.Timeout(30.0, read=3600.0)) as c:
             async with c.stream(
                 "POST",
                 f"{self.base_url}/v1/models/pull",
@@ -300,3 +301,24 @@ class LLMAgentClient:
                 return r.status_code == 200
         except Exception:
             return False
+
+
+def client_from_runner_row(r: dict, psk: str) -> LLMAgentClient:
+    """Build an LLMAgentClient from an ``llm_runners`` row (address + capabilities)."""
+    url = (r.get("address") or "").rstrip("/")
+    if "://" in url:
+        url = url.split("://", 1)[1]
+    if ":" in url:
+        host, port_str = url.rsplit(":", 1)
+        port = int(port_str)
+    else:
+        host = url
+        port = 8090
+    caps = r.get("capabilities") or {}
+    if isinstance(caps, str):
+        try:
+            caps = json.loads(caps)
+        except Exception:
+            caps = {}
+    tls_cert_pem = caps.get("tls_cert") if isinstance(caps, dict) else None
+    return LLMAgentClient(host=host, port=port, psk=psk, tls_cert_pem=tls_cert_pem)

@@ -1,12 +1,13 @@
 """Library browser and safety tag management routes."""
 import logging
+import os
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
 import db
-from llm_agent import LLMAgentClient
+from llm_agent import client_from_runner_row
 from library import (
     refresh_library_cache,
     ensure_model_tags,
@@ -33,12 +34,13 @@ def _norm_digest(d: Optional[str]) -> str:
     return d
 
 
-async def _get_runner_client(pool, runner_id: int) -> LLMAgentClient:
+async def _get_runner_client(pool, runner_id: int):
     runners = await db.get_active_runners(pool)
     r = next((x for x in runners if x["id"] == runner_id), None)
     if not r:
         raise HTTPException(503, "Runner not found")
-    return LLMAgentClient(r["address"])
+    psk = os.environ.get("LLM_MANAGER_AGENT_PSK", "")
+    return client_from_runner_row(r, psk)
 
 
 router = APIRouter(prefix="/api/library", tags=["library"])

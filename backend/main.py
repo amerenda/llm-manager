@@ -37,7 +37,7 @@ from db import (
 )
 from gpu import vram_for_model
 from agent_version_compare import agent_versions_equivalent
-from llm_agent import LLMAgentClient
+from llm_agent import LLMAgentClient, client_from_runner_row
 from scheduler_v2 import SimplifiedScheduler as Scheduler
 from scheduler_v2 import fastpath_duration_seconds, fastpath_requests_total
 
@@ -136,18 +136,7 @@ _AGENT_AGG_TIMEOUT = httpx.Timeout(5.0, read=25.0)
 
 def _llm_agent_client_for_runner_row(r: dict) -> LLMAgentClient:
     """Build an agent client from a DB runner row (no extra query)."""
-    url = r["address"].rstrip("/")
-    if "://" in url:
-        url = url.split("://", 1)[1]
-    if ":" in url:
-        host, port_str = url.rsplit(":", 1)
-        port = int(port_str)
-    else:
-        host = url
-        port = 8090
-    caps = r.get("capabilities", {})
-    tls_cert_pem = caps.get("tls_cert") if isinstance(caps, dict) else None
-    return LLMAgentClient(host=host, port=port, psk=AGENT_PSK, tls_cert_pem=tls_cert_pem)
+    return client_from_runner_row(r, AGENT_PSK)
 
 
 # ── Runner helpers ─────────────────────────────────────────────────────────────
@@ -1454,15 +1443,23 @@ async def llm_pull_model(req: LLMPullRequest, runner_id: Optional[int] = None):
         client = await _get_runner_client(app.state.db, runner_id)
         st = await client.status()
         disk_free_gb = st.get("disk_free_gb", None)
+        disk_total_gb = st.get("disk_total_gb", None)
+        # Agent returns disk_* == 0 when disk stats fail (mount/path quirks on some hosts).
+        # Do not treat that as "full disk" or pulls break (e.g. Mac Mini bind mounts).
+        disk_known = (
+            disk_free_gb is not None
+            and disk_total_gb is not None
+            and float(disk_total_gb) > 0
+        )
         model_vram = vram_for_model(req.model)
         # Rough heuristic: disk needed ≈ VRAM estimate (quantized weights on disk)
-        if disk_free_gb is not None and model_vram > 0 and disk_free_gb < model_vram:
+        if disk_known and model_vram > 0 and disk_free_gb < model_vram:
             raise HTTPException(
                 507,
                 f"Not enough disk space on {st.get('node', 'runner')}: "
                 f"{disk_free_gb:.1f} GB free, ~{model_vram:.1f} GB needed for {req.model}"
             )
-        elif disk_free_gb is not None and disk_free_gb < 5:
+        elif disk_known and disk_free_gb < 5:
             disk_warning = f"Low disk space: {disk_free_gb:.1f} GB free"
     except HTTPException:
         raise

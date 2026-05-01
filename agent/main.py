@@ -1191,12 +1191,29 @@ async def pull_model(req: PullRequest):
 
     async def _stream_pull() -> AsyncGenerator[bytes, None]:
         try:
-            async with httpx.AsyncClient(timeout=600) as c:
+            # Long read timeout — large models on slow links; connect stays bounded.
+            t = httpx.Timeout(30.0, read=3600.0)
+            async with httpx.AsyncClient(timeout=t) as c:
                 async with c.stream(
                     "POST",
                     f"{OLLAMA_URL}/api/pull",
                     json={"name": req.model, "stream": True},
                 ) as resp:
+                    if resp.status_code != 200:
+                        detail = (await resp.aread()).decode(errors="replace")[:800]
+                        yield (
+                            json.dumps(
+                                {
+                                    "error": (
+                                        f"Ollama pull failed HTTP {resp.status_code}: {detail or resp.reason_phrase}. "
+                                        "On Mac, ensure Ollama listens on 0.0.0.0:11434 (OLLAMA_HOST), "
+                                        "not only 127.0.0.1, so the agent container can reach it via host.docker.internal."
+                                    )
+                                }
+                            ).encode()
+                            + b"\n"
+                        )
+                        return
                     async for line in resp.aiter_lines():
                         if line:
                             yield line.encode() + b"\n"
