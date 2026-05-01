@@ -1,8 +1,9 @@
-import { useState, type ReactNode } from 'react'
+import { useState, useEffect, type ReactNode } from 'react'
 import { Download, Trash2, Loader2, CheckCircle2, AlertCircle, Image, Layers, Cpu, Upload, Shield, ShieldOff, Play, Square, Search, RefreshCw, BookOpen, Cloud, Settings2, Power, RefreshCcw, Server, X, Pin } from 'lucide-react'
 import { usePullModel, useDeleteModel, useCheckpoints, useSwitchCheckpoint, useLlmStatus, useLoadModel, useUnloadFromVram, useStartComfyui, useStopComfyui, useLibrary, useRefreshLibrary, useRefreshRemoteDigests, useUpdateOutdatedModels, useForceUpdateModel, useCommunityModels, useCloudModels, useCloudStatus, useUpdateCloudModel, useCloudKeys, useStoreCloudKey, useDeleteCloudKey, useRunners, useSyncModels, useOps, useDismissOp, useModelList, useUpdateModelSettings, useAliasesForModel, useUpsertAlias, useDeleteAlias, useRunnerParamsForModel, useUpsertRunnerParams, useDeleteRunnerParams, usePinModelOnRunner } from '../hooks/useBackend'
 import type { ModelAlias, ModelRunnerParams } from '../hooks/useBackend'
 import type { LibraryModel, Runner } from '../types'
+import { isRunnerInSchedulerPool } from '../utils/runnerActive'
 import type { CloudModel, ModelInfo, StoredApiKey } from '../hooks/useBackend'
 
 function stripExt(filename: string): string {
@@ -1630,11 +1631,21 @@ export function Models() {
   const [tab, setTab] = useState<'local' | 'cloud'>('local')
   const runners = useRunners()
   const runnerList = (runners.data ?? []).filter(r => r.enabled)
+  /** Same pool as library / scheduler (recent heartbeat) — excludes stale DB rows like old container ids. */
+  const schedulingRunners = runnerList.filter(isRunnerInSchedulerPool)
   const [selectedRunner, setSelectedRunner] = useState<number | undefined>(undefined)
   const sync = useSyncModels()
   const [syncMsg, setSyncMsg] = useState<string | null>(null)
 
-  const selectedRunnerData = runnerList.find(r => r.id === selectedRunner)
+  useEffect(() => {
+    if (selectedRunner === undefined) return
+    const active = (runners.data ?? []).filter(r => r.enabled).filter(isRunnerInSchedulerPool)
+    if (!active.some(r => r.id === selectedRunner)) {
+      setSelectedRunner(undefined)
+    }
+  }, [selectedRunner, runners.data])
+
+  const selectedRunnerData = schedulingRunners.find(r => r.id === selectedRunner)
 
   return (
     <div className="space-y-6">
@@ -1658,7 +1669,7 @@ export function Models() {
         {/* Sync Models is a fleet-level action — hide it when a specific
             runner is selected. Per-runner work happens via the library
             section's Update outdated / Force update buttons. */}
-        {tab === 'local' && runnerList.length >= 2 && selectedRunner === undefined && (
+        {tab === 'local' && schedulingRunners.length >= 2 && selectedRunner === undefined && (
           <button
             onClick={async () => {
               setSyncMsg(null)
@@ -1691,16 +1702,20 @@ export function Models() {
       )}
 
       {tab === 'local' ? (
-        runnerList.length === 0 ? (
+        schedulingRunners.length === 0 ? (
           <div className="bg-gray-900 border border-gray-800 rounded-xl py-12 text-center">
             <Server className="w-8 h-8 text-gray-700 mx-auto mb-3" />
-            <p className="text-sm text-gray-500">No runners connected</p>
-            <p className="text-xs text-gray-600 mt-1">Start an llm-agent on a GPU host to manage models.</p>
+            <p className="text-sm text-gray-500">No runners with a recent heartbeat</p>
+            <p className="text-xs text-gray-600 mt-1">
+              {runnerList.length > 0
+                ? 'Registered runners are offline or have not checked in within ~90s. See Runners for details.'
+                : 'Start an llm-agent on a GPU host to manage models.'}
+            </p>
           </div>
         ) : (
           <div className="space-y-6">
             {/* Runner tabs */}
-            <RunnerTabs runners={runnerList} selected={selectedRunner} onSelect={setSelectedRunner} />
+            <RunnerTabs runners={schedulingRunners} selected={selectedRunner} onSelect={setSelectedRunner} />
 
             {/* Model content based on selection */}
             <div className="space-y-8">
@@ -1711,7 +1726,7 @@ export function Models() {
                 </div>
               )}
               <InstalledModelsView
-                runners={runnerList}
+                runners={schedulingRunners}
                 selectedRunner={selectedRunner}
                 selectedRunnerHostname={selectedRunnerData?.hostname}
               />
@@ -1720,7 +1735,7 @@ export function Models() {
               <LibraryBrowserSection
                 selectedRunner={selectedRunner}
                 selectedRunnerHostname={selectedRunnerData?.hostname}
-                allRunners={runnerList}
+                allRunners={schedulingRunners}
               />
               <div className="border-t border-gray-800" />
               <ImageModelsSection />
