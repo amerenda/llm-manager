@@ -595,6 +595,14 @@ class SimplifiedScheduler:
                     continue
                 idle_counter = 0
 
+                # get_pending_jobs omits request to avoid loading 100 huge JSON
+                # bodies every tick; load only what this batch will execute.
+                _req_map = await queue_db.fetch_pending_job_requests(
+                    self.pool, [j["id"] for j in batch]
+                )
+                for _job in batch:
+                    _job["request"] = _req_map[_job["id"]]
+
                 head = batch[0]
                 model = head["model"]
                 provider = detect_provider(model)

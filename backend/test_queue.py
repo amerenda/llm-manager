@@ -301,6 +301,33 @@ class TestGetPendingJobs:
         args = conn.fetch.call_args[0]
         assert args[1] == 5
 
+    def test_sql_omits_request_column(self):
+        pool, conn = _make_mock_pool()
+        conn.fetch.return_value = []
+        _run(queue_db.get_pending_jobs(pool))
+        sql = conn.fetch.call_args[0][0]
+        assert "SELECT q.id" in sql.replace("\n", " ")
+        assert "q.request" not in sql
+
+
+class TestCountPendingJobs:
+    def test_returns_int(self):
+        pool, conn = _make_mock_pool()
+        conn.fetchrow.return_value = {"c": 42}
+        assert _run(queue_db.count_pending_jobs(pool)) == 42
+
+
+class TestFetchPendingJobRequests:
+    def test_fetches_by_ids(self):
+        pool, conn = _make_mock_pool()
+        conn.fetch.return_value = [
+            {"id": "a", "request": {"messages": []}},
+            {"id": "b", "request": '{"x": 1}'},
+        ]
+        out = _run(queue_db.fetch_pending_job_requests(pool, ["a", "b"]))
+        assert out["a"] == {"messages": []}
+        assert out["b"] == {"x": 1}
+
 
 class TestGetBatchJobs:
     def test_returns_list(self):

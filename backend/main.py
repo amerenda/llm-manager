@@ -2895,8 +2895,7 @@ async def metrics_endpoint():
         except Exception:
             pass
         try:
-            pending = await queue_db.get_pending_jobs(app.state.db)
-            queue_depth_gauge.set(len(pending))
+            queue_depth_gauge.set(await queue_db.count_pending_jobs(app.state.db))
             running = await queue_db.get_running_jobs(app.state.db)
             queue_active_jobs_gauge.set(len(running))
         except Exception:

@@ -1,6 +1,6 @@
 """Database operations for the job queue and model settings."""
 import logging
-from typing import Optional
+from typing import Any, Optional
 import asyncpg
 
 logger = logging.getLogger(__name__)
@@ -227,10 +227,18 @@ async def get_pending_jobs(pool: asyncpg.Pool, limit: int = 100) -> list[dict]:
     fresh priority=0 job, but a priority=0 job that has waited 10 minutes
     catches up, and one that has waited longer wins. Prevents starvation
     without a separate age-bump pass.
+
+    **Does not SELECT ``request``** — prompts can be huge; loading 100 full
+    JSON bodies on every scheduler tick caused OOM on small pod limits.
+    The scheduler calls :func:`fetch_pending_job_requests` for the batch it
+    will actually run.
     """
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
-            SELECT q.*, a.name AS app_name
+            SELECT q.id, q.batch_id, q.app_id, q.model, q.status, q.priority,
+                   q.retried, q.metadata, q.error, q.runner_id,
+                   q.created_at, q.started_at, q.completed_at, q.loading_model_at,
+                   a.name AS app_name
             FROM queue_jobs q
             LEFT JOIN registered_apps a ON a.id = q.app_id
             WHERE q.status IN ('queued', 'waiting_for_eviction')
@@ -240,6 +248,38 @@ async def get_pending_jobs(pool: asyncpg.Pool, limit: int = 100) -> list[dict]:
             LIMIT $1
         """, limit)
     return [dict(r) for r in rows]
+
+
+async def fetch_pending_job_requests(pool: asyncpg.Pool, job_ids: list[str]) -> dict[str, Any]:
+    """Load ``request`` JSON for the given job ids (scheduler dispatch only)."""
+    import json as _json
+
+    if not job_ids:
+        return {}
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, request FROM queue_jobs WHERE id = ANY($1::text[])",
+            job_ids,
+        )
+    out: dict[str, Any] = {}
+    for r in rows:
+        req = r["request"]
+        if isinstance(req, str):
+            req = _json.loads(req)
+        out[r["id"]] = req
+    return out
+
+
+async def count_pending_jobs(pool: asyncpg.Pool) -> int:
+    """Count queued + waiting_for_eviction jobs (cheap metrics path)."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT COUNT(*)::int AS c FROM queue_jobs
+            WHERE status IN ('queued', 'waiting_for_eviction')
+            """
+        )
+    return int(row["c"]) if row else 0
 
 
 async def get_active_jobs_for_model(pool: asyncpg.Pool, model: str) -> list[dict]:
