@@ -129,6 +129,26 @@ def _inc_request(endpoint: str, method: str, status: int):
     api_requests_total.labels(endpoint=endpoint, method=method, status=str(status)).inc()
 
 
+# Shorter timeouts when aggregating many runners — avoids 30s × N sequential stalls.
+_AGENT_AGG_TIMEOUT = httpx.Timeout(5.0, read=25.0)
+
+
+def _llm_agent_client_for_runner_row(r: dict) -> LLMAgentClient:
+    """Build an agent client from a DB runner row (no extra query)."""
+    url = r["address"].rstrip("/")
+    if "://" in url:
+        url = url.split("://", 1)[1]
+    if ":" in url:
+        host, port_str = url.rsplit(":", 1)
+        port = int(port_str)
+    else:
+        host = url
+        port = 8090
+    caps = r.get("capabilities", {})
+    tls_cert_pem = caps.get("tls_cert") if isinstance(caps, dict) else None
+    return LLMAgentClient(host=host, port=port, psk=AGENT_PSK, tls_cert_pem=tls_cert_pem)
+
+
 # ── Runner helpers ─────────────────────────────────────────────────────────────
 
 async def _get_runner_client(
@@ -162,19 +182,7 @@ async def _get_runner_client(
         if not eligible:
             raise HTTPException(503, "No active llm-runners available (all are draining)")
         r = eligible[0]
-    url = r["address"].rstrip("/")
-    if "://" in url:
-        url = url.split("://", 1)[1]
-    if ":" in url:
-        host, port_str = url.rsplit(":", 1)
-        port = int(port_str)
-    else:
-        host = url
-        port = 8090
-    # Extract TLS cert from capabilities for cert-pinned HTTPS
-    caps = r.get("capabilities", {})
-    tls_cert_pem = caps.get("tls_cert") if isinstance(caps, dict) else None
-    return LLMAgentClient(host=host, port=port, psk=AGENT_PSK, tls_cert_pem=tls_cert_pem)
+    return _llm_agent_client_for_runner_row(r)
 
 
 async def _get_runner_ollama_base(pool: asyncpg.Pool, runner_id: Optional[int] = None) -> str:
@@ -799,14 +807,18 @@ async def models_for_agents():
                 total = caps.get("gpu_vram_total_bytes", 0) / (1024**3)
                 runner_vram[r["hostname"]] = round(total, 1)
 
-        # Get models from ALL runners via their agent API
+        # Get models from ALL runners via their agent API (parallel — was sequential 30s×2×N)
         all_models_map: dict = {}  # name -> model dict
         model_runners: dict = {}  # name -> [{runner_id, hostname}]
         loaded_names = set()
-        for runner in runners_list:
+
+        async def _runner_catalog(runner: dict) -> None:
             try:
-                client = await _get_runner_client(pool, runner["id"])
-                result = await client.models()
+                client = _llm_agent_client_for_runner_row(runner)
+                result, status = await asyncio.gather(
+                    client.models(timeout=_AGENT_AGG_TIMEOUT),
+                    client.status(timeout=_AGENT_AGG_TIMEOUT),
+                )
                 for m in result.get("data", []):
                     name = m.get("id", "")
                     if name:
@@ -815,11 +827,12 @@ async def models_for_agents():
                             "runner_id": runner["id"],
                             "hostname": runner["hostname"],
                         })
-                status = await client.status()
                 for lm in status.get("loaded_ollama_models", []):
                     loaded_names.add(lm["name"])
             except Exception:
                 pass
+
+        await asyncio.gather(*(_runner_catalog(r) for r in runners_list))
 
         # Classify safety
         model_names = list(all_models_map.keys())
@@ -1286,7 +1299,23 @@ async def llm_status(request: Request, runner_id: Optional[int] = None):
                 "loaded_ollama_models": [], "cpu_pct": 0, "mem_total_gb": 0,
                 "mem_used_gb": 0, "gpu_vram_pct": 0}
 
-    runner_statuses = []
+    async def _one_status(r: dict) -> dict:
+        try:
+            client = _llm_agent_client_for_runner_row(r)
+            status = await client.status(timeout=_AGENT_AGG_TIMEOUT)
+            status["runner_id"] = r["id"]
+            status["runner_hostname"] = r["hostname"]
+            return status
+        except Exception:
+            return {
+                "runner_id": r["id"],
+                "runner_hostname": r["hostname"],
+                "error": "unreachable",
+                "gpu_vram_total_gb": 0,
+                "gpu_vram_used_gb": 0,
+            }
+
+    runner_statuses = await asyncio.gather(*(_one_status(r) for r in runners_list))
     all_loaded_models = []
     total_vram = 0.0
     used_vram = 0.0
@@ -1294,14 +1323,9 @@ async def llm_status(request: Request, runner_id: Optional[int] = None):
     total_mem = 0.0
     used_mem = 0.0
 
-    for r in runners_list:
-        try:
-            client = await _get_runner_client(pool, r["id"])
-            status = await client.status()
-            status["runner_id"] = r["id"]
-            status["runner_hostname"] = r["hostname"]
-            runner_statuses.append(status)
-
+    for i, r in enumerate(runners_list):
+        status = runner_statuses[i]
+        if "error" not in status:
             rv_total = status.get("gpu_vram_total_gb", 0)
             rv_used = status.get("gpu_vram_used_gb", 0)
             total_vram += rv_total
@@ -1314,14 +1338,6 @@ async def llm_status(request: Request, runner_id: Optional[int] = None):
                 m["runner"] = r["hostname"]
                 m["do_not_evict"] = (r.get("pinned_model") == m["name"])
                 all_loaded_models.append(m)
-        except Exception:
-            runner_statuses.append({
-                "runner_id": r["id"],
-                "runner_hostname": r["hostname"],
-                "error": "unreachable",
-                "gpu_vram_total_gb": 0,
-                "gpu_vram_used_gb": 0,
-            })
 
     vram_pct = round((used_vram / total_vram * 100) if total_vram > 0 else 0, 1)
 
@@ -1364,20 +1380,25 @@ async def llm_models(runner_id: Optional[int] = None):
     runners_list = await db.get_active_runners(pool)
     model_map: dict[str, dict] = {}  # model_id -> model data with runners list
 
-    for r in runners_list:
+    async def _one_models(r: dict) -> Optional[dict]:
         try:
-            client = await _get_runner_client(pool, r["id"])
-            result = await client.models()
-            for m in result.get("data", []):
-                mid = m.get("id")
-                if mid not in model_map:
-                    model_map[mid] = {**m, "runners": []}
-                model_map[mid]["runners"].append({
-                    "runner_id": r["id"],
-                    "hostname": r["hostname"],
-                })
+            client = _llm_agent_client_for_runner_row(r)
+            return await client.models(timeout=_AGENT_AGG_TIMEOUT)
         except Exception:
-            pass
+            return None
+
+    model_results = await asyncio.gather(*(_one_models(r) for r in runners_list))
+    for r, result in zip(runners_list, model_results):
+        if not result:
+            continue
+        for m in result.get("data", []):
+            mid = m.get("id")
+            if mid not in model_map:
+                model_map[mid] = {**m, "runners": []}
+            model_map[mid]["runners"].append({
+                "runner_id": r["id"],
+                "hostname": r["hostname"],
+            })
 
     # Enrich with categories from model_settings or library cache
     for mid, m in model_map.items():
@@ -1984,16 +2005,23 @@ async def proxy_list_models(request: Request):
     # Local models from active runners
     try:
         runners_list = await db.get_active_runners(pool)
-        for runner in runners_list:
+
+        async def _ids_for_runner(runner: dict) -> set[str]:
+            out: set[str] = set()
             try:
-                client = await _get_runner_client(pool, runner["id"])
-                result = await client.models()
+                client = _llm_agent_client_for_runner_row(runner)
+                result = await client.models(timeout=_AGENT_AGG_TIMEOUT)
                 for m in result.get("data", []):
                     name = m.get("id", "")
                     if name:
-                        model_ids.add(name)
+                        out.add(name)
             except Exception:
-                continue
+                pass
+            return out
+
+        id_sets = await asyncio.gather(*(_ids_for_runner(r) for r in runners_list))
+        for s in id_sets:
+            model_ids |= s
     except Exception:
         pass
 

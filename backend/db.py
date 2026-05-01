@@ -607,13 +607,18 @@ async def get_active_runners(pool: asyncpg.Pool) -> list[dict]:
 
 
 async def get_all_runners(pool: asyncpg.Pool) -> list[dict]:
-    """Return all runners seen recently (including disabled), for UI display."""
+    """Return runners for the admin UI (including disabled).
+
+    Uses a long look-back so operators still see hosts that stopped heartbeating
+    (wrong AGENT_ADDRESS, network, etc.). Scheduling still uses get_active_runners
+    (90s). The UI marks stale rows via last_seen.
+    """
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
             SELECT id, hostname, address, port, capabilities, enabled, auto_update, pinned_model, draining, last_seen, created_at
             FROM llm_runners
-            WHERE last_seen > NOW() - INTERVAL '90 seconds'
+            WHERE last_seen > NOW() - INTERVAL '7 days'
             ORDER BY hostname
             """
         )

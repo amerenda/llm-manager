@@ -121,7 +121,9 @@ export function useModelList() {
   return useQuery<ModelInfo[]>({
     queryKey: ['model-list'],
     queryFn: () => get('/api/models'),
-    refetchInterval: 10_000,
+    staleTime: 8_000,
+    refetchInterval: 20_000,
+    refetchOnWindowFocus: false,
   })
 }
 
@@ -140,7 +142,9 @@ export function useLlmStatus() {
   return useQuery<LlmStatus>({
     queryKey: ['llm-status'],
     queryFn: () => get('/api/llm/status'),
-    refetchInterval: 5_000,
+    staleTime: 6_000,
+    refetchInterval: 12_000,
+    refetchOnWindowFocus: false,
     retry: 0,
   })
 }
@@ -151,7 +155,9 @@ export function useLlmModels() {
   return useQuery<LlmModel[]>({
     queryKey: ['llm-models'],
     queryFn: () => get<{ data: LlmModel[] }>('/api/llm/models').then(r => r.data),
-    refetchInterval: 5_000,
+    staleTime: 6_000,
+    refetchInterval: 12_000,
+    refetchOnWindowFocus: false,
   })
 }
 
@@ -333,7 +339,9 @@ export function useRunners() {
   return useQuery<Runner[]>({
     queryKey: ['runners'],
     queryFn: () => get('/api/runners'),
-    refetchInterval: 5_000,
+    staleTime: 5_000,
+    refetchInterval: 10_000,
+    refetchOnWindowFocus: false,
   })
 }
 

@@ -55,14 +55,16 @@ class LLMAgentClient:
 
     # ── Read operations ────────────────────────────────────────────────────────
 
-    async def status(self) -> dict:
-        async with self._client(timeout=self._timeout) as c:
+    async def status(self, timeout: Optional[httpx.Timeout] = None) -> dict:
+        t = self._timeout if timeout is None else timeout
+        async with self._client(timeout=t) as c:
             r = await c.get(f"{self.base_url}/v1/status", headers=self._headers)
             r.raise_for_status()
             return r.json()
 
-    async def models(self) -> dict:
-        async with self._client(timeout=self._timeout) as c:
+    async def models(self, timeout: Optional[httpx.Timeout] = None) -> dict:
+        t = self._timeout if timeout is None else timeout
+        async with self._client(timeout=t) as c:
             r = await c.get(f"{self.base_url}/v1/models", headers=self._headers)
             r.raise_for_status()
             return r.json()
