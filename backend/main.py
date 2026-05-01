@@ -1433,21 +1433,85 @@ class LLMPullRequest(BaseModel):
     model: str
 
 
-def _extract_pull_error(last_status: str) -> Optional[str]:
-    """Parse the final NDJSON chunk from an Ollama /api/pull stream. When a
-    pull fails (e.g. manifest not found, auth error) Ollama closes the stream
-    with a line like `{"error": "..."}` — but the HTTP response is still 200,
-    so the async iterator never raises. This catches that case so the op can
-    be marked failed instead of silently "completed"."""
-    if not last_status:
+def _exception_detail(exc: BaseException) -> str:
+    """Non-empty string for storing on background_ops.error (empty str breaks the UI)."""
+    text = str(exc).strip()
+    if text:
+        return text
+    name = exc.__class__.__name__
+    mod = getattr(exc.__class__, "__module__", "") or ""
+    if mod and mod != "builtins":
+        return f"{mod}.{name}"
+    return name
+
+
+def _extract_pull_error(line: str) -> Optional[str]:
+    """Parse one NDJSON line from an Ollama /api/pull stream (or agent proxy).
+
+    Pull can fail with HTTP 200 and an `{"error":...}` line; some builds use
+    `status: error` without a dedicated error string."""
+    if not line or not line.strip():
         return None
     try:
-        parsed = json.loads(last_status)
+        parsed = json.loads(line)
     except Exception:
         return None
-    if isinstance(parsed, dict) and parsed.get("error"):
-        return str(parsed["error"])
+    if not isinstance(parsed, dict):
+        return None
+    err = parsed.get("error")
+    if err is not None and str(err).strip():
+        return str(err).strip()
+    if parsed.get("status") == "error":
+        msg = parsed.get("message")
+        if msg is not None and str(msg).strip():
+            return str(msg).strip()
+        try:
+            return json.dumps(parsed, ensure_ascii=False)[:800]
+        except Exception:
+            return "Ollama reported status=error (unparseable JSON)"
     return None
+
+
+async def _consume_agent_pull_stream(
+    pool: asyncpg.Pool,
+    op_id: str,
+    client: LLMAgentClient,
+    model: str,
+) -> None:
+    """Run pull on agent, stream progress into background_ops, set terminal status."""
+    last_status = ""
+    stream_err: Optional[str] = None
+    last_write = 0.0
+    try:
+        async for chunk in client.pull_model(model):
+            line = chunk.decode(errors="replace").strip()
+            if not line:
+                continue
+            last_status = line
+            e = _extract_pull_error(line)
+            if e:
+                stream_err = e
+            now = asyncio.get_event_loop().time()
+            if now - last_write >= 1.0:
+                await db.update_op(pool, op_id, progress=last_status)
+                last_write = now
+        err = stream_err or _extract_pull_error(last_status)
+        if err:
+            detail = err.strip() or "Pull failed (Ollama returned an error with no message)"
+            await db.update_op(
+                pool, op_id,
+                status="failed",
+                progress=last_status or None,
+                error=detail,
+            )
+        else:
+            await db.update_op(pool, op_id, status="completed", progress=last_status)
+    except Exception as e:
+        await db.update_op(
+            pool, op_id,
+            status="failed",
+            error=_exception_detail(e),
+        )
 
 
 @app.post("/api/llm/models/pull")
@@ -1489,25 +1553,8 @@ async def llm_pull_model(req: LLMPullRequest, runner_id: Optional[int] = None):
     await db.create_op(pool, op_id, "pull", req.model)
 
     async def _do_pull():
-        try:
-            client = await _get_runner_client(pool, runner_id)
-            last_status = ""
-            last_write = 0.0
-            async for chunk in client.pull_model(req.model):
-                last_status = chunk.decode().strip()
-                now = asyncio.get_event_loop().time()
-                if now - last_write >= 1.0:
-                    await db.update_op(pool, op_id, progress=last_status)
-                    last_write = now
-            err = _extract_pull_error(last_status)
-            if err:
-                await db.update_op(pool, op_id, status="failed",
-                                   progress=last_status, error=err)
-            else:
-                await db.update_op(pool, op_id, status="completed",
-                                   progress=last_status)
-        except Exception as e:
-            await db.update_op(pool, op_id, status="failed", error=str(e))
+        client = await _get_runner_client(pool, runner_id)
+        await _consume_agent_pull_stream(pool, op_id, client, req.model)
 
     asyncio.create_task(_do_pull())
     msg = f"Pulling {req.model} in background"
@@ -1525,25 +1572,8 @@ async def update_model(model: str, runner_id: Optional[int] = None):
     await db.create_op(pool, op_id, "update", model)
 
     async def _do_update():
-        try:
-            client = await _get_runner_client(pool, runner_id)
-            last_status = ""
-            last_write = 0.0
-            async for chunk in client.pull_model(model):
-                last_status = chunk.decode().strip()
-                now = asyncio.get_event_loop().time()
-                if now - last_write >= 1.0:
-                    await db.update_op(pool, op_id, progress=last_status)
-                    last_write = now
-            err = _extract_pull_error(last_status)
-            if err:
-                await db.update_op(pool, op_id, status="failed",
-                                   progress=last_status, error=err)
-            else:
-                await db.update_op(pool, op_id, status="completed",
-                                   progress=last_status)
-        except Exception as e:
-            await db.update_op(pool, op_id, status="failed", error=str(e))
+        client = await _get_runner_client(pool, runner_id)
+        await _consume_agent_pull_stream(pool, op_id, client, model)
 
     asyncio.create_task(_do_update())
     return {"ok": True, "op_id": op_id, "message": f"Updating {model} in background"}
@@ -1645,25 +1675,8 @@ async def sync_models():
         await db.create_op(pool, op_id, "sync", p["model"], target=p["target_runner"])
 
         async def _do_sync_pull(model=p["model"], rid=p["target_runner_id"], oid=op_id):
-            try:
-                client = await _get_runner_client(pool, rid)
-                last_status = ""
-                last_write = 0.0
-                async for chunk in client.pull_model(model):
-                    last_status = chunk.decode().strip()
-                    now = asyncio.get_event_loop().time()
-                    if now - last_write >= 1.0:
-                        await db.update_op(pool, oid, progress=last_status)
-                        last_write = now
-                err = _extract_pull_error(last_status)
-                if err:
-                    await db.update_op(pool, oid, status="failed",
-                                       progress=last_status, error=err)
-                else:
-                    await db.update_op(pool, oid, status="completed",
-                                       progress=last_status)
-            except Exception as e:
-                await db.update_op(pool, oid, status="failed", error=str(e))
+            client = await _get_runner_client(pool, rid)
+            await _consume_agent_pull_stream(pool, oid, client, model)
 
         asyncio.create_task(_do_sync_pull())
 
@@ -2368,7 +2381,7 @@ async def llm_load_model(req: ModelLoadRequest, runner_id: Optional[int] = None)
             await client.load_model(model, req.keep_alive)
             await db.update_op(pool, op_id, status="completed")
         except Exception as e:
-            await db.update_op(pool, op_id, status="failed", error=str(e))
+            await db.update_op(pool, op_id, status="failed", error=_exception_detail(e))
 
     asyncio.create_task(_do_load())
     return {"ok": True, "op_id": op_id, "message": f"Loading {req.model} in background"}
@@ -2392,7 +2405,7 @@ async def llm_unload_model(req: ModelUnloadRequest, runner_id: Optional[int] = N
             await client.unload_model_from_vram(req.model)
             await db.update_op(pool, op_id, status="completed")
         except Exception as e:
-            await db.update_op(pool, op_id, status="failed", error=str(e))
+            await db.update_op(pool, op_id, status="failed", error=_exception_detail(e))
 
     asyncio.create_task(_do_unload())
     return {"ok": True, "op_id": op_id, "message": f"Unloading {req.model} in background"}

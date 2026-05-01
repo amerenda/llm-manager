@@ -652,7 +652,8 @@ function InstalledModelsView({ runners, selectedRunner, selectedRunnerHostname }
                   {op.type} · {op.model}
                 </div>
                 <div className="text-red-300/90 break-words mt-0.5">
-                  {op.error || op.progress || 'unknown error'}
+                  {(op.error && op.error.trim()) || (op.progress && op.progress.trim())
+                    || 'No error detail stored — dismiss and retry; if this persists after a backend deploy, capture the browser Network tab for POST /api/llm/models/pull.'}
                 </div>
               </div>
               {op.op_id && (
