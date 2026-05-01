@@ -10,7 +10,9 @@ import ipaddress
 import json
 import logging
 import os
+import plistlib
 import random
+import shlex
 import shutil
 import socket
 import time
@@ -1422,7 +1424,13 @@ async def stop_comfyui():
 
 @app.post("/v1/ollama/restart")
 async def restart_ollama():
-    """Restart the Ollama container to clear stuck VRAM. Requires OLLAMA_CONTAINER env var."""
+    """Restart Ollama — Docker container on GPU hosts, brew services on native Mac."""
+    if _native_ollama():
+        try:
+            _restart_native_ollama_brew()
+            return {"ok": True, "message": "Native Ollama restarted (brew services)"}
+        except RuntimeError as e:
+            raise HTTPException(500, str(e))
     if not OLLAMA_CONTAINER:
         raise HTTPException(503, "OLLAMA_CONTAINER not configured — cannot restart Ollama via Docker")
     if not _DOCKER_OK:
@@ -1445,6 +1453,19 @@ async def restart_ollama():
 # container's image, network mode, restart policy, mounts, devices, and GPU
 # reservations are preserved; only the env vars change.
 
+def _ollama_env_file() -> str:
+    """Path to ollama tunables file: mounted llm/ dir on Mac, else GPU /host-compose."""
+    base = (COMPOSE_DIR_LOCAL or "").strip()
+    if base:
+        return os.path.join(base, "ollama.env")
+    return "/host-compose/ollama.env"
+
+
+def _native_ollama() -> bool:
+    """Ollama runs on the host (e.g. Homebrew on macOS), not a Docker container."""
+    return not (OLLAMA_CONTAINER or "").strip()
+
+
 _OLLAMA_SETTINGS_ALLOWLIST = {
     # key → (type, validator or None)
     "OLLAMA_NUM_CTX":            ("int", lambda v: 1 <= int(v) <= 1_048_576),
@@ -1461,7 +1482,64 @@ _OLLAMA_SETTINGS_ALLOWLIST = {
     "HSA_OVERRIDE_GFX_VERSION":  ("str", None),
 }
 
-_OLLAMA_ENV_FILE = "/host-compose/ollama.env"
+
+def _merge_homebrew_ollama_plist(
+    plist_path: str,
+    request_delta: dict[str, str],
+    merged_state: dict[str, str],
+) -> None:
+    """Apply only keys present in this request to the Homebrew LaunchAgent plist.
+
+    Keys explicitly cleared (empty string in the request) are removed from the plist.
+    Keys not mentioned in the request leave existing plist entries untouched
+    (e.g. OLLAMA_HOST set by configure-native-ollama-bind).
+    """
+    allow = set(_OLLAMA_SETTINGS_ALLOWLIST.keys())
+    with open(plist_path, "rb") as f:
+        pl = plistlib.load(f)
+    ev = pl.get("EnvironmentVariables")
+    if ev is None:
+        ev = {}
+    if not isinstance(ev, dict):
+        ev = {}
+    for k, raw in request_delta.items():
+        if k not in allow:
+            continue
+        if raw == "":
+            ev.pop(k, None)
+        else:
+            ev[k] = merged_state[k]
+    pl["EnvironmentVariables"] = ev
+    tmp = plist_path + ".tmp"
+    with open(tmp, "wb") as f:
+        plistlib.dump(pl, f)
+    os.replace(tmp, plist_path)
+
+
+def _restart_native_ollama_brew() -> None:
+    """Restart Homebrew-managed Ollama on the Mac host.
+
+    OrbStack exposes ``mac`` to run host commands from Linux containers.
+    Override with NATIVE_OLLAMA_RESTART_CMD (shell string) if needed.
+    """
+    import subprocess
+
+    cmd = (os.environ.get("NATIVE_OLLAMA_RESTART_CMD") or "").strip()
+    if not cmd:
+        mac = shutil.which("mac")
+        if mac:
+            cmd = f"{shlex.quote(mac)} brew services restart ollama"
+        elif shutil.which("brew"):
+            cmd = "brew services restart ollama"
+        else:
+            raise RuntimeError(
+                "Cannot restart native Ollama: no 'mac' or 'brew' in PATH. "
+                "Set NATIVE_OLLAMA_RESTART_CMD (e.g. on Docker Desktop Mac)."
+            )
+    r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=120)
+    if r.returncode != 0:
+        msg = (r.stderr or r.stdout or "").strip() or f"exit {r.returncode}"
+        raise RuntimeError(f"brew services restart ollama failed: {msg}")
 
 
 def _normalize_bool(v) -> str:
@@ -1705,11 +1783,24 @@ def _recreate_ollama_container(new_env: dict, new_image: Optional[str] = None) -
 @app.get("/v1/ollama/settings")
 async def get_ollama_settings():
     """Read the current ollama.env tunings + show which keys are controllable."""
-    settings = _parse_env_file(_OLLAMA_ENV_FILE)
+    path = _ollama_env_file()
+    settings = _parse_env_file(path)
+    plist_path = (os.environ.get("OLLAMA_BREW_SERVICE_PLIST") or "").strip()
+    if _native_ollama() and plist_path and os.path.isfile(plist_path):
+        try:
+            with open(plist_path, "rb") as f:
+                pl = plistlib.load(f)
+            ev = pl.get("EnvironmentVariables") or {}
+            if isinstance(ev, dict):
+                for k in _OLLAMA_SETTINGS_ALLOWLIST:
+                    if k in ev and k not in settings:
+                        settings[k] = str(ev[k])
+        except Exception as e:
+            logger.warning("Could not read OLLAMA_BREW_SERVICE_PLIST: %s", e)
     return {
         "settings": settings,
         "allowlist": {k: v[0] for k, v in _OLLAMA_SETTINGS_ALLOWLIST.items()},
-        "env_file": _OLLAMA_ENV_FILE,
+        "env_file": path,
     }
 
 
@@ -1721,11 +1812,7 @@ class OllamaSettingsRequest(BaseModel):
 
 @app.put("/v1/ollama/settings")
 async def put_ollama_settings(req: OllamaSettingsRequest):
-    """Validate, write ollama.env, then recreate the ollama container so the
-    new env takes effect."""
-    if not _DOCKER_OK:
-        raise HTTPException(503, "Docker not available inside agent container")
-
+    """Validate, write ollama.env, then restart Ollama (container recreate or brew)."""
     # Validate + normalize every incoming value first; bail before touching disk.
     normalized: dict = {}
     for k, v in (req.settings or {}).items():
@@ -1734,17 +1821,50 @@ async def put_ollama_settings(req: OllamaSettingsRequest):
         except ValueError as e:
             raise HTTPException(400, f"{k}: {e}")
 
+    if not _native_ollama() and not _DOCKER_OK:
+        raise HTTPException(503, "Docker not available inside agent container")
+
     # Keep any currently-set keys the caller didn't include (partial updates).
     # Caller can explicitly clear a key by passing empty string.
-    current = _parse_env_file(_OLLAMA_ENV_FILE)
+    path = _ollama_env_file()
+    current = _parse_env_file(path)
     merged = {**current, **normalized}
     # Drop empty-string values from the container env (they mean "unset"),
     # but keep them commented-out in the file for visibility.
     container_env = {k: v for k, v in merged.items() if v != ""}
 
-    # Write new file first (on disk), then recreate. If recreate fails, the
+    # Write new file first (on disk), then restart. If restart fails, the
     # file is still the desired state — user can fix and re-apply.
-    _write_env_file(_OLLAMA_ENV_FILE, merged)
+    _write_env_file(path, merged)
+
+    if _native_ollama():
+        plist_path = (os.environ.get("OLLAMA_BREW_SERVICE_PLIST") or "").strip()
+        if plist_path:
+            if not os.path.isfile(plist_path):
+                raise HTTPException(
+                    500,
+                    f"Ollama LaunchAgent plist not found at {plist_path!r} — check OLLAMA_BREW_SERVICE_PLIST / mount",
+                )
+            try:
+                _merge_homebrew_ollama_plist(plist_path, normalized, merged)
+            except Exception as e:
+                logger.exception("plist merge failed")
+                raise HTTPException(500, f"Wrote ollama.env but failed to update LaunchAgent plist: {e}")
+        else:
+            logger.warning(
+                "Native Ollama: OLLAMA_BREW_SERVICE_PLIST unset — wrote %s only; "
+                "Ollama may ignore until plist is configured or process restarted manually",
+                path,
+            )
+        try:
+            _restart_native_ollama_brew()
+        except RuntimeError as e:
+            raise HTTPException(500, f"Saved tunables but failed to restart Ollama: {e}")
+        return {
+            "ok": True,
+            "applied": container_env,
+            "message": f"Native Ollama restarted with {len(container_env)} tuning(s).",
+        }
 
     try:
         _recreate_ollama_container(container_env)
@@ -1831,7 +1951,7 @@ async def upgrade_ollama(req: OllamaUpgradeRequest):
     except Exception as e:
         raise HTTPException(500, f"Failed to pull {new_image}: {e}")
 
-    current_env = _parse_env_file(_OLLAMA_ENV_FILE)
+    current_env = _parse_env_file(_ollama_env_file())
     container_env = {k: v for k, v in current_env.items() if v != ""}
     try:
         _recreate_ollama_container(container_env, new_image=new_image)

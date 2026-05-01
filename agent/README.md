@@ -10,6 +10,8 @@ On the home-lab Mac Mini, Ollama runs **on the host** for Metal. Deploy **only**
 
 Set **`RUNNER_HOSTNAME`** (or `AGENT_NODE_NAME`) to the Mac’s stable name (e.g. `mac-mini-m4`). Otherwise Docker sets the container hostname to a short id and llm-manager shows that hex as the runner name.
 
+**Ollama tunables (Runners UI):** for native Homebrew Ollama, set **`OLLAMA_BREW_SERVICE_PLIST`** to the path (inside the container) of `homebrew.mxcl.ollama.plist`, bind-mount that directory read-write, and set **`NATIVE_OLLAMA_RESTART_CMD`** if needed (OrbStack often works with `mac brew services restart ollama`). The agent writes **`ollama.env`** under **`COMPOSE_DIR_LOCAL`** and merges only changed keys into the plist’s `EnvironmentVariables`.
+
 Enable **`AGENT_UNIFIED_MEMORY_VRAM=true`** so VRAM metrics use the **same pool as system RAM** (`psutil.virtual_memory()` used/total). There is no NVML/AMD sysfs for Metal from a Linux agent container. If `psutil`’s total does not match real unified RAM (some VM limits), set **`AGENT_UNIFIED_VRAM_TOTAL_BYTES`** to the pool size in bytes.
 
 **Note:** Registering under a new hostname creates a **new** llm-manager runner row; remove the old runner (short-id hostname) in the UI if it lingers.
