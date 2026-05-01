@@ -97,7 +97,12 @@ COMFYUI_OUTPUT_DIR = os.environ.get("COMFYUI_OUTPUT_DIR", "/outputs")
 COMFYUI_IMAGE = os.environ.get("COMFYUI_IMAGE", "murderbot-image-comfyui:latest")
 COMFYUI_CONTAINER = os.environ.get("COMFYUI_CONTAINER", "comfyui")
 OLLAMA_CONTAINER = os.environ.get("OLLAMA_CONTAINER", "")
-NODE = socket.gethostname()
+# Docker default hostname is the container id (short hex). Prefer a stable host name.
+NODE = (
+    os.environ.get("RUNNER_HOSTNAME")
+    or os.environ.get("AGENT_NODE_NAME")
+    or socket.gethostname()
+)
 
 # Docker client for managing ComfyUI container
 try:
@@ -116,6 +121,22 @@ AGENT_VERSION = os.environ.get("AGENT_VERSION", "unknown")
 COMPOSE_DIR = os.environ.get("COMPOSE_DIR", "")  # host path — used in docker compose -f
 COMPOSE_DIR_LOCAL = os.environ.get("COMPOSE_DIR_LOCAL", "")  # container-mounted path — used for file I/O
 COMPOSE_PROFILE = os.environ.get("COMPOSE_PROFILE", "")  # nvidia or amd
+
+
+def _unified_vram_enabled() -> bool:
+    """Apple Silicon / unified memory: no NVML/AMD sysfs in the agent container."""
+    return os.environ.get("AGENT_UNIFIED_MEMORY_VRAM", "").lower() in ("1", "true", "yes")
+
+
+def _unified_vram_total_override_bytes() -> int | None:
+    raw = (os.environ.get("AGENT_UNIFIED_VRAM_TOTAL_BYTES") or "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning("Invalid AGENT_UNIFIED_VRAM_TOTAL_BYTES=%r", raw)
+        return None
 
 
 def _detect_host_ip() -> str:
@@ -377,9 +398,10 @@ async def lifespan(app: FastAPI):
 
 
 async def _build_capabilities() -> dict:
-    gpu = _gpu_stats()
-    disk = _disk_stats()
     loaded = await _ollama_loaded_models()
+    ollama_loaded_bytes = sum(int(m.get("size_bytes", 0) or 0) for m in loaded)
+    gpu = _gpu_stats(ollama_loaded_bytes=ollama_loaded_bytes)
+    disk = _disk_stats()
     downloaded = await _ollama_downloaded_models()
     comfyui_ok = await _comfyui_ok()
     caps = {
@@ -599,7 +621,7 @@ async def psk_auth(request: Request, call_next):
 
 # ── GPU helpers ───────────────────────────────────────────────────────────────
 
-def _gpu_stats() -> dict:
+def _gpu_stats(*, ollama_loaded_bytes: int = 0) -> dict:
     _zero = {"vram_used_bytes": 0, "vram_total_bytes": 0, "vram_pct": 0.0, "gpu_vendor": _GPU_BACKEND}
     if _GPU_BACKEND == "nvidia":
         try:
@@ -633,6 +655,17 @@ def _gpu_stats() -> dict:
         except Exception as exc:
             logger.warning("AMD VRAM read failed: %s", exc, exc_info=True)
             return _zero
+    if _unified_vram_enabled():
+        vm = psutil.virtual_memory()
+        total = _unified_vram_total_override_bytes() or int(vm.total)
+        used = min(max(0, ollama_loaded_bytes), total)
+        pct = round(used / total * 100, 1) if total else 0.0
+        return {
+            "vram_used_bytes": used,
+            "vram_total_bytes": total,
+            "vram_pct": pct,
+            "gpu_vendor": "unified",
+        }
     return _zero
 
 
@@ -749,6 +782,7 @@ async def _ollama_loaded_models() -> list[dict]:
                 return [
                     {
                         "name": m["name"],
+                        "size_bytes": int(m.get("size", 0) or 0),
                         "size_gb": round(m.get("size", 0) / 1e9, 2),
                     }
                     for m in models
@@ -793,16 +827,18 @@ async def _comfyui_active_checkpoint() -> Optional[str]:
 async def health():
     ollama_up = await _ollama_ok()
     comfyui_up = await _comfyui_ok()
-    return {"ok": True, "node": NODE, "gpu_vendor": _GPU_BACKEND, "ollama": ollama_up, "comfyui": comfyui_up}
+    gpu_vendor = _gpu_stats(ollama_loaded_bytes=0).get("gpu_vendor", _GPU_BACKEND)
+    return {"ok": True, "node": NODE, "gpu_vendor": gpu_vendor, "ollama": ollama_up, "comfyui": comfyui_up}
 
 
 @app.get("/v1/status")
 async def status():
     t0 = time.time()
-    gpu = _gpu_stats()
+    loaded = await _ollama_loaded_models()
+    ollama_loaded_bytes = sum(int(m.get("size_bytes", 0) or 0) for m in loaded)
+    gpu = _gpu_stats(ollama_loaded_bytes=ollama_loaded_bytes)
     sys = _sys_stats()
     disk = _disk_stats()
-    loaded = await _ollama_loaded_models()
     comfyui_up = await _comfyui_ok()
     checkpoints = await _comfyui_checkpoints()
     active_ckpt = await _comfyui_active_checkpoint() if comfyui_up else None
@@ -1828,9 +1864,10 @@ async def get_logs(tail: int = 200, service: str = "all"):
 @app.get("/metrics")
 async def metrics():
     # Update gauges before scrape
-    gpu = _gpu_stats()
-    sys = _sys_stats()
     loaded = await _ollama_loaded_models()
+    ollama_loaded_bytes = sum(int(m.get("size_bytes", 0) or 0) for m in loaded)
+    gpu = _gpu_stats(ollama_loaded_bytes=ollama_loaded_bytes)
+    sys = _sys_stats()
     comfyui_up = await _comfyui_ok()
     _update_gauges(gpu, sys, len(loaded), comfyui_up)
 

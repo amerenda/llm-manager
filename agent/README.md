@@ -4,6 +4,18 @@ Runs on every GPU host in the fleet. Wraps an Ollama container plus (optionally)
 
 Ollama is **always compose-managed** by this agent — host-managed Ollama is not supported. The Models page in the UI edits `ollama.env` and triggers a container recreate via the agent; that round-trip only works when compose owns the Ollama container.
 
+## Mac Mini (Apple Silicon, native Ollama)
+
+On the home-lab Mac Mini, Ollama runs **on the host** for Metal. Deploy **only** the agent via Docker using the dedicated stack in [`amerenda/mac-mini-compose`](https://github.com/amerenda/mac-mini-compose) (`llm/compose.yaml`): bridge networking, `OLLAMA_URL=http://host.docker.internal:11434`, and **no** `OLLAMA_CONTAINER` so the agent skips compose-managed Ollama checks. GitOps and Komodo wiring are documented in that repo’s README (separate stack + webhook so `llm` deploys do not touch core/automation/monitoring/runners).
+
+Set **`RUNNER_HOSTNAME`** (or `AGENT_NODE_NAME`) to the Mac’s stable name (e.g. `mac-mini-m4`). Otherwise Docker sets the container hostname to a short id and llm-manager shows that hex as the runner name.
+
+Enable **`AGENT_UNIFIED_MEMORY_VRAM=true`** so VRAM bars use **container-visible RAM** as the unified pool and **Ollama `/api/ps` model sizes** as “used”. There is no NVML/AMD sysfs for Metal from a Linux agent container. If `psutil`’s total does not match real unified RAM (some VM limits), set **`AGENT_UNIFIED_VRAM_TOTAL_BYTES`** to the pool size in bytes.
+
+**Note:** Registering under a new hostname creates a **new** llm-manager runner row; remove the old runner (short-id hostname) in the UI if it lingers.
+
+For a manual compose file outside that repo, mirror the same pattern: publish `8090:8090`, `extra_hosts: host.docker.internal:host-gateway`, bind-mount the host Ollama models directory read-only at `/host-ollama-models`, set `MODEL_STORAGE_PATH=/host-ollama-models`, and leave `COMPOSE_PROFILE` / `COMPOSE_DIR` unset so fleet **self-update** (which assumes GPU compose profiles) stays disabled — use image bumps via compose or Komodo instead.
+
 ## Prerequisites
 
 - Docker + Docker Compose plugin
