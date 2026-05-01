@@ -1791,8 +1791,11 @@ async def proxy_chat_completions(request: Request, runner_id: Optional[int] = No
         if row:
             app_id = row["id"]
 
-    # Pre-check VRAM
-    check = await scheduler.check_submission(model)
+    # Pre-check VRAM (respect app runner affinity like the queue path)
+    check = await scheduler.check_submission(
+        model,
+        allowed_runner_ids=app_allowed_runners if app_allowed_runners else None,
+    )
     if not check["ok"]:
         raise HTTPException(422, check)
 

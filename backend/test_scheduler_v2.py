@@ -6,11 +6,13 @@ shape. Swap and _run_job are exercised via integration; here we mock them.
 """
 import asyncio
 import json
-from unittest.mock import AsyncMock, MagicMock
+import time
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from scheduler_v2 import SimplifiedScheduler, RunnerState
+import queue_db
 
 
 def _run(coro):
@@ -260,6 +262,57 @@ class TestLoadedModelsProperty:
 
 
 # ── lifecycle ────────────────────────────────────────────────────────────────
+
+class TestStaleInFlightHeal:
+    def test_clears_when_job_still_queued_after_grace(self):
+        a = RunnerState(runner_id=1, hostname="a", gpu_total_gb=17)
+        a.in_flight_job_id = "job1"
+        a.in_flight_since = time.time() - 120
+        sched = _make_sched([a])
+
+        async def fake_get_job(pool, jid):
+            return {"id": jid, "status": "queued"}
+
+        with patch.object(queue_db, "get_job", new_callable=AsyncMock, side_effect=fake_get_job):
+            _run(sched._heal_stale_in_flight_claims())
+        assert a.in_flight_job_id is None
+        assert a.in_flight_since is None
+
+    def test_keeps_queued_if_within_grace(self):
+        a = RunnerState(runner_id=1, hostname="a", gpu_total_gb=17)
+        a.in_flight_job_id = "job1"
+        a.in_flight_since = time.time() - 5
+        sched = _make_sched([a])
+
+        async def fake_get_job(pool, jid):
+            return {"id": jid, "status": "queued"}
+
+        with patch.object(queue_db, "get_job", new_callable=AsyncMock, side_effect=fake_get_job):
+            _run(sched._heal_stale_in_flight_claims())
+        assert a.in_flight_job_id == "job1"
+
+    def test_keeps_when_job_running(self):
+        a = RunnerState(runner_id=1, hostname="a", gpu_total_gb=17)
+        a.in_flight_job_id = "job1"
+        a.in_flight_since = time.time() - 99999
+        sched = _make_sched([a])
+
+        async def fake_get_job(pool, jid):
+            return {"id": jid, "status": "running"}
+
+        with patch.object(queue_db, "get_job", new_callable=AsyncMock, side_effect=fake_get_job):
+            _run(sched._heal_stale_in_flight_claims())
+        assert a.in_flight_job_id == "job1"
+
+    def test_clears_when_job_missing(self):
+        a = RunnerState(runner_id=1, hostname="a", gpu_total_gb=17)
+        a.in_flight_job_id = "gone"
+        a.in_flight_since = time.time()
+        sched = _make_sched([a])
+        with patch.object(queue_db, "get_job", new_callable=AsyncMock, return_value=None):
+            _run(sched._heal_stale_in_flight_claims())
+        assert a.in_flight_job_id is None
+
 
 class TestLifecycle:
     def test_start_stop(self):

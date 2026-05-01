@@ -103,6 +103,19 @@ def _model_passes_category_filter(
     return True
 
 
+def _enriched_job_metadata(
+    metadata: Optional[dict], allowed_runner_ids: Optional[list[int]]
+) -> Optional[dict]:
+    """Merge app runner affinity into queue metadata so the scheduler and
+    batching strategy match registered_apps.allowed_runner_ids."""
+    out: dict = {}
+    if metadata:
+        out.update(metadata)
+    if allowed_runner_ids:
+        out["allowed_runner_ids"] = list(allowed_runner_ids)
+    return out if out else None
+
+
 async def _check_rate_limit(pool, app_id: int):
     """Check per-app rate limits."""
     if app_id is None:
@@ -152,10 +165,14 @@ async def submit_job(body: QueueJobRequest, request: Request,
 
         job_id = str(uuid.uuid4())[:12]
         priority = await _priority_for_app(pool, app_id)
+        meta = _enriched_job_metadata(
+            body.metadata,
+            allowed_runner_ids if allowed_runner_ids else None,
+        )
         await queue_db.insert_job(
             pool, job_id, None, app_id, body.model,
             body.model_dump(exclude={"model", "metadata"}),
-            body.metadata,
+            meta,
             priority=priority,
         )
 
@@ -225,10 +242,14 @@ async def submit_batch(body: QueueBatchRequest, request: Request,
 
     for job_req in body.jobs:
         job_id = str(uuid.uuid4())[:12]
+        meta = _enriched_job_metadata(
+            job_req.metadata,
+            allowed_runner_ids if allowed_runner_ids else None,
+        )
         await queue_db.insert_job(
             pool, job_id, batch_id, app_id, job_req.model,
             job_req.model_dump(exclude={"model", "metadata"}),
-            job_req.metadata,
+            meta,
             priority=priority,
         )
         resp = QueueJobResponse(job_id=job_id, status="queued", model=job_req.model)

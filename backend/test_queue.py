@@ -344,6 +344,18 @@ class TestGetRateLimit:
         assert result["max_jobs_per_minute"] == 10
 
 
+class TestEnrichedJobMetadata:
+    def test_merges_allowed_runners(self):
+        from queue_routes import _enriched_job_metadata
+
+        assert _enriched_job_metadata({"slot": 1}, [5]) == {
+            "slot": 1, "allowed_runner_ids": [5],
+        }
+        assert _enriched_job_metadata(None, [5]) == {"allowed_runner_ids": [5]}
+        assert _enriched_job_metadata({"a": 1}, None) == {"a": 1}
+        assert _enriched_job_metadata(None, None) is None
+
+
 # ── Scheduler unit tests ─────────────────────────────────────────────────────
 
 from scheduler import Scheduler

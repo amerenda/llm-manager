@@ -19,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 from dataclasses import dataclass, field
 from typing import Optional
@@ -141,6 +142,8 @@ class RunnerState:
     pinned_model: Optional[str] = None
     model_loaded_at: Optional[float] = None
     in_flight_job_id: Optional[str] = None
+    # When in_flight_job_id was last set (monotonic not required; used for stale heal).
+    in_flight_since: Optional[float] = None
     # Draining: admin has asked the runner to stop accepting new work. The
     # current in-flight job (if any) finishes normally; new jobs skip this
     # runner. The flag persists in llm_runners.draining; it clears only when
@@ -396,6 +399,53 @@ class SimplifiedScheduler:
             runner_vram_total_bytes.labels(runner=rs.hostname).set(vram_total)
             runner_is_idle.labels(runner=rs.hostname).set(1 if rs.is_idle else 0)
 
+    async def _heal_stale_in_flight_claims(self) -> None:
+        """Drop bogus busy flags when Postgres shows no active work for that job.
+
+        If a background dispatch dies without clearing `in_flight_job_id`, the
+        runner stays non-idle forever and the queue head blocks (often for all
+        apps behind it) until pod restart. See 2026-05-01 incident."""
+        queued_grace = float(os.environ.get("SCHEDULER_STALE_QUEUED_GRACE_SEC", "45"))
+        fast_path_max = float(os.environ.get("SCHEDULER_FAST_PATH_STALE_SEC", "300"))
+        now = time.time()
+        for rs in self._runners.values():
+            jid = rs.in_flight_job_id
+            if jid is None:
+                continue
+            since = rs.in_flight_since or now
+            if jid == "__fast_path__":
+                if now - since > fast_path_max:
+                    logger.warning(
+                        "Healing stale fast-path claim on %s (held %.0fs > %.0fs)",
+                        rs.hostname, now - since, fast_path_max,
+                    )
+                    rs.in_flight_job_id = None
+                    rs.in_flight_since = None
+                    runner_is_idle.labels(runner=rs.hostname).set(1)
+                continue
+            try:
+                job = await queue_db.get_job(self.pool, jid)
+            except Exception:
+                logger.debug("stale heal: get_job failed for %s", jid, exc_info=True)
+                continue
+            st = (job or {}).get("status")
+            if job is None or st in ("failed", "completed", "cancelled"):
+                logger.warning(
+                    "Healing stale in_flight on %s (job=%s status=%s)",
+                    rs.hostname, jid, st,
+                )
+                rs.in_flight_job_id = None
+                rs.in_flight_since = None
+                runner_is_idle.labels(runner=rs.hostname).set(1)
+            elif st == "queued" and (now - since) > queued_grace:
+                logger.warning(
+                    "Healing stale in_flight on %s (job=%s still queued after %.0fs)",
+                    rs.hostname, jid, now - since,
+                )
+                rs.in_flight_job_id = None
+                rs.in_flight_since = None
+                runner_is_idle.labels(runner=rs.hostname).set(1)
+
     # ── main loop ────────────────────────────────────────────────────────────
 
     async def _loop(self):
@@ -411,6 +461,8 @@ class SimplifiedScheduler:
         idle_counter = 0
         active_tasks: set[asyncio.Task] = set()
         consecutive_errors = 0
+        last_stale_heal_mono = 0.0
+        stale_heal_interval = float(os.environ.get("SCHEDULER_STALE_HEAL_INTERVAL_SEC", "15"))
         while self._running:
             try:
                 # Reap completed dispatch tasks so the set doesn't grow unbounded
@@ -422,6 +474,11 @@ class SimplifiedScheduler:
                     break
 
                 await self._refresh_runners()
+
+                now_mono = time.monotonic()
+                if now_mono - last_stale_heal_mono >= stale_heal_interval:
+                    await self._heal_stale_in_flight_claims()
+                    last_stale_heal_mono = now_mono
 
                 batch = await self.strategy.next_jobs(self.pool)
                 if not batch:
@@ -460,12 +517,14 @@ class SimplifiedScheduler:
                 if runner is None:
                     # No runner idle right now (all busy or draining). Wait a
                     # beat, try again. Background tasks keep running.
+                    await self._heal_stale_in_flight_claims()
                     await asyncio.sleep(2)
                     continue
 
                 # Eagerly mark the runner busy with the first job in the batch
                 # so the very next loop iteration's _pick_runner skips it.
                 runner.in_flight_job_id = head["id"]
+                runner.in_flight_since = time.time()
 
                 # If we're about to swap, mark the jobs loading_model now so
                 # they don't stay "queued" while the task handles the swap.
@@ -557,7 +616,9 @@ class SimplifiedScheduler:
                     )
                     # Release the originally-picked runner (we never used it)
                     original_runner.in_flight_job_id = None
+                    original_runner.in_flight_since = None
                     landed.in_flight_job_id = batch[0]["id"]
+                    landed.in_flight_since = time.time()
                     runner = landed
                     for job in batch:
                         await queue_db.update_job_status(
@@ -581,6 +642,7 @@ class SimplifiedScheduler:
             # swap failed we never entered _run_job — clear it here defensively.
             if runner.in_flight_job_id is not None:
                 runner.in_flight_job_id = None
+                runner.in_flight_since = None
 
     # ── routing ──────────────────────────────────────────────────────────────
 
@@ -822,6 +884,7 @@ class SimplifiedScheduler:
             self._current_job_id = None
             if runner is not None:
                 runner.in_flight_job_id = None
+                runner.in_flight_since = None
 
     async def _run_cloud(self, job_id: str, model: str, request: dict):
         body = {"model": model, "messages": request.get("messages", []), "stream": False}
@@ -906,6 +969,7 @@ class SimplifiedScheduler:
                 if allowed_runner_ids and r.runner_id not in allowed_runner_ids:
                     continue
                 r.in_flight_job_id = "__fast_path__"
+                r.in_flight_since = time.time()
                 runner_is_idle.labels(runner=r.hostname).set(0)
                 logger.debug("fast-path: claimed pinned runner %s for %s", r.hostname, model)
                 return r
@@ -920,6 +984,7 @@ class SimplifiedScheduler:
             if allowed_runner_ids and r.runner_id not in allowed_runner_ids:
                 continue
             r.in_flight_job_id = "__fast_path__"
+            r.in_flight_since = time.time()
             runner_is_idle.labels(runner=r.hostname).set(0)
             logger.debug("fast-path: claimed runner %s for %s", r.hostname, model)
             return r
@@ -928,6 +993,7 @@ class SimplifiedScheduler:
     def release_fast_path_claim(self, runner: RunnerState) -> None:
         if runner.in_flight_job_id == "__fast_path__":
             runner.in_flight_job_id = None
+            runner.in_flight_since = None
             runner_is_idle.labels(runner=runner.hostname).set(1)
             logger.debug("fast-path: released runner %s", runner.hostname)
 
