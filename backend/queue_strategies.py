@@ -12,9 +12,9 @@ Strategies:
   Strict FIFO within priority.
 - PriorityBatchingStrategy: return up to N consecutive same-model jobs
   from the head of the priority-ordered queue. Reduces swap churn when
-  one app submits bursts of same-model jobs. Priority+age ordering is
-  handled by queue_db.get_pending_jobs, so batching just consumes from
-  the already-ordered head.
+  one app submits bursts of same-model jobs. Ordering is
+  ``priority DESC, created_at ASC`` from :func:`queue_db.get_pending_jobs`
+  (higher ``priority`` always beats lower regardless of age).
 
 Switch via QUEUE_STRATEGY env var. Default: priority_batching.
 Switching is "destructive" in the sense that in-flight state doesn't
@@ -81,9 +81,8 @@ class PriorityBatchingStrategy:
     Returns the first three; the next call (after they run) will see
     deepseek at the head and batch from there.
 
-    Priority/age ordering is applied by get_pending_jobs, so this strategy
-    is purely "how many adjacent same-model jobs to grab." Within a batch,
-    FIFO by created_at (that's how the query orders them).
+    Priority ordering is applied by get_pending_jobs; this strategy is
+    purely "how many adjacent same-model jobs to grab" from that list.
     """
 
     def __init__(self, batch_size: int = DEFAULT_BATCH_SIZE):

@@ -309,6 +309,15 @@ class TestGetPendingJobs:
         assert "SELECT q.id" in sql.replace("\n", " ")
         assert "q.request" not in sql
 
+    def test_sql_orders_priority_before_age(self):
+        pool, conn = _make_mock_pool()
+        conn.fetch.return_value = []
+        _run(queue_db.get_pending_jobs(pool))
+        sql = " ".join(conn.fetch.call_args[0][0].split())
+        assert "ORDER BY q.priority DESC" in sql
+        assert "q.created_at ASC" in sql
+        assert "EXTRACT(EPOCH FROM (now() - q.created_at)) / 600" not in sql
+
 
 class TestCountPendingJobs:
     def test_returns_int(self):

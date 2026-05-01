@@ -219,14 +219,16 @@ async def increment_job_retry(pool: asyncpg.Pool, job_id: str) -> int:
 
 
 async def get_pending_jobs(pool: asyncpg.Pool, limit: int = 100) -> list[dict]:
-    """Get queued jobs ordered by effective priority (priority + age bonus)
-    then created_at.
+    """Get queued jobs for the scheduler, ordered for dispatch.
 
-    The effective priority adds 1 point per 600s (10 min) of waiting. This
-    gives higher-priority apps a soft edge: a fresh priority=1 job beats a
-    fresh priority=0 job, but a priority=0 job that has waited 10 minutes
-    catches up, and one that has waited longer wins. Prevents starvation
-    without a separate age-bump pass.
+    **Ordering (critical):** rows are sorted by ``priority DESC`` first, then
+    by age among *equal* priorities. We never let a lower ``priority`` integer
+    overtake a higher one because of wait time — the old
+    ``priority + age_seconds/600`` formula let long-waiting low-priority jobs
+    starve ``HIGH_PRIORITY_APPS`` (e.g. ecdysis backlog blocking mycroft).
+
+    Within the same ``priority`` value, older jobs sort first (longer wait
+    breaks ties via ``created_at``).
 
     **Does not SELECT ``request``** — prompts can be huge; loading 100 full
     JSON bodies on every scheduler tick caused OOM on small pod limits.
@@ -243,7 +245,7 @@ async def get_pending_jobs(pool: asyncpg.Pool, limit: int = 100) -> list[dict]:
             LEFT JOIN registered_apps a ON a.id = q.app_id
             WHERE q.status IN ('queued', 'waiting_for_eviction')
             ORDER BY
-                (q.priority + EXTRACT(EPOCH FROM (now() - q.created_at)) / 600) DESC,
+                q.priority DESC,
                 q.created_at ASC
             LIMIT $1
         """, limit)
@@ -280,6 +282,21 @@ async def count_pending_jobs(pool: asyncpg.Pool) -> int:
             """
         )
     return int(row["c"]) if row else 0
+
+
+async def count_attached_jobs_by_runner(pool: asyncpg.Pool) -> list[tuple[str, int]]:
+    """Count running + loading_model jobs per runner hostname (for per-runner queue views)."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT r.hostname AS runner, COUNT(*)::int AS c
+            FROM queue_jobs j
+            INNER JOIN llm_runners r ON j.runner_id = r.id
+            WHERE j.status IN ('running', 'loading_model')
+            GROUP BY r.id, r.hostname
+            """
+        )
+    return [(str(r["runner"]), int(r["c"])) for r in rows]
 
 
 async def get_active_jobs_for_model(pool: asyncpg.Pool, model: str) -> list[dict]:

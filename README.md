@@ -486,7 +486,8 @@ The backend uses a **one-model-per-GPU** scheduler (`backend/scheduler_v2.py`):
 
 - **Fast-path** — when the requested model is already loaded on an idle runner, the request bypasses the queue entirely. The scheduler atomically claims the runner, proxies directly to Ollama with true streaming (token-by-token), then releases. Zero DB overhead.
 - **Queue path** — when the model is not loaded (swap required), the request enters the DB queue. The scheduler dispatches a batch, swaps the model, runs the jobs, then checks the queue again.
-- **Batching** — `PriorityBatchingStrategy` (default) dequeues up to `QUEUE_BATCH_SIZE` consecutive same-model jobs from the head of the priority-ordered queue, minimizing swap frequency. Switch to `fifo` via `QUEUE_STRATEGY=fifo` for strict single-job dispatch.
+- **Batching** — `PriorityBatchingStrategy` (default) dequeues up to `QUEUE_BATCH_SIZE` consecutive same-model jobs from the head of the queue, minimizing swap frequency. Switch to `fifo` via `QUEUE_STRATEGY=fifo` for strict single-job dispatch.
+- **Priority** — pending jobs are ordered **`priority DESC`, `created_at ASC`**. The `priority` column comes from app registration (`HIGH_PRIORITY_APPS` in the backend Deployment env maps matching app names to `priority=1`, others `0`). **Higher `priority` always runs before lower**, regardless of how long low-priority jobs have waited (older jobs still run first among jobs with the *same* `priority`).
 - **Runner restrictions** — if an app has `allowed_runner_ids` configured, that restriction is enforced on both the fast-path and the queue path. Batching will not mix jobs with different runner restriction sets.
 - **Runner pinning** — pinned runners are dedicated exclusively to their pinned model. A pinned runner will never accept any other model.
 
@@ -646,7 +647,8 @@ configures Prometheus scraping.
 
 | Metric | Type | Labels | Description |
 |--------|------|--------|-------------|
-| `llm_queue_depth` | Gauge | — | Jobs currently in `queued` state |
+| `llm_queue_depth` | Gauge | — | Jobs in `queued` + `waiting_for_eviction` (not yet assigned to a runner) |
+| `llm_runner_attached_jobs` | Gauge | `runner` | Jobs in `running` or `loading_model` on this runner (`runner_id`) |
 | `llm_queue_active_jobs` | Gauge | — | Jobs currently in `running` state |
 | `llm_backend_active_runners` | Gauge | — | Runners with heartbeat < 90s |
 | `llm_backend_runner_last_seen_seconds` | Gauge | `runner` | Seconds since last heartbeat |
