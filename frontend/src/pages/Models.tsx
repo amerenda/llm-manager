@@ -1675,7 +1675,7 @@ export function Models() {
               }
             }}
             disabled={sync.isPending}
-            title="Sync models across all runners (pulls biggest weight that fits each runner)"
+            title="Sync model tags across all runners (pulls each missing model that fits target VRAM)"
             className="flex items-center gap-1.5 text-xs bg-indigo-900/40 hover:bg-indigo-800/50 text-indigo-300 border border-indigo-800 px-3 py-2 rounded-lg transition-colors disabled:opacity-40"
           >
             {sync.isPending ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCcw className="w-3 h-3" />}

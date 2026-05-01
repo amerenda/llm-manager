@@ -1516,10 +1516,9 @@ async def update_model(model: str, runner_id: Optional[int] = None):
 async def sync_models():
     """Sync models across all runners.
 
-    For each model base name (e.g. 'qwen2.5') downloaded on any runner,
-    ensure every other runner that can fit it has the biggest weight variant
-    that fits in its VRAM. If the runner already has that model (any weight),
-    skip it.
+    For each exact model tag (e.g. 'qwen2.5:14b') downloaded on any runner,
+    ensure every other runner that can fit that same tag in VRAM has it too.
+    If the runner already has the exact tag, skip it.
     """
     _inc_request("/api/llm/models/sync", "POST", 200)
     pool = app.state.db
@@ -1527,7 +1526,7 @@ async def sync_models():
     if len(runners_list) < 2:
         return {"ok": True, "pulls": [], "message": "Need at least 2 runners to sync"}
 
-    # Gather per-runner downloaded models and VRAM capacity
+    # Gather per-runner downloaded models and VRAM capacity.
     runner_models: dict[int, set[str]] = {}
     runner_vram: dict[int, float] = {}
     runner_names: dict[int, str] = {}
@@ -1538,6 +1537,11 @@ async def sync_models():
         runner_names[rid] = hostname
         runner_models[rid] = set()
         caps = r.get("capabilities", {})
+        if isinstance(caps, str):
+            try:
+                caps = json.loads(caps)
+            except Exception:
+                caps = {}
         if isinstance(caps, dict):
             runner_vram[rid] = caps.get("gpu_vram_total_bytes", 0) / (1024**3)
         else:
@@ -1556,54 +1560,37 @@ async def sync_models():
         except Exception:
             logger.warning("sync: failed to query runner %s", hostname)
 
-    # Extract base model names (e.g. 'qwen2.5' from 'qwen2.5:7b')
-    def _base_name(model: str) -> str:
-        return model.split(":")[0]
-
-    # For each base model present on any runner, find the best weight for each target
-    all_base_names = set()
+    # For each exact model tag present on any runner, pull it to every target
+    # runner that does not already have it and can fit it.
+    all_models = set()
     for models in runner_models.values():
-        for m in models:
-            all_base_names.add(_base_name(m))
+        all_models.update(models)
 
     pulls = []
-    for base in all_base_names:
-        # Collect all weight variants of this model across all runners
-        variants = set()
-        for models in runner_models.values():
-            for m in models:
-                if _base_name(m) == base:
-                    variants.add(m)
-
+    for model in all_models:
+        need = vram_for_model(model)
         for target_rid in runner_models:
-            # Skip if this runner already has any variant of this base model
-            target_has = [m for m in runner_models[target_rid] if _base_name(m) == base]
-            if target_has:
+            # Skip if this runner already has this exact tag.
+            if model in runner_models[target_rid]:
                 continue
 
-            # Find the biggest variant that fits on this runner's VRAM
+            # Skip if this model does not fit on target runner VRAM.
             target_cap = runner_vram.get(target_rid, 0)
-            best_variant = None
-            best_vram = 0.0
-            for v in variants:
-                v_vram = vram_for_model(v)
-                if v_vram <= target_cap and v_vram > best_vram:
-                    best_variant = v
-                    best_vram = v_vram
+            if need > target_cap:
+                continue
 
-            if best_variant:
-                # Find a source runner that has this variant
-                source_name = "unknown"
-                for src_rid, models in runner_models.items():
-                    if best_variant in models:
-                        source_name = runner_names[src_rid]
-                        break
-                pulls.append({
-                    "model": best_variant,
-                    "target_runner_id": target_rid,
-                    "target_runner": runner_names[target_rid],
-                    "source_runner": source_name,
-                })
+            # Find a source runner that has this model tag.
+            source_name = "unknown"
+            for src_rid, models in runner_models.items():
+                if model in models:
+                    source_name = runner_names[src_rid]
+                    break
+            pulls.append({
+                "model": model,
+                "target_runner_id": target_rid,
+                "target_runner": runner_names[target_rid],
+                "source_runner": source_name,
+            })
 
     # Deduplicate (same model+target)
     seen = set()

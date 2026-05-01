@@ -306,3 +306,115 @@ class TestVramCheckEndpoint:
         data = resp.json()
         # Falls back to _estimate_vram: 13b -> 8.0
         assert data["per_model"][0]["vram_gb"] == 8.0
+
+
+class TestSyncModelsEndpoint:
+    @patch("main.db.create_op", new_callable=AsyncMock)
+    @patch("main.db.get_active_runners", new_callable=AsyncMock)
+    def test_sync_copies_missing_exact_variant(self, mock_runners, mock_create_op, client):
+        # runner-a has both qwen2.5 variants; runner-b only has 7b.
+        mock_runners.return_value = [
+            {
+                "id": 1,
+                "hostname": "runner-a",
+                "address": "http://10.0.0.1:8090",
+                "capabilities": {"gpu_vram_total_bytes": int(24 * (1024**3))},
+            },
+            {
+                "id": 2,
+                "hostname": "runner-b",
+                "address": "http://10.0.0.2:8090",
+                "capabilities": {"gpu_vram_total_bytes": int(24 * (1024**3))},
+            },
+        ]
+
+        class _Resp:
+            def __init__(self, models):
+                self.status_code = 200
+                self._models = models
+
+            def json(self):
+                return {"models": [{"name": m} for m in self._models]}
+
+        class _Http:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def get(self, url):
+                if "10.0.0.1" in url:
+                    return _Resp(["qwen2.5:7b", "qwen2.5:14b"])
+                return _Resp(["qwen2.5:7b"])
+
+        def _discard_task(coro):
+            coro.close()
+            return MagicMock()
+
+        with patch("main.httpx.AsyncClient", _Http):
+            with patch("main.asyncio.create_task", _discard_task):
+                resp = client.post("/api/llm/models/sync")
+
+        assert resp.status_code == 200
+        pulls = resp.json()["pulls"]
+        assert {"model": "qwen2.5:14b", "target": "runner-b"} in pulls
+        # Exact tag already present on runner-b should not be scheduled.
+        assert {"model": "qwen2.5:7b", "target": "runner-b"} not in pulls
+        assert mock_create_op.await_count == 1
+
+    @patch("main.db.create_op", new_callable=AsyncMock)
+    @patch("main.db.get_active_runners", new_callable=AsyncMock)
+    def test_sync_skips_model_that_does_not_fit_target(self, mock_runners, mock_create_op, client):
+        mock_runners.return_value = [
+            {
+                "id": 1,
+                "hostname": "runner-a",
+                "address": "http://10.0.0.1:8090",
+                "capabilities": {"gpu_vram_total_bytes": int(24 * (1024**3))},
+            },
+            {
+                "id": 2,
+                "hostname": "runner-b",
+                "address": "http://10.0.0.2:8090",
+                "capabilities": {"gpu_vram_total_bytes": int(8 * (1024**3))},
+            },
+        ]
+
+        class _Resp:
+            def __init__(self, models):
+                self.status_code = 200
+                self._models = models
+
+            def json(self):
+                return {"models": [{"name": m} for m in self._models]}
+
+        class _Http:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, exc_type, exc, tb):
+                return False
+
+            async def get(self, url):
+                if "10.0.0.1" in url:
+                    return _Resp(["qwen3:70b"])
+                return _Resp([])
+
+        def _discard_task(coro):
+            coro.close()
+            return MagicMock()
+
+        with patch("main.httpx.AsyncClient", _Http):
+            with patch("main.asyncio.create_task", _discard_task):
+                resp = client.post("/api/llm/models/sync")
+
+        assert resp.status_code == 200
+        assert resp.json()["pulls"] == []
+        assert mock_create_op.await_count == 0
