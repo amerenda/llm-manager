@@ -3,6 +3,7 @@ import { Server, Cpu, HardDrive, MemoryStick, Volume2, RefreshCw, Power, Upload,
 import { useRunners, useUpdateRunner, useAgentTargetVersion, useSetAgentTargetVersion, useRunnerStatus, useTriggerRunnerUpdate, useFlushRunnerVram, useRestartOllama, useOllamaSettings, useUpdateOllamaSettings, useOllamaVersion, useUpgradeOllama } from '../hooks/useBackend'
 import { StatusDot } from '../components/StatusDot'
 import type { Runner } from '../types'
+import { agentVersionsEquivalent } from '../utils/agentVersion'
 
 function relativeTime(iso: string | null): string {
   if (!iso) return 'Never'
@@ -49,7 +50,9 @@ function RunnerDetail({ runner, target }: { runner: Runner; target: string }) {
   const s = status.data
   const isGpu = !!caps.gpu_vram_total_bytes
 
-  const isOutdated = target && caps.agent_version && caps.agent_version !== target
+  const isOutdated = Boolean(
+    target && caps.agent_version && !agentVersionsEquivalent(caps.agent_version, target),
+  )
 
   return (
     <div className="border-t border-gray-800 pt-3 mt-3 space-y-4">
@@ -333,7 +336,11 @@ export function Runners() {
   const target = targetVersion.data?.target_version || ''
 
   const outdatedRunners = list.filter((r: Runner) =>
-    target && r.capabilities.agent_version && r.capabilities.agent_version !== target
+    Boolean(
+      target &&
+        r.capabilities.agent_version &&
+        !agentVersionsEquivalent(r.capabilities.agent_version, target),
+    )
   )
 
   return (
@@ -395,7 +402,9 @@ export function Runners() {
             const isGpu = !!caps.gpu_vram_total_bytes
             const isTts = !!caps.tts
             const expanded = expandedId === runner.id
-            const isOutdated = target && caps.agent_version && caps.agent_version !== target
+            const isOutdated = Boolean(
+    target && caps.agent_version && !agentVersionsEquivalent(caps.agent_version, target),
+  )
 
             return (
               <div

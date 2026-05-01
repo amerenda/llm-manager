@@ -36,6 +36,7 @@ from db import (
     register_app, heartbeat_app, get_apps, deregister_app, deregister_app_by_id,
 )
 from gpu import vram_for_model
+from agent_version_compare import agent_versions_equivalent
 from llm_agent import LLMAgentClient
 from scheduler_v2 import SimplifiedScheduler as Scheduler
 from scheduler_v2 import fastpath_duration_seconds, fastpath_requests_total
@@ -1154,8 +1155,8 @@ async def runner_heartbeat(
     response: dict = {"ok": True}
     target = await db.get_global_setting(app.state.db, "agent_target_version")
     agent_version = req.capabilities.get("agent_version", "")
-    if target and agent_version and target != agent_version:
-        response["update_to"] = target
+    if target and agent_version and not agent_versions_equivalent(target, agent_version):
+        response["update_to"] = target.strip()
     # Include auto_update preference so agent knows whether to self-update
     runner = await db.get_runner_by_id(app.state.db, req.runner_id)
     if runner:
@@ -1175,8 +1176,9 @@ class SetTargetVersionRequest(BaseModel):
 
 @app.put("/api/runners/target-version")
 async def set_target_version(req: SetTargetVersionRequest):
-    await db.set_global_setting(app.state.db, "agent_target_version", req.target_version)
-    return {"ok": True, "target_version": req.target_version}
+    ver = (req.target_version or "").strip()
+    await db.set_global_setting(app.state.db, "agent_target_version", ver)
+    return {"ok": True, "target_version": ver}
 
 
 @app.get("/api/runners")
@@ -1253,7 +1255,7 @@ async def trigger_runner_update(
     if not runner:
         raise HTTPException(404, "Runner not found")
     agent_version = runner.get("capabilities", {}).get("agent_version", "")
-    if agent_version == target:
+    if agent_versions_equivalent(agent_version, target):
         return {"ok": True, "message": "Runner already at target version", "version": target}
     client = await _get_runner_client(app.state.db, runner_id)
     try:
