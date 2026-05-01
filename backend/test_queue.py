@@ -199,6 +199,20 @@ class TestUpdateJobStatus:
         sql = conn.execute.call_args[0][0]
         assert "started_at" in sql
         assert "now()" in sql
+        assert "loading_model_at" in sql
+
+    def test_update_to_loading_model_sets_loading_model_at(self):
+        pool, conn = _make_mock_pool()
+        _run(queue_db.update_job_status(pool, "j1", "loading_model", runner_id=7))
+        sql = conn.execute.call_args[0][0]
+        assert "loading_model_at" in sql
+        assert "now()" in sql
+
+    def test_update_to_loading_model_without_runner_still_sets_timestamp(self):
+        pool, conn = _make_mock_pool()
+        _run(queue_db.update_job_status(pool, "j1", "loading_model"))
+        sql = conn.execute.call_args[0][0]
+        assert "loading_model_at" in sql
 
     def test_update_to_completed_sets_result(self):
         pool, conn = _make_mock_pool()
@@ -230,6 +244,24 @@ class TestUpdateJobStatus:
         sql = conn.execute.call_args[0][0]
         assert "started_at" not in sql
         assert "completed_at" not in sql
+
+
+class TestRecoverStaleInProgressJobs:
+    def test_invokes_update_with_thresholds(self):
+        pool, conn = _make_mock_pool()
+        conn.execute.return_value = "UPDATE 2"
+        n = _run(
+            queue_db.recover_stale_in_progress_jobs(
+                pool, loading_minutes=10, running_minutes=120, loading_fallback_hours=6
+            )
+        )
+        assert n == 2
+        args = conn.execute.call_args[0]
+        assert "loading_model" in args[0]
+        assert "running" in args[0]
+        assert args[1] == 10
+        assert args[2] == 120
+        assert args[3] == 6
 
 
 class TestGetPendingJobs:

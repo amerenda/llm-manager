@@ -153,13 +153,12 @@ class Scheduler:
         if not self.lock_conn:
             return True  # No lock connection = single-replica mode
         try:
-            held = await self.lock_conn.fetchval(
-                "SELECT pg_try_advisory_lock($1)", SCHEDULER_LOCK_ID
-            )
-            # pg_try_advisory_lock returns True if we acquired it (or already hold it)
-            return held
+            # Liveness only — pg_try_advisory_lock nests per call and will leak
+            # session lock depth until the connection dies (see scheduler_v2).
+            await self.lock_conn.fetchval("SELECT 1")
+            return True
         except Exception:
-            logger.warning("Failed to verify scheduler lock")
+            logger.warning("Failed to verify scheduler lock — connection lost")
             return False
 
     async def _loop(self):

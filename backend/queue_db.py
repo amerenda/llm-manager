@@ -64,6 +64,9 @@ async def init_queue_tables(pool: asyncpg.Pool):
             # Added 2026-04: track how many times a job has been re-queued after
             # transient failures (5xx from runner). Scheduler fails permanently after MAX_RETRIES.
             "ALTER TABLE queue_jobs ADD COLUMN IF NOT EXISTS retried INTEGER DEFAULT 0",
+            # When a job entered loading_model (swap). Used for time-based recovery
+            # if the process dies mid-load — started_at is only set at running.
+            "ALTER TABLE queue_jobs ADD COLUMN IF NOT EXISTS loading_model_at TIMESTAMPTZ",
         ]:
             try:
                 await conn.execute(stmt)
@@ -113,35 +116,58 @@ async def update_job_status(pool: asyncpg.Pool, job_id: str, status: str,
         if status == "running":
             if runner_id is not None:
                 await conn.execute("""
-                    UPDATE queue_jobs SET status = $2, runner_id = $3, started_at = now()
+                    UPDATE queue_jobs SET status = $2, runner_id = $3,
+                        started_at = now(), loading_model_at = NULL
                     WHERE id = $1
                 """, job_id, status, runner_id)
             else:
                 await conn.execute("""
-                    UPDATE queue_jobs SET status = $2, started_at = now() WHERE id = $1
+                    UPDATE queue_jobs SET status = $2, started_at = now(),
+                        loading_model_at = NULL
+                    WHERE id = $1
                 """, job_id, status)
         elif status in ("completed", "failed", "cancelled"):
             await conn.execute("""
-                UPDATE queue_jobs SET status = $2, result = $3::jsonb, error = $4, completed_at = now()
+                UPDATE queue_jobs SET status = $2, result = $3::jsonb, error = $4,
+                    completed_at = now(), loading_model_at = NULL
                 WHERE id = $1
                 AND status NOT IN ('completed', 'failed', 'cancelled')
             """, job_id, status, json.dumps(result) if result else None, error)
         else:
-            if runner_id is not None and error is not None:
-                await conn.execute(
-                    "UPDATE queue_jobs SET status = $2, runner_id = $3, error = $4 WHERE id = $1",
-                    job_id, status, runner_id, error)
+            if status == "loading_model":
+                if runner_id is not None:
+                    await conn.execute("""
+                        UPDATE queue_jobs SET status = $2, runner_id = $3,
+                            loading_model_at = now()
+                        WHERE id = $1
+                    """, job_id, status, runner_id)
+                else:
+                    await conn.execute("""
+                        UPDATE queue_jobs SET status = $2, loading_model_at = now()
+                        WHERE id = $1
+                    """, job_id, status)
+            elif runner_id is not None and error is not None:
+                await conn.execute("""
+                    UPDATE queue_jobs SET status = $2, runner_id = $3, error = $4,
+                        loading_model_at = NULL
+                    WHERE id = $1
+                """, job_id, status, runner_id, error)
             elif runner_id is not None:
-                await conn.execute(
-                    "UPDATE queue_jobs SET status = $2, runner_id = $3 WHERE id = $1",
-                    job_id, status, runner_id)
+                await conn.execute("""
+                    UPDATE queue_jobs SET status = $2, runner_id = $3,
+                        loading_model_at = NULL
+                    WHERE id = $1
+                """, job_id, status, runner_id)
             elif error is not None:
-                await conn.execute(
-                    "UPDATE queue_jobs SET status = $2, error = $3 WHERE id = $1",
-                    job_id, status, error)
+                await conn.execute("""
+                    UPDATE queue_jobs SET status = $2, error = $3, loading_model_at = NULL
+                    WHERE id = $1
+                """, job_id, status, error)
             else:
-                await conn.execute(
-                    "UPDATE queue_jobs SET status = $2 WHERE id = $1", job_id, status)
+                await conn.execute("""
+                    UPDATE queue_jobs SET status = $2, loading_model_at = NULL
+                    WHERE id = $1
+                """, job_id, status)
 
 
 async def increment_job_retry(pool: asyncpg.Pool, job_id: str) -> int:
@@ -229,12 +255,57 @@ async def recover_stuck_jobs(pool: asyncpg.Pool) -> int:
     """Reset jobs stuck in loading_model/running back to queued on startup."""
     async with pool.acquire() as conn:
         result = await conn.execute("""
-            UPDATE queue_jobs SET status = 'queued', started_at = NULL
+            UPDATE queue_jobs SET status = 'queued', started_at = NULL,
+                loading_model_at = NULL
             WHERE status IN ('loading_model', 'running')
         """)
     count = int(result.split()[-1])
     if count:
         logger.info("Recovered %d stuck jobs → queued", count)
+    return count
+
+
+async def recover_stale_in_progress_jobs(
+    pool: asyncpg.Pool,
+    loading_minutes: int = 45,
+    running_minutes: int = 360,
+    loading_fallback_hours: int = 24,
+) -> int:
+    """Re-queue jobs stuck in loading_model or running longer than thresholds.
+
+    get_pending_jobs only returns queued/waiting — without this, a wedged swap
+    or crashed worker leaves rows invisible until process restart or lock
+    handoff. ``loading_model_at`` is set when entering loading_model; rows with
+    NULL (pre-migration) use ``created_at`` and loading_fallback_hours.
+    """
+    async with pool.acquire() as conn:
+        result = await conn.execute("""
+            UPDATE queue_jobs SET status = 'queued', started_at = NULL,
+                loading_model_at = NULL
+            WHERE (
+                status = 'loading_model' AND (
+                    (loading_model_at IS NOT NULL
+                        AND loading_model_at < now() - make_interval(mins => $1::int))
+                    OR (loading_model_at IS NULL
+                        AND created_at < now() - make_interval(hours => $3::int))
+                )
+            )
+            OR (
+                status = 'running'
+                AND started_at IS NOT NULL
+                AND started_at < now() - make_interval(mins => $2::int)
+            )
+        """, loading_minutes, running_minutes, loading_fallback_hours)
+    count = int(result.split()[-1])
+    if count:
+        logger.warning(
+            "Recovered %d stale in-progress jobs (loading>%dm or running>%dm, "
+            "or loading_model without timestamp >%dh) → queued",
+            count,
+            loading_minutes,
+            running_minutes,
+            loading_fallback_hours,
+        )
     return count
 
 

@@ -216,7 +216,22 @@ SCHEDULER_LOCK_ID = 900001  # Postgres advisory lock ID for scheduler
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    pool = await asyncpg.create_pool(DATABASE_URL, min_size=1, max_size=5)
+    # TCP keepalives on every pooled connection reduce stale half-open TCP after
+    # network blips; max_inactive_connection_lifetime retires idle pool conns.
+    _pg_server_settings = {
+        "tcp_keepalives_idle": "60",
+        "tcp_keepalives_interval": "10",
+        "tcp_keepalives_count": "3",
+    }
+    pool = await asyncpg.create_pool(
+        DATABASE_URL,
+        min_size=1,
+        max_size=5,
+        max_inactive_connection_lifetime=float(
+            os.environ.get("DB_POOL_MAX_INACTIVE_SEC", "300")
+        ),
+        server_settings=_pg_server_settings,
+    )
     app.state.db = pool
     await init_db(pool)
     await queue_db.init_queue_tables(pool)
@@ -227,12 +242,9 @@ async def lifespan(app: FastAPI):
     # client disappears (network blip). Without this, PostgreSQL keeps the
     # zombie session alive for hours, holding the advisory lock and silently
     # blocking all watchdog re-acquisition attempts.
-    _LOCK_CONN_KA = {"server_settings": {
-        "tcp_keepalives_idle": "60",
-        "tcp_keepalives_interval": "10",
-        "tcp_keepalives_count": "3",
-    }}
-    lock_conn = await asyncpg.connect(DATABASE_URL, **_LOCK_CONN_KA)
+    lock_conn = await asyncpg.connect(
+        DATABASE_URL, server_settings=_pg_server_settings
+    )
     got_lock = await lock_conn.fetchval(
         "SELECT pg_try_advisory_lock($1)", SCHEDULER_LOCK_ID
     )
@@ -291,7 +303,9 @@ async def lifespan(app: FastAPI):
 
             fresh_conn = None
             try:
-                fresh_conn = await asyncpg.connect(DATABASE_URL, **_LOCK_CONN_KA)
+                fresh_conn = await asyncpg.connect(
+                    DATABASE_URL, server_settings=_pg_server_settings
+                )
                 acquired = await fresh_conn.fetchval(
                     "SELECT pg_try_advisory_lock($1)", SCHEDULER_LOCK_ID
                 )
@@ -348,6 +362,31 @@ async def lifespan(app: FastAPI):
                         pass
 
     lock_retry_task = asyncio.create_task(_retry_lock()) if not DISABLE_SCHEDULER else None
+
+    async def _stale_queue_sweeper():
+        """Re-queue wedged loading_model/running rows even if the scheduler loop
+        is stuck or no pod holds the advisory lock. Runs on every replica."""
+        interval = float(os.environ.get("STALE_QUEUE_SWEEP_INTERVAL_SEC", "60"))
+        lm = int(os.environ.get("SCHEDULER_STALE_LOADING_MIN", "45"))
+        rm = int(os.environ.get("SCHEDULER_STALE_RUNNING_MIN", "360"))
+        fb = int(os.environ.get("SCHEDULER_STALE_LOADING_FALLBACK_HOURS", "24"))
+        while True:
+            await asyncio.sleep(interval)
+            if DISABLE_SCHEDULER:
+                continue
+            try:
+                await queue_db.recover_stale_in_progress_jobs(
+                    pool,
+                    loading_minutes=lm,
+                    running_minutes=rm,
+                    loading_fallback_hours=fb,
+                )
+            except Exception:
+                logger.exception("stale_queue_sweeper failed")
+
+    stale_sweep_task = (
+        asyncio.create_task(_stale_queue_sweeper()) if not DISABLE_SCHEDULER else None
+    )
 
     # Track which label sets we've written so we can remove stale ones on refresh
     _alias_info_labels: set[tuple] = set()
@@ -444,6 +483,8 @@ async def lifespan(app: FastAPI):
 
     if lock_retry_task and not lock_retry_task.done():
         lock_retry_task.cancel()
+    if stale_sweep_task and not stale_sweep_task.done():
+        stale_sweep_task.cancel()
     config_metrics_task.cancel()
 
     scheduler.stop()
