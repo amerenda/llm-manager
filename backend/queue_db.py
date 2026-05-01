@@ -147,6 +147,10 @@ async def update_job_status(pool: asyncpg.Pool, job_id: str, status: str,
                     WHERE id = $1
                 """, job_id, status)
         elif status in ("completed", "failed", "cancelled"):
+            if result is not None and status == "completed":
+                from result_slim import slim_stored_result
+
+                result = slim_stored_result(result)
             await conn.execute("""
                 UPDATE queue_jobs SET status = $2, result = $3::jsonb, error = $4,
                     completed_at = now(), loading_model_at = NULL

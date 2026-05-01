@@ -1,0 +1,12 @@
+# Merge into the llm-manager-backend Deployment (GitOps / kustomize patch).
+# 512Mi OOMKills the process under real queue load → no ready endpoints → UI nginx 502.
+#
+# Example (strategic merge or copy into containers[0]):
+---
+resources:
+  limits:
+    cpu: 500m
+    memory: 2Gi
+  requests:
+    cpu: 100m
+    memory: 512Mi
