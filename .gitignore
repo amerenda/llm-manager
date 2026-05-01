@@ -4,4 +4,6 @@
 agent/.env
 agent/ollama.env
 __pycache__/
+.venv/
+backend/.venv/
 agent/tls/

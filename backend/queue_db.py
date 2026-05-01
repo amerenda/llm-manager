@@ -67,6 +67,13 @@ async def init_queue_tables(pool: asyncpg.Pool):
             # When a job entered loading_model (swap). Used for time-based recovery
             # if the process dies mid-load — started_at is only set at running.
             "ALTER TABLE queue_jobs ADD COLUMN IF NOT EXISTS loading_model_at TIMESTAMPTZ",
+            # Terminal rows without completed_at sorted first in ORDER BY completed_at DESC
+            # (Postgres NULLS FIRST default) and broke Recent History; backfill once.
+            """UPDATE queue_jobs SET completed_at = COALESCE(started_at, created_at)
+               WHERE status IN ('completed', 'failed', 'cancelled') AND completed_at IS NULL""",
+            # Queued work is not bound to a runner; stale runner_id from retries/recovery
+            # made the Active Queue show misleading hostnames.
+            "UPDATE queue_jobs SET runner_id = NULL WHERE status = 'queued' AND runner_id IS NOT NULL",
         ]:
             try:
                 await conn.execute(stmt)
@@ -146,6 +153,21 @@ async def update_job_status(pool: asyncpg.Pool, job_id: str, status: str,
                 WHERE id = $1
                 AND status NOT IN ('completed', 'failed', 'cancelled')
             """, job_id, status, json.dumps(result) if result else None, error)
+        elif status == "queued":
+            # Re-queue after retry: must not keep a runner assignment — UI and
+            # placement logic assume queued jobs have no host yet.
+            if error is not None:
+                await conn.execute("""
+                    UPDATE queue_jobs SET status = $2, error = $3,
+                        loading_model_at = NULL, runner_id = NULL
+                    WHERE id = $1
+                """, job_id, status, error)
+            else:
+                await conn.execute("""
+                    UPDATE queue_jobs SET status = $2,
+                        loading_model_at = NULL, runner_id = NULL
+                    WHERE id = $1
+                """, job_id, status)
         else:
             if status == "loading_model":
                 if runner_id is not None:
@@ -269,7 +291,7 @@ async def recover_stuck_jobs(pool: asyncpg.Pool) -> int:
     async with pool.acquire() as conn:
         result = await conn.execute("""
             UPDATE queue_jobs SET status = 'queued', started_at = NULL,
-                loading_model_at = NULL
+                loading_model_at = NULL, runner_id = NULL
             WHERE status IN ('loading_model', 'running')
         """)
     count = int(result.split()[-1])
@@ -294,7 +316,7 @@ async def recover_stale_in_progress_jobs(
     async with pool.acquire() as conn:
         result = await conn.execute("""
             UPDATE queue_jobs SET status = 'queued', started_at = NULL,
-                loading_model_at = NULL
+                loading_model_at = NULL, runner_id = NULL
             WHERE (
                 status = 'loading_model' AND (
                     (loading_model_at IS NOT NULL
@@ -560,7 +582,7 @@ async def list_recent_jobs(pool: asyncpg.Pool, limit: int = 50) -> list[dict]:
             LEFT JOIN registered_apps a ON j.app_id = a.id
             LEFT JOIN llm_runners r ON j.runner_id = r.id
             WHERE j.status IN ('completed', 'failed', 'cancelled')
-            ORDER BY j.completed_at DESC
+            ORDER BY j.completed_at DESC NULLS LAST, j.created_at DESC
             LIMIT $1
         """, limit)
     result = []

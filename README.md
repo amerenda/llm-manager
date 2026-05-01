@@ -66,6 +66,16 @@ Stateless service running in k8s. Discovers GPU runners from DB (heartbeat < 90s
 - **Port:** 8081
 - **State:** PostgreSQL only — no local files, no volumes
 - **Replicas:** 2 (PostgreSQL advisory lock ensures only one pod runs the scheduler)
+- **Memory:** schedule queue/worker pods with at least **~2Gi** limit — the process buffers full Ollama JSON responses; **512Mi routinely OOMKills** under load (exit 137), which drops **all** ready endpoints and surfaces as **502** from the UI nginx on `/auth/*` and `/api/*`.
+
+### Backend tests ([uv](https://docs.astral.sh/uv/))
+
+From `backend/`:
+
+```bash
+uv sync --group dev
+uv run pytest -q
+```
 
 ### `ui/` — React dashboard
 

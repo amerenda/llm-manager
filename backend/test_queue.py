@@ -238,6 +238,19 @@ class TestUpdateJobStatus:
         assert "completed_at" in sql
         assert "status NOT IN ('completed', 'failed', 'cancelled')" in sql
 
+    def test_update_to_queued_clears_runner_id(self):
+        pool, conn = _make_mock_pool()
+        _run(queue_db.update_job_status(pool, "j1", "queued", error="retry"))
+        sql = conn.execute.call_args[0][0]
+        assert "runner_id = NULL" in sql
+        assert "error = $3" in sql
+
+    def test_update_to_queued_without_error_clears_runner(self):
+        pool, conn = _make_mock_pool()
+        _run(queue_db.update_job_status(pool, "j1", "queued"))
+        sql = conn.execute.call_args[0][0]
+        assert "runner_id = NULL" in sql
+
     def test_update_to_other_status(self):
         pool, conn = _make_mock_pool()
         _run(queue_db.update_job_status(pool, "j1", "waiting_for_eviction"))
