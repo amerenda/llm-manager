@@ -19,6 +19,17 @@ def _run(coro):
     return asyncio.get_event_loop().run_until_complete(coro)
 
 
+@pytest.fixture(autouse=True)
+def _resolved_vram_matches_gpu_heuristic(monkeypatch):
+    """Keep _pick_runner / check_submission tests stable unless they patch DB VRAM."""
+    from gpu import vram_for_model as vf
+
+    async def _rv(pool, model):
+        return vf(model)
+
+    monkeypatch.setattr(queue_db, "resolved_vram_gb_for_model", _rv)
+
+
 def _make_sched(runners=None):
     pool = MagicMock()
     get_client = AsyncMock()
@@ -37,7 +48,7 @@ class TestPickRunner:
                         downloaded_models={"qwen3:14b"})
         b = RunnerState(runner_id=2, hostname="b", gpu_total_gb=24, current_model="qwen3:14b")
         sched = _make_sched([a, b])
-        assert sched._pick_runner("qwen3:14b") is a
+        assert _run(sched._pick_runner("qwen3:14b")) is a
 
     def test_pinned_busy_blocks_fallback(self):
         # Pinned runner is busy → return None, DON'T steal capacity from another runner
@@ -47,7 +58,7 @@ class TestPickRunner:
         b = RunnerState(runner_id=2, hostname="b", gpu_total_gb=24,
                         downloaded_models={"qwen3:14b"})
         sched = _make_sched([a, b])
-        assert sched._pick_runner("qwen3:14b") is None
+        assert _run(sched._pick_runner("qwen3:14b")) is None
 
     def test_pin_without_download_not_picked(self):
         # A pin that refers to a model the runner hasn't downloaded yet shouldn't
@@ -55,7 +66,7 @@ class TestPickRunner:
         a = RunnerState(runner_id=1, hostname="a", gpu_total_gb=17,
                         pinned_model="qwen3:14b")  # no downloads
         sched = _make_sched([a])
-        assert sched._pick_runner("qwen3:14b") is None
+        assert _run(sched._pick_runner("qwen3:14b")) is None
 
     def test_pinned_loaded_without_download_still_picked(self):
         # Regression: heartbeat downloaded_models can be stale/missing a tag.
@@ -68,7 +79,7 @@ class TestPickRunner:
             current_model="qwen3:14b",
         )
         sched = _make_sched([a])
-        assert sched._pick_runner("qwen3:14b") is a
+        assert _run(sched._pick_runner("qwen3:14b")) is a
 
     def test_already_loaded_idle_wins_over_idle_empty(self):
         # Rule 2: current_model match bypasses the downloaded_models check
@@ -77,7 +88,7 @@ class TestPickRunner:
         b = RunnerState(runner_id=2, hostname="b", gpu_total_gb=17,
                         current_model="qwen3:14b")  # loaded
         sched = _make_sched([a, b])
-        assert sched._pick_runner("qwen3:14b") is b
+        assert _run(sched._pick_runner("qwen3:14b")) is b
 
     def test_busy_same_model_rejected(self):
         # Runner on the right model but running another job for it → can't reuse
@@ -85,14 +96,14 @@ class TestPickRunner:
         a = RunnerState(runner_id=1, hostname="a", gpu_total_gb=17,
                         current_model="qwen3:14b", in_flight_job_id="j1")
         sched = _make_sched([a])
-        assert sched._pick_runner("qwen3:14b") is None
+        assert _run(sched._pick_runner("qwen3:14b")) is None
 
     def test_idle_fits_picked_for_swap(self):
         a = RunnerState(runner_id=1, hostname="a", gpu_total_gb=17,
                         current_model="deepseek-r1:14b",
                         downloaded_models={"qwen3:14b", "deepseek-r1:14b"})
         sched = _make_sched([a])
-        picked = sched._pick_runner("qwen3:14b")
+        picked = _run(sched._pick_runner("qwen3:14b"))
         assert picked is a  # will swap
 
     def test_idle_fits_but_no_download_skipped(self):
@@ -102,32 +113,32 @@ class TestPickRunner:
         a = RunnerState(runner_id=1, hostname="a", gpu_total_gb=40,
                         current_model="something-else")
         sched = _make_sched([a])
-        assert sched._pick_runner("qwen3.6:35b-a3b") is None
+        assert _run(sched._pick_runner("qwen3.6:35b-a3b")) is None
 
     def test_too_large_skipped(self):
         a = RunnerState(runner_id=1, hostname="a", gpu_total_gb=8.6,
                         downloaded_models={"qwen3:70b"})
         sched = _make_sched([a])
         # qwen3:70b → 40GB estimate > 8.6
-        assert sched._pick_runner("qwen3:70b") is None
+        assert _run(sched._pick_runner("qwen3:70b")) is None
 
     def test_unknown_gpu_total_skipped(self):
         # Runner whose gpu_total_gb=0 hasn't been reconciled yet — defensively skip
         a = RunnerState(runner_id=1, hostname="a", gpu_total_gb=0,
                         downloaded_models={"qwen3:14b"})
         sched = _make_sched([a])
-        assert sched._pick_runner("qwen3:14b") is None
+        assert _run(sched._pick_runner("qwen3:14b")) is None
 
     def test_no_runners(self):
         sched = _make_sched([])
-        assert sched._pick_runner("qwen3:14b") is None
+        assert _run(sched._pick_runner("qwen3:14b")) is None
 
     def test_draining_runner_skipped(self):
         # Only runner is draining → no one to pick, even if it's idle and has the model loaded
         a = RunnerState(runner_id=1, hostname="a", gpu_total_gb=17,
                         current_model="qwen3:14b", draining=True)
         sched = _make_sched([a])
-        assert sched._pick_runner("qwen3:14b") is None
+        assert _run(sched._pick_runner("qwen3:14b")) is None
 
     def test_draining_runner_skipped_fallback_to_other(self):
         # One draining runner has the model, another non-draining idle has it
@@ -137,7 +148,7 @@ class TestPickRunner:
         b = RunnerState(runner_id=2, hostname="b", gpu_total_gb=24,
                         downloaded_models={"qwen3:14b"})
         sched = _make_sched([a, b])
-        assert sched._pick_runner("qwen3:14b") is b  # will swap b to qwen3:14b
+        assert _run(sched._pick_runner("qwen3:14b")) is b  # will swap b to qwen3:14b
 
     def test_draining_pinned_blocks_new_work(self):
         # Pinned but draining → don't fall through to other runners (admin intent wins)
@@ -147,7 +158,7 @@ class TestPickRunner:
         b = RunnerState(runner_id=2, hostname="b", gpu_total_gb=24,
                         downloaded_models={"qwen3:14b"})
         sched = _make_sched([a, b])
-        assert sched._pick_runner("qwen3:14b") is None
+        assert _run(sched._pick_runner("qwen3:14b")) is None
 
     def test_draining_allows_inflight_to_finish(self):
         # A draining runner with an in-flight job is NOT picked for new work.
@@ -156,7 +167,7 @@ class TestPickRunner:
         a = RunnerState(runner_id=1, hostname="a", gpu_total_gb=17,
                         current_model="qwen3:14b", in_flight_job_id="j1", draining=True)
         sched = _make_sched([a])
-        assert sched._pick_runner("qwen3:14b") is None
+        assert _run(sched._pick_runner("qwen3:14b")) is None
 
     def test_latest_tag_alias(self):
         # Catalog-style requests come in as "qwen3" or "qwen3:14b"; agents often
@@ -165,7 +176,7 @@ class TestPickRunner:
         a = RunnerState(runner_id=1, hostname="a", gpu_total_gb=17,
                         downloaded_models={"qwen3:latest"})
         sched = _make_sched([a])
-        assert sched._pick_runner("qwen3") is a
+        assert _run(sched._pick_runner("qwen3")) is a
 
 
 # ── check_submission ────────────────────────────────────────────────────────
@@ -239,6 +250,21 @@ class TestCheckSubmission:
         result = _run(sched.check_submission("qwen3:14b", allowed_runner_ids=[99]))
         assert result["ok"] is False
         assert result["error"] == "no_schedulable_runners"
+
+    def test_resolved_vram_override_can_reject(self):
+        """model_settings.vram_estimate_gb drives check_submission via resolved_vram."""
+        a = RunnerState(runner_id=1, hostname="a", gpu_total_gb=17)
+        sched = _make_sched([a])
+
+        async def huge_need(pool, model):
+            return 99.0
+
+        with patch.object(
+            queue_db, "resolved_vram_gb_for_model", new_callable=AsyncMock, side_effect=huge_need
+        ):
+            result = _run(sched.check_submission("tiny:1b"))
+        assert result["ok"] is False
+        assert result["error"] == "model_too_large"
 
 
 # ── loaded_models property compat ────────────────────────────────────────────

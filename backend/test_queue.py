@@ -1,7 +1,7 @@
 
 """
-Tests for the queue system: models, DB operations, scheduler, and routes.
-Covers queue_models.py, queue_db.py, scheduler.py, and queue_routes.py.
+Tests for the queue system: models, DB operations, scheduler v2, and routes.
+Covers queue_models.py, queue_db.py, scheduler_v2.py, and queue_routes.py.
 """
 import asyncio
 import datetime
@@ -388,208 +388,59 @@ class TestEnrichedJobMetadata:
         assert _enriched_job_metadata(None, None) is None
 
 
-# ── Scheduler unit tests ─────────────────────────────────────────────────────
+# ── Scheduler smoke tests (full behavior: test_scheduler_v2.py) ──────────────
 
-from scheduler import Scheduler
+from scheduler_v2 import RunnerState, SimplifiedScheduler
 
 
-def _make_scheduler(loaded_models=None, gpu_info=None, runners=None):
-    """Create a Scheduler with mocked pool and runner client.
-
-    loaded_models: dict of {name: {vram_gb, ...}} for _loaded_models cache
-    gpu_info: dict with total/used/free for GPU state
-    runners: list of runner dicts (for multi-runner tests); defaults to one runner
-
-    The runner client's status() is mocked to return consistent data
-    derived from gpu_info and loaded_models.
-    """
+def _make_v2_scheduler(runners=None):
     pool = MagicMock()
-    if gpu_info is None:
-        gpu_info = {"total": 24.0, "used": 0, "free": 24.0}
-    if loaded_models is None:
-        loaded_models = {}
-
-    # Build runner status response from gpu_info + loaded_models
-    ollama_models = [
-        {"name": name, "size_gb": info.get("vram_gb", 0)}
-        for name, info in loaded_models.items()
-    ]
-    runner_status = {
-        "gpu_vram_total_gb": gpu_info["total"],
-        "gpu_vram_used_gb": gpu_info["used"],
-        "loaded_ollama_models": ollama_models,
-    }
-    mock_client = AsyncMock()
-    mock_client.status = AsyncMock(return_value=runner_status)
-    get_runner_client = AsyncMock(return_value=mock_client)
-
-    if runners is None:
-        runners = [{"id": 1, "hostname": "test-runner"}]
-
-    sched = Scheduler(pool, get_runner_client)
-    sched._loaded_models = dict(loaded_models)
-    # Also mock _get_gpu_info for tests that use _ensure_model_loaded
-    sched._get_gpu_info = AsyncMock(return_value=gpu_info)
-    # Mock _vram_for_model to use the sync hardcoded estimate (avoids DB call)
-    from gpu import vram_for_model as _vram_sync
-    async def _vram(model): return _vram_sync(model)
-    sched._vram_for_model = _vram
-    # Mock db.get_active_runners for check_submission
-    import db as _db
-    _db.get_active_runners = AsyncMock(return_value=runners)
+    get_runner_client = AsyncMock()
+    sched = SimplifiedScheduler(pool, get_runner_client)
+    if runners:
+        sched._runners = {r.runner_id: r for r in runners}
     return sched
-
-
-class TestCheckSubmission:
-    def test_model_too_large(self):
-        sched = _make_scheduler(gpu_info={"total": 8.0, "used": 0, "free": 8.0})
-        result = _run(sched.check_submission("llama2:70b"))
-        assert result["ok"] is False
-        assert result["error"] == "model_too_large"
-        assert result["vram_required_gb"] == 40.0
-
-    def test_model_already_loaded(self):
-        sched = _make_scheduler(
-            loaded_models={"qwen2.5:7b": {"loaded_at": 1.0, "vram_gb": 4.5}},
-            gpu_info={"total": 24.0, "used": 4.5, "free": 19.5},
-        )
-        result = _run(sched.check_submission("qwen2.5:7b"))
-        assert result["ok"] is True
-        assert "error" not in result
-
-    def test_enough_free_vram(self):
-        sched = _make_scheduler(gpu_info={"total": 24.0, "used": 0, "free": 24.0})
-        result = _run(sched.check_submission("qwen2.5:7b"))
-        assert result["ok"] is True
-
-    @patch("queue_db.get_model_settings", new_callable=AsyncMock)
-    def test_eviction_needed_and_possible(self, mock_settings):
-        mock_settings.return_value = {
-            "do_not_evict": False, "evictable": True, "wait_for_completion": True,
-        }
-        sched = _make_scheduler(
-            loaded_models={
-                "old:7b": {"loaded_at": 1.0, "vram_gb": 4.5, "active_jobs": 0},
-            },
-            gpu_info={"total": 24.0, "used": 20.0, "free": 4.0},
-        )
-        result = _run(sched.check_submission("qwen2.5:14b"))
-        # 4.0 free + 4.5 evictable = 8.5, exactly enough for 14b
-        assert result["ok"] is True
-        assert result.get("warning") == "eviction_required"
-        assert "old:7b" in result["evicting"]
-
-    @patch("queue_db.get_model_settings", new_callable=AsyncMock)
-    def test_insufficient_vram_after_eviction(self, mock_settings):
-        mock_settings.return_value = {
-            "do_not_evict": True, "evictable": False, "wait_for_completion": True,
-        }
-        sched = _make_scheduler(
-            loaded_models={
-                "pinned:14b": {"loaded_at": 1.0, "vram_gb": 8.5, "active_jobs": 0},
-            },
-            gpu_info={"total": 24.0, "used": 20.0, "free": 4.0},
-        )
-        result = _run(sched.check_submission("qwen2.5:14b"))
-        assert result["ok"] is False
-        assert result["error"] == "insufficient_vram"
-
-    def test_zero_gpu_total_accepts_optimistically(self):
-        """If GPU total is 0 (unreachable), accept job for scheduler to handle."""
-        sched = _make_scheduler(gpu_info={"total": 0, "used": 0, "free": 0})
-        result = _run(sched.check_submission("llama2:70b"))
-        assert result["ok"] is True
-
-    @patch("queue_db.get_model_settings", new_callable=AsyncMock)
-    def test_mixed_evictable_and_pinned(self, mock_settings):
-        async def side_effect(pool, name):
-            if name == "pinned:7b":
-                return {"do_not_evict": True, "evictable": False}
-            return {"do_not_evict": False, "evictable": True}
-
-        mock_settings.side_effect = side_effect
-        sched = _make_scheduler(
-            loaded_models={
-                "pinned:7b": {"loaded_at": 1.0, "vram_gb": 4.5, "active_jobs": 0},
-                "evictable:3b": {"loaded_at": 2.0, "vram_gb": 2.5, "active_jobs": 0},
-            },
-            gpu_info={"total": 24.0, "used": 17.0, "free": 7.0},
-        )
-        # Need 8.5, free=7.0, evictable=2.5 -> total 9.5 >= 8.5
-        result = _run(sched.check_submission("qwen2.5:14b"))
-        assert result["ok"] is True
-        assert result.get("warning") == "eviction_required"
-        assert "evictable:3b" in result["evicting"]
-        assert "pinned:7b" not in result.get("evicting", [])
-
-    def test_model_too_large_message_includes_sizes(self):
-        sched = _make_scheduler(gpu_info={"total": 12.0, "used": 0, "free": 12.0})
-        result = _run(sched.check_submission("llama2:70b"))
-        assert "40.0" in result["message"]
-        assert "12.0" in result["message"]
-
-    def test_multi_runner_accepts_if_any_fits(self):
-        """Model too large for runner 1 but fits on runner 2."""
-        pool = MagicMock()
-        runners = [
-            {"id": 1, "hostname": "small-gpu"},
-            {"id": 2, "hostname": "big-gpu"},
-        ]
-        statuses = {
-            1: {"gpu_vram_total_gb": 8.0, "gpu_vram_used_gb": 0, "loaded_ollama_models": []},
-            2: {"gpu_vram_total_gb": 24.0, "gpu_vram_used_gb": 0, "loaded_ollama_models": []},
-        }
-        mock_client = AsyncMock()
-        async def get_client(runner_id=None):
-            c = AsyncMock()
-            rid = runner_id or 1
-            c.status = AsyncMock(return_value=statuses[rid])
-            return c
-        sched = Scheduler(pool, get_client)
-        from gpu import vram_for_model as _vram_sync
-        async def _vram(model): return _vram_sync(model)
-        sched._vram_for_model = _vram
-        import db as _db
-        _db.get_active_runners = AsyncMock(return_value=runners)
-        # deepseek-r1:14b needs ~9GB — too large for 8GB runner, fits on 24GB
-        result = _run(sched.check_submission("deepseek-r1:14b"))
-        assert result["ok"] is True
 
 
 class TestSchedulerProperties:
     def test_current_job_id_default_none(self):
-        sched = _make_scheduler()
+        sched = _make_v2_scheduler()
         assert sched.current_job_id is None
 
-    def test_loaded_models_returns_copy(self):
-        sched = _make_scheduler(loaded_models={"a": {"vram_gb": 1}})
-        models = sched.loaded_models
-        models["b"] = {"vram_gb": 2}
-        assert "b" not in sched.loaded_models
+    def test_loaded_models_reflects_runners(self):
+        a = RunnerState(
+            runner_id=1, hostname="a", gpu_total_gb=17, current_model="qwen3:14b"
+        )
+        sched = _make_v2_scheduler([a])
+        assert "qwen3:14b" in sched.loaded_models
 
     def test_running_flag_default_false(self):
-        sched = _make_scheduler()
+        sched = _make_v2_scheduler()
         assert sched._running is False
 
     def test_stop_sets_running_false(self):
-        sched = _make_scheduler()
+        sched = _make_v2_scheduler()
         sched._running = True
+        sched._task = MagicMock()
+        sched._task.done = MagicMock(return_value=True)
         sched.stop()
         assert sched._running is False
 
 
-class TestEnsureModelLoaded:
-    def test_already_loaded_returns_true(self):
-        sched = _make_scheduler(
-            loaded_models={"qwen2.5:7b": {"loaded_at": 1.0, "vram_gb": 4.5}},
-        )
-        result = _run(sched._ensure_model_loaded("qwen2.5:7b"))
-        assert result is True
+class TestResolvedVramGbForModel:
+    @patch("queue_db.get_model_settings", new_callable=AsyncMock)
+    def test_db_override_wins(self, mock_gs):
+        mock_gs.return_value = {"vram_estimate_gb": 2.5}
+        pool, _ = _make_mock_pool()
+        gb = _run(queue_db.resolved_vram_gb_for_model(pool, "anything:7b"))
+        assert gb == 2.5
 
-    def test_model_too_large_returns_false(self):
-        sched = _make_scheduler(gpu_info={"total": 8.0, "used": 0, "free": 8.0})
-        result = _run(sched._ensure_model_loaded("llama2:70b"))
-        assert result is False
+    @patch("queue_db.get_model_settings", new_callable=AsyncMock)
+    def test_falls_back_to_gpu_heuristic(self, mock_gs):
+        mock_gs.return_value = {"vram_estimate_gb": None}
+        pool, _ = _make_mock_pool()
+        gb = _run(queue_db.resolved_vram_gb_for_model(pool, "qwen2.5:7b"))
+        assert gb == 4.5
 
 
 # ── FastAPI route tests ───────────────────────────────────────────────────────
@@ -602,7 +453,7 @@ import main
 async def _noop_lifespan(a):
     """No-op lifespan that sets app.state.db and scheduler to mocks."""
     a.state.db = MagicMock()
-    a.state.scheduler = MagicMock(spec=Scheduler)
+    a.state.scheduler = MagicMock(spec=SimplifiedScheduler)
     a.state.scheduler.check_submission = AsyncMock(return_value={"ok": True})
     a.state.scheduler.loaded_models = {}
     a.state.scheduler.current_job_id = None

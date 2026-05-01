@@ -1,8 +1,9 @@
 """Queue API routes for llm-manager."""
 import asyncio
 import json
-import uuid
 import logging
+import os
+import uuid
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Header, Request
@@ -11,13 +12,14 @@ from fastapi.responses import StreamingResponse
 
 import queue_db
 import db
+import queue_policy
 from queue_models import (
     QueueJobRequest, QueueBatchRequest, QueueJobResponse,
     QueueBatchResponse, QueueJobResult, QueueBatchStatus,
     QueueOverview, ModelSettingsUpdate, ModelSettings,
     ModelAlias, ModelAliasCreate, ModelRunnerParams, ModelRunnerParamsUpsert,
 )
-from scheduler import Scheduler
+from scheduler_v2 import SimplifiedScheduler as Scheduler
 
 logger = logging.getLogger(__name__)
 
@@ -61,48 +63,6 @@ async def _resolve_app(request: Request, authorization: Optional[str]) -> Option
     return row["id"]
 
 
-async def _priority_for_app(pool, app_id: Optional[int]) -> int:
-    """Map the calling app to a queue priority.
-
-    Apps whose name matches HIGH_PRIORITY_APPS (comma-separated env var) get
-    priority=1. Everything else gets 0. The age-bonus in get_pending_jobs
-    ensures priority=0 jobs don't starve — after 10 min of waiting they catch
-    up to a fresh priority=1 job.
-    """
-    import os
-    if app_id is None:
-        return 0
-    high = [s.strip().lower() for s in os.getenv("HIGH_PRIORITY_APPS", "").split(",") if s.strip()]
-    if not high:
-        return 0
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow(
-            "SELECT name FROM registered_apps WHERE id = $1", app_id)
-    if not row:
-        return 0
-    return 1 if (row["name"] or "").lower() in high else 0
-
-
-def _model_passes_category_filter(
-    model_categories: list,
-    allowed: list,
-    excluded: list,
-) -> bool:
-    """
-    Returns False if the model is blocked by the app's category permissions.
-
-    allowed_categories: model must have at least one of these (ignored if model has no categories)
-    excluded_categories: model is blocked only if ALL its categories are in excluded (ignored if model has no categories)
-    """
-    if not model_categories:
-        return True  # uncategorized models always pass
-    if allowed and not any(c in allowed for c in model_categories):
-        return False
-    if excluded and all(c in excluded for c in model_categories):
-        return False
-    return True
-
-
 def _enriched_job_metadata(
     metadata: Optional[dict], allowed_runner_ids: Optional[list[int]]
 ) -> Optional[dict]:
@@ -116,17 +76,9 @@ def _enriched_job_metadata(
     return out if out else None
 
 
-async def _check_rate_limit(pool, app_id: int):
-    """Check per-app rate limits."""
-    if app_id is None:
-        return
-    limits = await queue_db.get_rate_limit(pool, app_id)
-    queued = await queue_db.count_app_queued_jobs(pool, app_id)
-    if queued >= limits["max_queue_depth"]:
-        raise HTTPException(429, f"Queue depth limit reached ({limits['max_queue_depth']})")
-    recent = await queue_db.count_app_recent_jobs(pool, app_id)
-    if recent >= limits["max_jobs_per_minute"]:
-        raise HTTPException(429, f"Rate limit reached ({limits['max_jobs_per_minute']}/min)")
+async def _check_rate_limit(pool, app_id: Optional[int]):
+    """Check per-app rate limits (thin wrapper for tests that patch this path)."""
+    await queue_policy.check_queue_rate_limit(pool, app_id)
 
 
 # ── Submit jobs ───────────────────────────────────────────────────────────────
@@ -134,7 +86,6 @@ async def _check_rate_limit(pool, app_id: int):
 @router.post("/submit", response_model=QueueJobResponse)
 async def submit_job(body: QueueJobRequest, request: Request,
                      authorization: Optional[str] = Header(None)):
-    import os
     if os.environ.get("DISABLE_SCHEDULER", "").lower() in ("true", "1", "yes"):
         raise HTTPException(503, "Queue submissions disabled — scheduler is not running")
     pool = _get_pool(request)
@@ -146,16 +97,7 @@ async def submit_job(body: QueueJobRequest, request: Request,
             app_row = await db.get_app_by_id(pool, app_id)
             allowed_runner_ids = list((app_row or {}).get("allowed_runner_ids") or [])
 
-        # Category access check
-        if app_id is not None:
-            perms = await queue_db.get_app_category_perms(pool, app_id)
-            if perms["allowed_categories"] or perms["excluded_categories"]:
-                model_settings = await queue_db.get_model_settings(pool, body.model)
-                model_cats = list(model_settings.get("categories") or [])
-                if not _model_passes_category_filter(
-                    model_cats, perms["allowed_categories"], perms["excluded_categories"]
-                ):
-                    raise HTTPException(403, "Model not accessible under app category restrictions")
+        await queue_policy.ensure_category_access(pool, app_id, body.model)
 
         # Pre-check VRAM
         check = await scheduler.check_submission(body.model, allowed_runner_ids=allowed_runner_ids)
@@ -164,7 +106,7 @@ async def submit_job(body: QueueJobRequest, request: Request,
         await _check_rate_limit(pool, app_id)
 
         job_id = str(uuid.uuid4())[:12]
-        priority = await _priority_for_app(pool, app_id)
+        priority = await queue_policy.priority_for_app(pool, app_id)
         meta = _enriched_job_metadata(
             body.metadata,
             allowed_runner_ids if allowed_runner_ids else None,
@@ -200,7 +142,6 @@ async def submit_job(body: QueueJobRequest, request: Request,
 @router.post("/submit-batch", response_model=QueueBatchResponse)
 async def submit_batch(body: QueueBatchRequest, request: Request,
                        authorization: Optional[str] = Header(None)):
-    import os
     if os.environ.get("DISABLE_SCHEDULER", "").lower() in ("true", "1", "yes"):
         raise HTTPException(503, "Queue submissions disabled — scheduler is not running")
     pool = _get_pool(request)
@@ -214,21 +155,13 @@ async def submit_batch(body: QueueBatchRequest, request: Request,
     batch_id = f"batch_{str(uuid.uuid4())[:8]}"
     jobs = []
 
-    # Fetch category perms once for the batch
-    _cat_perms = None
-    if app_id is not None:
-        _cat_perms = await queue_db.get_app_category_perms(pool, app_id)
-
     # Resolve priority once per batch
-    priority = await _priority_for_app(pool, app_id)
+    priority = await queue_policy.priority_for_app(pool, app_id)
 
     for job_req in body.jobs:
-        # Category access check
-        if _cat_perms and (_cat_perms["allowed_categories"] or _cat_perms["excluded_categories"]):
-            model_settings = await queue_db.get_model_settings(pool, job_req.model)
-            model_cats = list(model_settings.get("categories") or [])
-            if not _model_passes_category_filter(model_cats, _cat_perms["allowed_categories"], _cat_perms["excluded_categories"]):
-                raise HTTPException(403, f"Model {job_req.model} not accessible under app category restrictions")
+        await queue_policy.ensure_category_access(
+            pool, app_id, job_req.model, batch_model_label=job_req.model
+        )
 
         # Pre-check VRAM for each unique model
         check = await scheduler.check_submission(job_req.model, allowed_runner_ids=allowed_runner_ids)
@@ -455,12 +388,13 @@ async def queue_status(request: Request):
         except Exception:
             pass
 
-    # Get current running job from DB instead of scheduler state
-    current_job = scheduler.current_job_id
+    # Prefer Postgres — correct on every replica; scheduler memory only on lock holder
+    current_job = None
+    running_jobs = await queue_db.get_running_jobs(pool, limit=1)
+    if running_jobs:
+        current_job = running_jobs[0]["id"]
     if not current_job:
-        running_jobs = await queue_db.get_running_jobs(pool, limit=1)
-        if running_jobs:
-            current_job = running_jobs[0]["id"]
+        current_job = scheduler.current_job_id
 
     # GPU info from scheduler if available, otherwise estimate from Ollama
     gpu_info = await scheduler._get_gpu_info()

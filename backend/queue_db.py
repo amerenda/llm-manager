@@ -71,8 +71,21 @@ async def init_queue_tables(pool: asyncpg.Pool):
             try:
                 await conn.execute(stmt)
             except Exception:
-                pass
+                logger.exception("queue table migration failed: %s", stmt[:120])
+                raise
     logger.info("Queue tables initialized")
+
+
+async def resolved_vram_gb_for_model(pool: asyncpg.Pool, model: str) -> float:
+    """VRAM estimate for a model: ``model_settings.vram_estimate_gb`` if set,
+    otherwise the heuristic in ``gpu.vram_for_model``."""
+    from gpu import vram_for_model
+
+    settings = await get_model_settings(pool, model)
+    v = settings.get("vram_estimate_gb")
+    if v is not None:
+        return float(v)
+    return vram_for_model(model)
 
 
 # ── Job CRUD ──────────────────────────────────────────────────────────────────

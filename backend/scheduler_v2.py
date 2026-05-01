@@ -10,8 +10,8 @@ accounting, no eviction math, no mid-transition snapshots.
 Deliberately dumb v1 — see plans/queue-one-model-per-gpu.md for the rationale
 and the future-work list.
 
-Public surface matches the old Scheduler so main.py and queue_routes.py can
-swap between them via the SIMPLIFIED_SCHEDULER env flag.
+Public surface matches the historical Scheduler name in main.py and
+queue_routes.py (imported as ``Scheduler``).
 """
 
 from __future__ import annotations
@@ -40,9 +40,7 @@ SCHEDULER_LOCK_ID = 900001  # Must match main.py
 
 
 # ── Metrics ──────────────────────────────────────────────────────────────────
-# v2-specific. Old scheduler metrics (loaded_models gauge, eviction counter,
-# etc.) are kept live by the old scheduler when the flag is off; when the flag
-# flips on they simply stop incrementing.
+# v2-specific Prometheus metrics (swap, wait, completion counters).
 
 scheduler_model_swap_total = Counter(
     "llm_scheduler_v2_model_swap_total",
@@ -513,7 +511,9 @@ class SimplifiedScheduler:
                 if allowed_runner_ids:
                     logger.debug("job %s: restricting to runners %s", head["id"], allowed_runner_ids)
 
-                runner = self._pick_runner(model, allowed_runner_ids=allowed_runner_ids)
+                runner = await self._pick_runner(
+                    model, allowed_runner_ids=allowed_runner_ids
+                )
                 if runner is None:
                     # No runner idle right now (all busy or draining). Wait a
                     # beat, try again. Background tasks keep running.
@@ -646,7 +646,7 @@ class SimplifiedScheduler:
 
     # ── routing ──────────────────────────────────────────────────────────────
 
-    def _pick_runner(
+    async def _pick_runner(
         self, model: str, allowed_runner_ids: list[int] | None = None
     ) -> Optional[RunnerState]:
         """Return a runner to use for `model`, or None if none is immediately usable.
@@ -688,7 +688,7 @@ class SimplifiedScheduler:
                 return r
 
         # 3. Idle + has it downloaded + fits
-        need = vram_for_model(model)
+        need = await queue_db.resolved_vram_gb_for_model(self.pool, model)
         for r in self._runners.values():
             if r.pinned_model is not None or _skip(r):
                 continue
@@ -1011,7 +1011,7 @@ class SimplifiedScheduler:
         if detect_provider(model) != ModelProvider.LOCAL:
             return {"ok": True, "provider": detect_provider(model).value}
 
-        need = vram_for_model(model)
+        need = await queue_db.resolved_vram_gb_for_model(self.pool, model)
 
         # Prefer in-memory state if we have it
         candidate_runners = list(self._runners.values())

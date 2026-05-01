@@ -347,7 +347,6 @@ Auto-discovery requires a shared registration secret (Bitwarden: `llm-manager-re
 | `DISABLE_SCHEDULER` | Deployment env | Set `true` to disable the job scheduler (UAT) |
 | `UAT_TEST_RUNNER` | Deployment env | Runner name for UAT connectivity tests |
 | `UAT_TEST_MODEL` | Deployment env | Model name for UAT connectivity tests |
-| `SIMPLIFIED_SCHEDULER` | Deployment env | Set `1` to use the v2 simplified scheduler (recommended) |
 | `QUEUE_STRATEGY` | Deployment env | `priority_batching` (default) or `fifo` — controls job dispatch order |
 | `QUEUE_BATCH_SIZE` | Deployment env | Max same-model jobs to dispatch together (default: 5, priority_batching only) |
 
@@ -453,15 +452,13 @@ to `main`, then updates the image tags in `gitops/backend/deployment.yaml` and
 
 ## Scheduler
 
-### Simplified Scheduler v2 (recommended)
-
-Enable with `SIMPLIFIED_SCHEDULER=1`. Designed around one-model-per-GPU semantics:
+The backend uses a **one-model-per-GPU** scheduler (`backend/scheduler_v2.py`):
 
 - **Fast-path** — when the requested model is already loaded on an idle runner, the request bypasses the queue entirely. The scheduler atomically claims the runner, proxies directly to Ollama with true streaming (token-by-token), then releases. Zero DB overhead.
 - **Queue path** — when the model is not loaded (swap required), the request enters the DB queue. The scheduler dispatches a batch, swaps the model, runs the jobs, then checks the queue again.
 - **Batching** — `PriorityBatchingStrategy` (default) dequeues up to `QUEUE_BATCH_SIZE` consecutive same-model jobs from the head of the priority-ordered queue, minimizing swap frequency. Switch to `fifo` via `QUEUE_STRATEGY=fifo` for strict single-job dispatch.
 - **Runner restrictions** — if an app has `allowed_runner_ids` configured, that restriction is enforced on both the fast-path and the queue path. Batching will not mix jobs with different runner restriction sets.
-- **Runner pinning** — pinned runners are dedicated exclusively to their pinned model. A pinned runner will never accept any other model. A pinned model can never be evicted from its runner.
+- **Runner pinning** — pinned runners are dedicated exclusively to their pinned model. A pinned runner will never accept any other model.
 
 ```
 request → fast-path check → model loaded + runner idle?
@@ -471,16 +468,12 @@ request → fast-path check → model loaded + runner idle?
                     pick runner → swap if needed → run batch → mark complete
 ```
 
-### Legacy Scheduler (v1)
-
-The default scheduler (no `SIMPLIFIED_SCHEDULER` flag) supports multi-model concurrent loading and VRAM-based eviction. It batches jobs by model, handles eviction policies, and supports `do_not_evict` and `evictable` flags on model settings. Use this if running multiple models concurrently on a single GPU.
-
 ## Queue System
 
 The queue system provides async job submission with VRAM-aware scheduling. Instead
 of sending inference requests directly through `/v1/chat/completions`, apps can
 submit jobs to a queue. The scheduler batches jobs by model to minimize model
-swaps, automatically loads/unloads models, and manages VRAM eviction.
+swaps and loads or unloads models on each GPU as needed (one loaded model per GPU).
 
 ### Queue API
 
@@ -513,13 +506,13 @@ All queue endpoints are under `/api/queue`. Authenticate with `Authorization: Be
   "status": "queued",
   "model": "llama3.2:latest",
   "position": 3,
-  "warning": "Will evict qwen2:7b to free VRAM for llama3.2:latest",
-  "evicting": ["qwen2:7b"]
+  "warning": null,
+  "evicting": null
 }
 ```
 
-If the model is too large for the GPU or cannot fit even after eviction, the
-submission is rejected with HTTP 422.
+If the model is too large for any GPU (using `vram_estimate_gb` from model
+settings when set), the submission is rejected with HTTP 422.
 
 #### Job Status & Results
 
@@ -552,23 +545,13 @@ submission is rejected with HTTP 422.
 
 ### VRAM Management
 
-The scheduler handles model loading and VRAM automatically:
+The scheduler loads one model per GPU at a time and **swaps** when the queue
+needs a different model: unload the current Ollama model (if any), load the new
+one, then run jobs. Submission **pre-checks** compare required VRAM (from
+`vram_estimate_gb` in model settings when set, otherwise a name-based heuristic)
+against each runner's GPU size.
 
-1. **Batching** -- Jobs are grouped by model. All jobs for an already-loaded model
-   run first, avoiding unnecessary swaps.
-2. **Auto-loading** -- If a job's model is not loaded, the scheduler loads it via Ollama.
-3. **Eviction** -- When VRAM is insufficient, the scheduler evicts models using these rules:
-   - Models marked `do_not_evict` or `evictable: false` are never evicted
-   - Idle models (no active jobs) are evicted before busy ones
-   - Among idle models, the oldest-loaded is evicted first
-   - If `wait_for_completion` is set (default), the scheduler waits up to 5 minutes
-     for active jobs to finish before evicting
-4. **Pre-check** -- On submission, the scheduler validates that the model can fit
-   (either immediately or after eviction) and returns a warning if eviction is needed.
-
-### Model Settings (Legacy Scheduler)
-
-Per-model eviction behavior for the legacy v1 scheduler. Not used by the simplified v2 scheduler — use runner pinning (`PATCH /api/runners/{id}`) instead.
+### Model Settings
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -580,10 +563,10 @@ Per-model eviction behavior for the legacy v1 scheduler. Not used by the simplif
 
 | Field | Default | Description |
 |-------|---------|-------------|
-| `do_not_evict` | `false` | Prevent eviction (legacy scheduler only) |
-| `evictable` | `true` | Whether the scheduler can evict this model (legacy only) |
-| `wait_for_completion` | `true` | Wait for active jobs before evicting (legacy only) |
-| `vram_estimate_gb` | *(auto)* | Manual VRAM override for scheduling |
+| `do_not_evict` | `false` | Retained for UI/schema compatibility |
+| `evictable` | `true` | Retained for UI/schema compatibility |
+| `wait_for_completion` | `true` | Retained for UI/schema compatibility |
+| `vram_estimate_gb` | *(auto)* | Manual VRAM override used for queue pre-checks and scheduling |
 
 ### Per-Runner Model Parameters
 

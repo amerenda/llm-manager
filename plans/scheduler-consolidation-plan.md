@@ -1,6 +1,8 @@
 # Scheduler Consolidation Plan
 
 ## Goal
+**Status:** Done — legacy `backend/scheduler.py` has been removed; production uses `backend/scheduler_v2.py` only.
+
 Retire legacy `backend/scheduler.py` and keep a single scheduler implementation (`backend/scheduler_v2.py`) with equivalent runtime behavior for current production workloads.
 
 ## Why

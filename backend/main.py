@@ -37,21 +37,15 @@ from db import (
 )
 from gpu import vram_for_model
 from llm_agent import LLMAgentClient
-# Feature flag: SIMPLIFIED_SCHEDULER=1 uses the one-model-per-GPU scheduler
-# (plans/queue-one-model-per-gpu.md). Default off until UAT soak validates it.
-if os.getenv("SIMPLIFIED_SCHEDULER", "").lower() in ("1", "true", "yes"):
-    from scheduler_v2 import SimplifiedScheduler as Scheduler
-    from scheduler_v2 import fastpath_requests_total, fastpath_duration_seconds
-    _SCHEDULER_VARIANT = "simplified"
-else:
-    from scheduler import Scheduler
-    fastpath_requests_total = None
-    fastpath_duration_seconds = None
-    _SCHEDULER_VARIANT = "legacy"
+from scheduler_v2 import SimplifiedScheduler as Scheduler
+from scheduler_v2 import fastpath_duration_seconds, fastpath_requests_total
+
+_SCHEDULER_VARIANT = "v2"
 from queue_routes import router as queue_router, model_router, alias_router
 from library_routes import router as library_router, safety_router
 from library import classify_models_batch, parse_param_count, parse_quantization, refresh_library_cache
 import queue_db
+import queue_policy
 import auth
 from cloud_providers import (
     detect_provider, ModelProvider, get_anthropic_models, anthropic_chat,
@@ -213,6 +207,7 @@ async def _get_runner_ollama_base(pool: asyncpg.Pool, runner_id: Optional[int] =
 # ── Lifespan ──────────────────────────────────────────────────────────────────
 
 SCHEDULER_LOCK_ID = 900001  # Postgres advisory lock ID for scheduler
+STALE_SWEEP_LOCK_ID = 900002  # Only one replica runs stale in-progress recovery per tick
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -364,8 +359,8 @@ async def lifespan(app: FastAPI):
     lock_retry_task = asyncio.create_task(_retry_lock()) if not DISABLE_SCHEDULER else None
 
     async def _stale_queue_sweeper():
-        """Re-queue wedged loading_model/running rows even if the scheduler loop
-        is stuck or no pod holds the advisory lock. Runs on every replica."""
+        """Re-queue wedged loading_model/running rows. Uses a short-lived
+        advisory lock so only one replica performs the sweep per interval."""
         interval = float(os.environ.get("STALE_QUEUE_SWEEP_INTERVAL_SEC", "60"))
         lm = int(os.environ.get("SCHEDULER_STALE_LOADING_MIN", "45"))
         rm = int(os.environ.get("SCHEDULER_STALE_RUNNING_MIN", "360"))
@@ -375,12 +370,29 @@ async def lifespan(app: FastAPI):
             if DISABLE_SCHEDULER:
                 continue
             try:
-                await queue_db.recover_stale_in_progress_jobs(
-                    pool,
-                    loading_minutes=lm,
-                    running_minutes=rm,
-                    loading_fallback_hours=fb,
-                )
+                async with pool.acquire() as conn:
+                    got = await conn.fetchval(
+                        "SELECT pg_try_advisory_lock($1)", STALE_SWEEP_LOCK_ID
+                    )
+                    if not got:
+                        continue
+                    try:
+                        await queue_db.recover_stale_in_progress_jobs(
+                            pool,
+                            loading_minutes=lm,
+                            running_minutes=rm,
+                            loading_fallback_hours=fb,
+                        )
+                    finally:
+                        try:
+                            await conn.execute(
+                                "SELECT pg_advisory_unlock($1)", STALE_SWEEP_LOCK_ID
+                            )
+                        except Exception:
+                            logger.warning(
+                                "stale_queue_sweeper: advisory unlock failed",
+                                exc_info=True,
+                            )
             except Exception:
                 logger.exception("stale_queue_sweeper failed")
 
@@ -1767,25 +1779,37 @@ async def proxy_chat_completions(request: Request, runner_id: Optional[int] = No
         body["model"] = model
 
     # Enforce per-app model + runner restrictions
+    pool = app.state.db
+    app_id: Optional[int] = None
     app_allowed_runners: list[int] = []
     auth_header = request.headers.get("Authorization", "")
     if auth_header.startswith("Bearer "):
         api_key = auth_header.removeprefix("Bearer ").strip()
-        allowed = await db.check_model_allowed(app.state.db, api_key, model)
+        allowed = await db.check_model_allowed(pool, api_key, model)
         if not allowed:
             raise HTTPException(403, f"Model '{model}' is not allowed for this application")
-        app_allowed_runners = await db.get_app_allowed_runners(app.state.db, api_key)
-        # Touch last_seen so the app shows as online
-        pool = app.state.db
+        app_allowed_runners = await db.get_app_allowed_runners(pool, api_key)
         async with pool.acquire() as conn:
             await conn.execute(
                 "UPDATE registered_apps SET last_seen = NOW() WHERE api_key = $1", api_key)
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT id FROM registered_apps WHERE api_key = $1 AND status = 'active'",
+                api_key,
+            )
+        if row:
+            app_id = row["id"]
+
+    if app_id is not None:
+        await queue_policy.ensure_category_access(pool, app_id, model)
 
     provider = detect_provider(model)
     _inc_request("/v1/chat/completions", "POST", 200)
 
     # ── Cloud model routing ──────────────────────────────────────────────
     if provider == ModelProvider.ANTHROPIC:
+        if app_id is not None:
+            await queue_policy.check_queue_rate_limit(pool, app_id)
         # Check if model is enabled
         cfg = await db.get_cloud_model_config(app.state.db, model)
         if cfg and not cfg.get("enabled", True):
@@ -1817,20 +1841,7 @@ async def proxy_chat_completions(request: Request, runner_id: Optional[int] = No
     # ── Local model routing (Ollama) ──────────────────────────────────────
     import uuid as _uuid
 
-    pool = app.state.db
     scheduler: Scheduler = app.state.scheduler
-
-    # Resolve app_id for queue tracking
-    app_id = None
-    if auth_header.startswith("Bearer "):
-        api_key = auth_header.removeprefix("Bearer ").strip()
-        async with pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "SELECT id FROM registered_apps WHERE api_key = $1 AND status = 'active'",
-                api_key,
-            )
-        if row:
-            app_id = row["id"]
 
     # Pre-check VRAM (respect app runner affinity like the queue path)
     check = await scheduler.check_submission(
@@ -1839,6 +1850,9 @@ async def proxy_chat_completions(request: Request, runner_id: Optional[int] = No
     )
     if not check["ok"]:
         raise HTTPException(422, check)
+
+    if app_id is not None:
+        await queue_policy.check_queue_rate_limit(pool, app_id)
 
     queue_request = {
         "messages": body.get("messages", []),
@@ -1851,7 +1865,7 @@ async def proxy_chat_completions(request: Request, runner_id: Optional[int] = No
     # ── Fast path: direct proxy when model is already loaded + runner idle ─
     # Bypasses the job queue entirely — no DB write, no poll loop, real streaming.
     # Falls through to the queue when no idle runner has the model loaded (swap needed).
-    if fastpath_requests_total is not None and hasattr(scheduler, "try_claim_for_fast_path"):
+    if hasattr(scheduler, "try_claim_for_fast_path"):
         fp_runner = scheduler.try_claim_for_fast_path(
             model, app_allowed_runners if app_allowed_runners else None
         )
@@ -1912,9 +1926,12 @@ async def proxy_chat_completions(request: Request, runner_id: Optional[int] = No
     # ── Queue path: scheduler handles model loading and dispatch ───────────
     job_id = str(_uuid.uuid4())[:12]
     job_metadata = {"allowed_runner_ids": app_allowed_runners} if app_allowed_runners else None
+    priority = await queue_policy.priority_for_app(pool, app_id)
     logger.info("queue: submitting job %s (model=%s, app_id=%s, runners=%s)",
                 job_id, model, app_id, app_allowed_runners or "any")
-    await queue_db.insert_job(pool, job_id, None, app_id, model, queue_request, job_metadata)
+    await queue_db.insert_job(
+        pool, job_id, None, app_id, model, queue_request, job_metadata, priority=priority
+    )
 
     # Poll until the scheduler completes the job (timeout after 10 min)
     deadline = time.time() + 600

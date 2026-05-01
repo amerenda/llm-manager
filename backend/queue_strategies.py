@@ -64,7 +64,7 @@ class QueueStrategy(Protocol):
 
 
 class FifoStrategy:
-    """Single-job strict FIFO (same as the v1 simplified scheduler)."""
+    """Single-job strict FIFO."""
 
     name = "fifo"
 
