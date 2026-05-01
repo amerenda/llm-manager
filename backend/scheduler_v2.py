@@ -198,6 +198,8 @@ class SimplifiedScheduler:
         self._running = False
         self._current_job_id: Optional[str] = None
         self._runners: dict[int, RunnerState] = {}  # keyed by runner_id
+        self._last_idle_model_sync_mono: float = 0.0
+        self._last_no_runner_log_mono: float = 0.0
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 
@@ -397,6 +399,96 @@ class SimplifiedScheduler:
             runner_vram_total_bytes.labels(runner=rs.hostname).set(vram_total)
             runner_is_idle.labels(runner=rs.hostname).set(1 if rs.is_idle else 0)
 
+    async def _sync_idle_loaded_models_from_agents(self) -> None:
+        """Reconcile ``current_model`` with live Ollama on *idle* runners.
+
+        Admin/UI unload or host-side changes otherwise leave scheduler state
+        thinking a model is still loaded, skipping the swap path."""
+        interval = float(os.environ.get("SCHEDULER_LIVE_MODEL_SYNC_SEC", "30"))
+        if interval <= 0:
+            return
+        now = time.monotonic()
+        if now - self._last_idle_model_sync_mono < interval:
+            return
+        self._last_idle_model_sync_mono = now
+        for rs in self._runners.values():
+            if not rs.is_idle:
+                continue
+            try:
+                client = await self.get_runner_client(runner_id=rs.runner_id)
+                status = await client.status()
+            except Exception:
+                logger.debug("live model sync: status failed for %s", rs.hostname, exc_info=True)
+                continue
+            loaded = status.get("loaded_ollama_models") or []
+            live = (loaded[0].get("name") or None) if loaded else None
+            if live != rs.current_model:
+                logger.info(
+                    "scheduler: idle runner %s loaded model %r → %r (agent status)",
+                    rs.hostname, rs.current_model, live,
+                )
+                rs.current_model = live
+                rs.model_loaded_at = time.time() if live else None
+            if status.get("gpu_vram_total_gb"):
+                rs.gpu_total_gb = status.get("gpu_vram_total_gb", rs.gpu_total_gb)
+            try:
+                runner_vram_used_bytes.labels(runner=rs.hostname).set(
+                    (status.get("gpu_vram_used_gb") or 0) * 1e9
+                )
+            except Exception:
+                pass
+
+    def _any_eligible_idle_runner(
+        self, allowed_runner_ids: list[int] | None
+    ) -> bool:
+        """True if some runner could accept work (idle, not draining/down, allowed)."""
+        for r in self._runners.values():
+            if r.draining or r.is_ollama_down:
+                continue
+            if allowed_runner_ids and r.runner_id not in allowed_runner_ids:
+                continue
+            if r.is_idle:
+                return True
+        return False
+
+    def _waiting_on_pinned_busy_runner(self, model: str) -> bool:
+        """True when the model is pinned to a runner that is currently busy."""
+        for r in self._runners.values():
+            if r.pinned_model != model:
+                continue
+            if r.draining or r.is_ollama_down:
+                continue
+            if not r.is_idle:
+                return True
+        return False
+
+    def _log_pick_runner_miss_throttled(
+        self,
+        model: str,
+        head_job_id: str,
+        allowed_runner_ids: list[int] | None,
+        has_idle: bool,
+        pinned_wait: bool,
+    ) -> None:
+        now = time.monotonic()
+        if now - self._last_no_runner_log_mono < 30:
+            return
+        self._last_no_runner_log_mono = now
+        summary = [
+            (rs.hostname, rs.is_idle, rs.draining, rs.current_model, rs.pinned_model)
+            for rs in sorted(self._runners.values(), key=lambda x: x.runner_id)
+        ]
+        logger.info(
+            "scheduler: no runner for model=%r head_job=%s allowed_runners=%s "
+            "eligible_idle=%s pinned_busy_wait=%s runners=%s",
+            model,
+            head_job_id,
+            allowed_runner_ids,
+            has_idle,
+            pinned_wait,
+            summary,
+        )
+
     async def _heal_stale_in_flight_claims(self) -> None:
         """Drop bogus busy flags when Postgres shows no active work for that job.
 
@@ -461,6 +553,8 @@ class SimplifiedScheduler:
         consecutive_errors = 0
         last_stale_heal_mono = 0.0
         stale_heal_interval = float(os.environ.get("SCHEDULER_STALE_HEAL_INTERVAL_SEC", "15"))
+        head_unplaceable_since: float | None = None
+        head_unplaceable_key: str | None = None
         while self._running:
             try:
                 # Reap completed dispatch tasks so the set doesn't grow unbounded
@@ -472,6 +566,7 @@ class SimplifiedScheduler:
                     break
 
                 await self._refresh_runners()
+                await self._sync_idle_loaded_models_from_agents()
 
                 now_mono = time.monotonic()
                 if now_mono - last_stale_heal_mono >= stale_heal_interval:
@@ -480,6 +575,8 @@ class SimplifiedScheduler:
 
                 batch = await self.strategy.next_jobs(self.pool)
                 if not batch:
+                    head_unplaceable_key = None
+                    head_unplaceable_since = None
                     await asyncio.sleep(1)
                     idle_counter += 1
                     if idle_counter > 3600:  # hourly cleanup
@@ -495,6 +592,8 @@ class SimplifiedScheduler:
                 if provider != ModelProvider.LOCAL:
                     # Cloud jobs don't need a runner — dispatch each as its own
                     # background task so they run in parallel.
+                    head_unplaceable_key = None
+                    head_unplaceable_since = None
                     for job in batch:
                         t = asyncio.create_task(self._run_job(job, runner=None))
                         active_tasks.add(t)
@@ -515,11 +614,49 @@ class SimplifiedScheduler:
                     model, allowed_runner_ids=allowed_runner_ids
                 )
                 if runner is None:
-                    # No runner idle right now (all busy or draining). Wait a
-                    # beat, try again. Background tasks keep running.
                     await self._heal_stale_in_flight_claims()
+                    fail_sec = float(
+                        os.environ.get("SCHEDULER_UNPLACEABLE_FAIL_SEC", "180")
+                    )
+                    has_idle = self._any_eligible_idle_runner(allowed_runner_ids)
+                    pinned_wait = self._waiting_on_pinned_busy_runner(model)
+                    self._log_pick_runner_miss_throttled(
+                        model, head["id"], allowed_runner_ids, has_idle, pinned_wait
+                    )
+                    if fail_sec <= 0 or not has_idle or pinned_wait:
+                        head_unplaceable_key = None
+                        head_unplaceable_since = None
+                    else:
+                        key = head["id"]
+                        if head_unplaceable_key != key:
+                            head_unplaceable_key = key
+                            head_unplaceable_since = time.monotonic()
+                        elif head_unplaceable_since is not None:
+                            if time.monotonic() - head_unplaceable_since >= fail_sec:
+                                err = (
+                                    f"No runner could be selected for model {model!r} "
+                                    f"after {fail_sec:.0f}s while other runners were idle "
+                                    f"(model may be missing on disk, VRAM estimate too large, "
+                                    f"or placement rules block all idle GPUs). "
+                                    f"Head job {head['id']!r}."
+                                )
+                                logger.error("scheduler: %s", err)
+                                for job in batch:
+                                    await queue_db.update_job_status(
+                                        self.pool, job["id"], "failed", error=err,
+                                    )
+                                    scheduler_jobs_completed_total.labels(
+                                        model=job["model"], status="failed"
+                                    ).inc()
+                                head_unplaceable_key = None
+                                head_unplaceable_since = None
+                                await asyncio.sleep(0)
+                                continue
                     await asyncio.sleep(2)
                     continue
+
+                head_unplaceable_key = None
+                head_unplaceable_since = None
 
                 # Eagerly mark the runner busy with the first job in the batch
                 # so the very next loop iteration's _pick_runner skips it.

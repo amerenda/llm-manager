@@ -179,6 +179,43 @@ class TestPickRunner:
         assert _run(sched._pick_runner("qwen3")) is a
 
 
+class TestPlacementHelpers:
+    def test_any_eligible_idle_false_when_all_busy(self):
+        a = RunnerState(runner_id=1, hostname="a", in_flight_job_id="j1")
+        sched = _make_sched([a])
+        assert sched._any_eligible_idle_runner(None) is False
+
+    def test_any_eligible_idle_true(self):
+        a = RunnerState(runner_id=1, hostname="a")
+        sched = _make_sched([a])
+        assert sched._any_eligible_idle_runner(None) is True
+
+    def test_any_eligible_idle_respects_allowed(self):
+        a = RunnerState(runner_id=1, hostname="a")
+        b = RunnerState(runner_id=2, hostname="b", in_flight_job_id="j1")
+        sched = _make_sched([a, b])
+        assert sched._any_eligible_idle_runner([2]) is False
+        assert sched._any_eligible_idle_runner([1]) is True
+
+    def test_waiting_on_pinned_busy(self):
+        a = RunnerState(
+            runner_id=1,
+            hostname="a",
+            pinned_model="m",
+            in_flight_job_id="j1",
+            gpu_total_gb=17,
+        )
+        b = RunnerState(runner_id=2, hostname="b", gpu_total_gb=17)
+        sched = _make_sched([a, b])
+        assert sched._waiting_on_pinned_busy_runner("m") is True
+        assert sched._waiting_on_pinned_busy_runner("other") is False
+
+    def test_waiting_on_pinned_busy_false_when_idle(self):
+        a = RunnerState(runner_id=1, hostname="a", pinned_model="m", gpu_total_gb=17)
+        sched = _make_sched([a])
+        assert sched._waiting_on_pinned_busy_runner("m") is False
+
+
 # ── check_submission ────────────────────────────────────────────────────────
 
 class TestCheckSubmission:
