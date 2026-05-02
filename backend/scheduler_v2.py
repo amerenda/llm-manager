@@ -885,19 +885,38 @@ class SimplifiedScheduler:
             if r.current_model == model and r.is_idle:
                 return r
 
-        # 3. Idle + has it downloaded + fits
+        # 3. Idle + has it downloaded + fits (VRAM-wise).
+        #
+        # Some agents omit gpu_vram_total_gb in /v1/status while still reporting
+        # models via heartbeat; gpu_total_gb stays 0 and we used to skip here
+        # forever — jobs sat queued with idle GPUs and the model on disk.
         need = await queue_db.resolved_vram_gb_for_model(self.pool, model)
+        swap_candidates: list[RunnerState] = []
         for r in self._runners.values():
             if r.pinned_model is not None or _skip(r):
                 continue
             if not r.is_idle:
                 continue
-            if r.gpu_total_gb <= 0:
-                continue  # unknown — skip defensively
             if not r.has_downloaded(model):
                 continue
-            if need <= r.gpu_total_gb:
-                return r
+            cap = r.gpu_total_gb
+            if cap > 0:
+                if need <= cap:
+                    return r
+            else:
+                swap_candidates.append(r)
+        # Unknown VRAM: still attempt swap/load — Ollama refuses if it truly
+        # cannot fit; better than an infinite queue when status is incomplete.
+        if swap_candidates:
+            r = min(swap_candidates, key=lambda x: x.runner_id)
+            logger.info(
+                "scheduler: picking %s for model=%r with unknown VRAM "
+                "(need=%.1fGiB per settings/heuristic)",
+                r.hostname,
+                model,
+                need,
+            )
+            return r
 
         return None
 

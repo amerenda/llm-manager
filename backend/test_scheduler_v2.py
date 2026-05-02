@@ -123,10 +123,17 @@ class TestPickRunner:
         # qwen3:70b → 40GB estimate > 8.6
         assert _run(sched._pick_runner("qwen3:70b")) is None
 
-    def test_unknown_gpu_total_skipped(self):
-        # Runner whose gpu_total_gb=0 hasn't been reconciled yet — defensively skip
+    def test_unknown_gpu_total_picked_when_model_downloaded(self):
+        # Status sometimes omits gpu_vram_total_gb → gpu_total_gb stays 0. If the
+        # heartbeat still lists the model, we must attempt placement (swap/load).
         a = RunnerState(runner_id=1, hostname="a", gpu_total_gb=0,
                         downloaded_models={"qwen3:14b"})
+        sched = _make_sched([a])
+        assert _run(sched._pick_runner("qwen3:14b")) is a
+
+    def test_unknown_gpu_total_not_picked_without_download(self):
+        a = RunnerState(runner_id=1, hostname="a", gpu_total_gb=0,
+                        downloaded_models=set())
         sched = _make_sched([a])
         assert _run(sched._pick_runner("qwen3:14b")) is None
 

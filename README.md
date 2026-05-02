@@ -568,6 +568,7 @@ Other causes:
 - **Pinned model** on a busy GPU — work for that model must wait for the pin holder.
 - **No runners** heartbeating, or **model not downloaded** on any eligible host while other GPUs are idle — after ~`SCHEDULER_UNPLACEABLE_FAIL_SEC` (default 180s) with idle GPUs, the batch may be **failed** with an error; if **no** idle GPU exists, the job keeps waiting instead.
 - Optional **`SCHEDULER_FAIL_QUEUED_OLDER_THAN_SEC`** (default `0` = off): set to wall seconds (e.g. `28800` for 8h) to **fail** batches whose head job has been queued longer than that, with a message pointing at capacity and placement. Use when you prefer failing loudly over indefinite backlog.
+- **VRAM size missing from `/v1/status`** — if `gpu_vram_total_gb` is absent, the scheduler may keep `gpu_total_gb=0`. Placement used to **skip** those runners even when the model was listed in `downloaded_models`, causing a **fully idle fleet** and **infinite `queued`** (fixed: unknown VRAM still attempts swap when the model is on disk).
 
 Throttled log line: `scheduler: no runner for model=... eligible_idle=... pinned_busy_wait=... exclusive_pin=... runners=[...]`.
 
