@@ -778,22 +778,23 @@ class TestCancelJob:
 
 
 class TestQueueStatusRoute:
-    @patch("queue_db.get_pending_jobs", new_callable=AsyncMock)
-    def test_queue_status_overview(self, mock_pending, client):
-        mock_pending.return_value = [
-            {"id": "j1", "model": "a:7b", "status": "queued"},
-            {"id": "j2", "model": "b:3b", "status": "queued"},
-            {"id": "j3", "model": "a:7b", "status": "queued"},
-        ]
+    @patch("queue_db.pending_queued_models", new_callable=AsyncMock)
+    @patch("queue_db.count_pending_jobs", new_callable=AsyncMock)
+    def test_queue_status_overview(self, mock_count, mock_models, client):
+        mock_count.return_value = 3
+        mock_models.return_value = ["a:7b", "b:3b"]
         resp = client.get("/api/queue/status")
         assert resp.status_code == 200
         data = resp.json()
         assert data["queue_depth"] == 3
-        assert set(data["models_queued"]) == {"a:7b", "b:3b"}
+        assert data["models_queued"] == ["a:7b", "b:3b"]
         assert data["gpu_vram_total_gb"] == 24.0
 
-    @patch("queue_db.get_pending_jobs", new_callable=AsyncMock, return_value=[])
-    def test_queue_status_empty(self, mock_pending, client):
+    @patch("queue_db.pending_queued_models", new_callable=AsyncMock)
+    @patch("queue_db.count_pending_jobs", new_callable=AsyncMock)
+    def test_queue_status_empty(self, mock_count, mock_models, client):
+        mock_count.return_value = 0
+        mock_models.return_value = []
         resp = client.get("/api/queue/status")
         assert resp.status_code == 200
         data = resp.json()

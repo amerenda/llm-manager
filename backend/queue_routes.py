@@ -118,9 +118,9 @@ async def submit_job(body: QueueJobRequest, request: Request,
             priority=priority,
         )
 
-        # Count position in queue
-        pending = await queue_db.get_pending_jobs(pool)
-        position = next((i for i, j in enumerate(pending) if j["id"] == job_id), len(pending))
+        position = await queue_db.get_job_queue_position(pool, job_id)
+        if position is None:
+            position = 0
 
         resp = QueueJobResponse(
             job_id=job_id,
@@ -374,8 +374,8 @@ async def queue_status(request: Request):
     pool = _get_pool(request)
     scheduler = _get_scheduler(request)
 
-    pending = await queue_db.get_pending_jobs(pool)
-    models_queued = list(set(j["model"] for j in pending))
+    queue_depth = await queue_db.count_pending_jobs(pool)
+    models_queued = await queue_db.pending_queued_models(pool)
 
     # Get loaded models from scheduler cache or runner agent
     models_loaded = list(scheduler.loaded_models.keys())
@@ -400,7 +400,7 @@ async def queue_status(request: Request):
     gpu_info = await scheduler._get_gpu_info()
 
     return QueueOverview(
-        queue_depth=len(pending),
+        queue_depth=queue_depth,
         models_queued=models_queued,
         models_loaded=models_loaded,
         current_job=current_job,

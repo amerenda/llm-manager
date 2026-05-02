@@ -284,6 +284,41 @@ async def count_pending_jobs(pool: asyncpg.Pool) -> int:
     return int(row["c"]) if row else 0
 
 
+async def pending_queued_models(pool: asyncpg.Pool) -> list[str]:
+    """Distinct models among pending jobs (cheap path for /queue/status)."""
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT DISTINCT model FROM queue_jobs
+            WHERE status IN ('queued', 'waiting_for_eviction')
+            ORDER BY model
+            """
+        )
+    return [str(r["model"]) for r in rows]
+
+
+async def get_job_queue_position(pool: asyncpg.Pool, job_id: str) -> Optional[int]:
+    """0-based index in pending ordering (priority DESC, created_at ASC). None if not pending."""
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT pos FROM (
+                SELECT id,
+                       ROW_NUMBER() OVER (
+                           ORDER BY priority DESC, created_at ASC
+                       ) - 1 AS pos
+                FROM queue_jobs
+                WHERE status IN ('queued', 'waiting_for_eviction')
+            ) t
+            WHERE id = $1
+            """,
+            job_id,
+        )
+    if row is None or row["pos"] is None:
+        return None
+    return int(row["pos"])
+
+
 async def count_attached_jobs_by_runner(pool: asyncpg.Pool) -> list[tuple[str, int]]:
     """Count running + loading_model jobs per runner hostname (for per-runner queue views)."""
     async with pool.acquire() as conn:
@@ -468,11 +503,37 @@ async def update_job_priority(pool: asyncpg.Pool, job_id: str, priority: int):
 
 async def list_jobs(pool: asyncpg.Pool, status: Optional[str] = None, limit: int = 100) -> list[dict]:
     """List jobs with optional status filter. Includes app name and — when
-    the scheduler has dispatched the job — runner hostname."""
+    the scheduler has dispatched the job — runner hostname.
+
+    Avoids SELECT on full ``request`` / ``result`` JSONB; summaries are computed in SQL.
+    """
+    # req_* columns mirror the old request_summary shape without transferring prompts.
+    list_select = """
+        j.id, j.batch_id, j.app_id, j.model, j.status, j.priority, j.retried,
+        j.metadata, j.error, j.runner_id, j.created_at, j.started_at, j.completed_at,
+        j.loading_model_at,
+        a.name AS app_name, r.hostname AS runner_hostname,
+        COALESCE(
+            CASE
+                WHEN j.request ? 'messages'
+                     AND jsonb_typeof(j.request->'messages') = 'array'
+                THEN jsonb_array_length(j.request->'messages')
+            END,
+            0
+        )::int AS req_message_count,
+        CASE
+            WHEN j.request ? 'temperature'
+            THEN (j.request->>'temperature')::double precision
+        END AS req_temperature,
+        CASE
+            WHEN j.request ? 'max_tokens'
+            THEN (j.request->>'max_tokens')::int
+        END AS req_max_tokens
+    """
     async with pool.acquire() as conn:
         if status:
-            rows = await conn.fetch("""
-                SELECT j.*, a.name as app_name, r.hostname as runner_hostname
+            rows = await conn.fetch(f"""
+                SELECT {list_select}
                 FROM queue_jobs j
                 LEFT JOIN registered_apps a ON j.app_id = a.id
                 LEFT JOIN llm_runners r ON j.runner_id = r.id
@@ -481,8 +542,8 @@ async def list_jobs(pool: asyncpg.Pool, status: Optional[str] = None, limit: int
                 LIMIT $2
             """, status, limit)
         else:
-            rows = await conn.fetch("""
-                SELECT j.*, a.name as app_name, r.hostname as runner_hostname
+            rows = await conn.fetch(f"""
+                SELECT {list_select}
                 FROM queue_jobs j
                 LEFT JOIN registered_apps a ON j.app_id = a.id
                 LEFT JOIN llm_runners r ON j.runner_id = r.id
@@ -495,26 +556,18 @@ async def list_jobs(pool: asyncpg.Pool, status: Optional[str] = None, limit: int
     result = []
     for r in rows:
         d = dict(r)
+        d["request_summary"] = {
+            "message_count": d.pop("req_message_count"),
+            "temperature": d.pop("req_temperature"),
+            "max_tokens": d.pop("req_max_tokens"),
+        }
         # Convert timestamps to ISO strings
-        for ts_field in ('created_at', 'started_at', 'completed_at'):
+        for ts_field in ("created_at", "started_at", "completed_at", "loading_model_at"):
             if d.get(ts_field):
                 d[ts_field] = d[ts_field].isoformat()
-        # Don't send full request/result blobs in listings
-        if d.get('request'):
-            req = d['request']
-            if isinstance(req, str):
-                import json as _json
-                req = _json.loads(req)
-            d['request_summary'] = {
-                'message_count': len(req.get('messages', [])),
-                'temperature': req.get('temperature'),
-                'max_tokens': req.get('max_tokens'),
-            }
-        d.pop('request', None)
-        d.pop('result', None)
-        if isinstance(d.get('metadata'), str):
+        if isinstance(d.get("metadata"), str):
             import json as _json
-            d['metadata'] = _json.loads(d['metadata'])
+            d["metadata"] = _json.loads(d["metadata"])
         result.append(d)
     return result
 
@@ -635,10 +688,13 @@ async def get_queue_metrics(pool: asyncpg.Pool) -> dict:
 
 
 async def list_recent_jobs(pool: asyncpg.Pool, limit: int = 50) -> list[dict]:
-    """List recently completed/failed jobs."""
+    """List recently completed/failed jobs (no request/result blobs)."""
     async with pool.acquire() as conn:
         rows = await conn.fetch("""
-            SELECT j.*, a.name as app_name, r.hostname as runner_hostname
+            SELECT j.id, j.batch_id, j.app_id, j.model, j.status, j.priority, j.retried,
+                   j.metadata, j.error, j.runner_id, j.created_at, j.started_at, j.completed_at,
+                   j.loading_model_at,
+                   a.name AS app_name, r.hostname AS runner_hostname
             FROM queue_jobs j
             LEFT JOIN registered_apps a ON j.app_id = a.id
             LEFT JOIN llm_runners r ON j.runner_id = r.id
@@ -649,14 +705,12 @@ async def list_recent_jobs(pool: asyncpg.Pool, limit: int = 50) -> list[dict]:
     result = []
     for r in rows:
         d = dict(r)
-        for ts_field in ('created_at', 'started_at', 'completed_at'):
+        for ts_field in ("created_at", "started_at", "completed_at", "loading_model_at"):
             if d.get(ts_field):
                 d[ts_field] = d[ts_field].isoformat()
-        d.pop('request', None)
-        d.pop('result', None)
-        if isinstance(d.get('metadata'), str):
+        if isinstance(d.get("metadata"), str):
             import json as _json
-            d['metadata'] = _json.loads(d['metadata'])
+            d["metadata"] = _json.loads(d["metadata"])
         result.append(d)
     return result
 
