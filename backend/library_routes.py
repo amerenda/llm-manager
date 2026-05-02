@@ -165,7 +165,10 @@ async def browse_library(
         try:
             psk = os.environ.get("LLM_MANAGER_AGENT_PSK", "")
             client = client_from_runner_row(runner, psk)
-            st = await client.status(timeout=httpx.Timeout(5.0, read=25.0))
+            _ac = float(os.environ.get("LLM_AGENT_CONNECT_TIMEOUT", "120"))
+            st = await client.status(
+                timeout=httpx.Timeout(connect=_ac, read=25.0, write=_ac, pool=45.0)
+            )
             g = st.get("gpu_vram_total_gb")
             if g is not None:
                 return hostname, float(g)

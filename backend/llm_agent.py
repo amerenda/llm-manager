@@ -15,6 +15,32 @@ import httpx
 logger = logging.getLogger(__name__)
 
 
+def _parse_timeout_env(name: str, default: float) -> float:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+# Cloud / VPC → home-lab agents often need a generous TCP+TLS connect budget (NAT, CGNAT, slow uplink).
+_AGENT_CONNECT = _parse_timeout_env("LLM_AGENT_CONNECT_TIMEOUT", 120.0)
+_AGENT_POOL = _parse_timeout_env("LLM_AGENT_POOL_TIMEOUT", 45.0)
+_AGENT_READ_DEFAULT = _parse_timeout_env("LLM_AGENT_READ_TIMEOUT", 600.0)
+_AGENT_READ_PULL = _parse_timeout_env("LLM_AGENT_PULL_READ_TIMEOUT", 3600.0)
+
+
+def _agent_timeout(*, read: float) -> httpx.Timeout:
+    return httpx.Timeout(
+        connect=_AGENT_CONNECT,
+        read=read,
+        write=_AGENT_CONNECT,
+        pool=_AGENT_POOL,
+    )
+
+
 def _make_ssl_context(cert_pem: str) -> ssl.SSLContext:
     """Create an SSL context that trusts only the given PEM certificate."""
     ctx = ssl.create_default_context()
@@ -43,7 +69,7 @@ class LLMAgentClient:
         else:
             self.base_url = f"http://{host}:{port}"
             self._ssl_context = None
-        self._timeout = httpx.Timeout(30.0, read=600.0)
+        self._timeout = _agent_timeout(read=_AGENT_READ_DEFAULT)
         self._headers = {"X-Agent-PSK": psk} if psk else {}
 
     def _client(self, **overrides) -> httpx.AsyncClient:
@@ -134,7 +160,7 @@ class LLMAgentClient:
         size: str = "512x512",
     ) -> dict:
         body = {"prompt": prompt, "model": model, "n": n, "size": size}
-        async with self._client(timeout=httpx.Timeout(30.0, read=360.0)) as c:
+        async with self._client(timeout=_agent_timeout(read=360.0)) as c:
             r = await c.post(
                 f"{self.base_url}/v1/images/generations",
                 json=body,
@@ -147,7 +173,7 @@ class LLMAgentClient:
 
     async def pull_model(self, model: str) -> AsyncGenerator[bytes, None]:
         """Stream NDJSON progress lines while pulling a model."""
-        async with self._client(timeout=httpx.Timeout(30.0, read=3600.0)) as c:
+        async with self._client(timeout=_agent_timeout(read=_AGENT_READ_PULL)) as c:
             async with c.stream(
                 "POST",
                 f"{self.base_url}/v1/models/pull",
@@ -161,7 +187,7 @@ class LLMAgentClient:
 
     async def load_model(self, model: str, keep_alive: int = -1) -> dict:
         """Load a model into VRAM with the given keep_alive (seconds, -1=forever)."""
-        async with self._client(timeout=httpx.Timeout(30.0, read=600.0)) as c:
+        async with self._client(timeout=_agent_timeout(read=600.0)) as c:
             r = await c.post(
                 f"{self.base_url}/v1/models/load",
                 json={"model": model, "keep_alive": keep_alive},
@@ -195,7 +221,7 @@ class LLMAgentClient:
 
     async def delete_model(self, model: str) -> dict:
         """Delete a model from disk via the agent's delete-from-disk endpoint."""
-        async with self._client(timeout=httpx.Timeout(10, read=60)) as c:
+        async with self._client(timeout=_agent_timeout(read=60.0)) as c:
             r = await c.post(
                 f"{self.base_url}/v1/models/{model}/delete-from-disk",
                 headers=self._headers,
@@ -205,21 +231,21 @@ class LLMAgentClient:
 
     async def restart_ollama(self) -> dict:
         """Restart the Ollama container on this runner (requires OLLAMA_CONTAINER on agent)."""
-        async with self._client(timeout=httpx.Timeout(30.0)) as c:
+        async with self._client(timeout=_agent_timeout(read=120.0)) as c:
             r = await c.post(f"{self.base_url}/v1/ollama/restart", headers=self._headers)
             r.raise_for_status()
             return r.json()
 
     async def get_ollama_version(self) -> dict:
         """Return running Ollama version, configured image tag, and commit hash."""
-        async with self._client(timeout=httpx.Timeout(10.0)) as c:
+        async with self._client(timeout=_agent_timeout(read=60.0)) as c:
             r = await c.get(f"{self.base_url}/v1/ollama/version", headers=self._headers)
             r.raise_for_status()
             return r.json()
 
     async def upgrade_ollama(self, tag: str) -> dict:
         """Pull a new Ollama image and recreate the container. Long timeout — image pull can be slow."""
-        async with self._client(timeout=httpx.Timeout(30.0, read=600.0)) as c:
+        async with self._client(timeout=_agent_timeout(read=600.0)) as c:
             r = await c.post(
                 f"{self.base_url}/v1/ollama/upgrade",
                 json={"tag": tag},
@@ -230,7 +256,7 @@ class LLMAgentClient:
 
     async def get_ollama_settings(self) -> dict:
         """Read the runner's ollama.env tunables."""
-        async with self._client(timeout=httpx.Timeout(10.0)) as c:
+        async with self._client(timeout=_agent_timeout(read=60.0)) as c:
             r = await c.get(f"{self.base_url}/v1/ollama/settings", headers=self._headers)
             r.raise_for_status()
             return r.json()
@@ -238,7 +264,7 @@ class LLMAgentClient:
     async def put_ollama_settings(self, settings: dict) -> dict:
         """Apply ollama.env tunables on the runner. Rewrites the file + recreates
         the ollama container. Allow up to 2 min — image pull + container boot."""
-        async with self._client(timeout=httpx.Timeout(10.0, read=120.0)) as c:
+        async with self._client(timeout=_agent_timeout(read=120.0)) as c:
             r = await c.put(
                 f"{self.base_url}/v1/ollama/settings",
                 json={"settings": settings},
@@ -251,7 +277,7 @@ class LLMAgentClient:
 
     async def trigger_update(self, target_version: str) -> dict:
         """Tell the agent to self-update to the given version."""
-        async with self._client(timeout=httpx.Timeout(10.0)) as c:
+        async with self._client(timeout=_agent_timeout(read=120.0)) as c:
             r = await c.post(
                 f"{self.base_url}/v1/update",
                 json={"target_version": target_version},
@@ -275,7 +301,7 @@ class LLMAgentClient:
     # ── ComfyUI lifecycle ─────────────────────────────────────────────────────
 
     async def start_comfyui(self) -> dict:
-        async with self._client(timeout=httpx.Timeout(30.0, read=60.0)) as c:
+        async with self._client(timeout=_agent_timeout(read=60.0)) as c:
             r = await c.post(
                 f"{self.base_url}/v1/comfyui/start",
                 headers=self._headers,
