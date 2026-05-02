@@ -868,6 +868,11 @@ async def models_for_agents():
                     client.models(timeout=_AGENT_AGG_TIMEOUT),
                     client.status(timeout=_AGENT_AGG_TIMEOUT),
                 )
+                # Prefer live /v1/status for pool size — heartbeat capabilities can lag or
+                # read 0 on Apple Silicon unified-memory agents before first good heartbeat.
+                live_gb = status.get("gpu_vram_total_gb")
+                if live_gb is not None and float(live_gb) > 0:
+                    runner_vram[runner["hostname"]] = round(float(live_gb), 1)
                 for m in result.get("data", []):
                     name = m.get("id", "")
                     if name:

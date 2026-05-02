@@ -1,8 +1,10 @@
 """Library browser and safety tag management routes."""
+import asyncio
 import logging
 import os
 from typing import Optional
 
+import httpx
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
@@ -105,6 +107,7 @@ async def browse_library(
     per_runner_downloads: dict[str, set[str]] = {}
     # digest lookup for update-available detection (Phase B below)
     per_runner_digests: dict[str, dict[str, str]] = {}
+    runners: list = []
     try:
         runners = await db.get_active_runners(pool)
         if runner_id is not None:
@@ -154,6 +157,30 @@ async def browse_library(
                 runner_vram[hostname] = round(total, 1)
     except Exception:
         logger.warning("Failed to get runner info for library browse", exc_info=True)
+
+    # Overlay VRAM from live /v1/status so fits_on / filters work for unified-memory
+    # (mac-mini-m4) and any host where heartbeat gpu_vram_total_bytes is 0 or stale.
+    async def _live_total_gb(runner: dict) -> tuple[str, float]:
+        hostname = runner["hostname"]
+        try:
+            psk = os.environ.get("LLM_MANAGER_AGENT_PSK", "")
+            client = client_from_runner_row(runner, psk)
+            st = await client.status(timeout=httpx.Timeout(5.0, read=25.0))
+            g = st.get("gpu_vram_total_gb")
+            if g is not None:
+                return hostname, float(g)
+        except Exception:
+            logger.debug("library: live VRAM probe failed for %s", hostname, exc_info=True)
+        return hostname, 0.0
+
+    try:
+        if runners:
+            probed = await asyncio.gather(*(_live_total_gb(r) for r in runners))
+            for hostname, gb in probed:
+                if gb > 0:
+                    runner_vram[hostname] = round(gb, 1)
+    except Exception:
+        logger.warning("library: live VRAM overlay failed", exc_info=True)
 
     # Classify all models
     all_names = [m["name"] for m in library_models]
