@@ -144,6 +144,8 @@ def _unified_vram_total_override_bytes() -> int | None:
 def _detect_host_ip() -> str:
     """Return the host's outbound IP — the interface used to reach the internet.
     Works correctly when the agent runs with network_mode: host.
+    Under Docker bridge networking this is often a *container* address (e.g. 172.x)
+    that remote backends (k8s in the cloud) cannot route to — set AGENT_ADDRESS.
     Falls back to hostname if detection fails.
     """
     s = None
@@ -158,10 +160,37 @@ def _detect_host_ip() -> str:
             s.close()
 
 
+def _tls_san_ip_and_dns_from_env() -> tuple[Optional[str], list[str]]:
+    """Derive TLS SAN IP + DNS names from AGENT_ADDRESS, or auto-detect.
+
+    When AGENT_ADDRESS is https://TAILSCALE_IP:8090 or a MagicDNS name, the cert
+    must include that identity so the hosted backend can pin-verify after connecting.
+    """
+    raw = (os.environ.get("AGENT_ADDRESS") or "").strip()
+    if raw:
+        p = urlparse(raw)
+        host = (p.hostname or "").strip()
+        if not host:
+            logger.warning("AGENT_ADDRESS has no hostname: %r — falling back to IP detection", raw)
+        else:
+            try:
+                ipaddress.ip_address(host)
+                return host, []
+            except ValueError:
+                return None, [host]
+    ip_guess = _detect_host_ip()
+    try:
+        ipaddress.ip_address(ip_guess)
+        return ip_guess, []
+    except ValueError:
+        return None, [ip_guess]
+
+
 TLS_CERT_DIR = os.environ.get("TLS_CERT_DIR", "/data/tls")
 _TLS_CERT_PATH = os.path.join(TLS_CERT_DIR, "cert.pem")
 _TLS_KEY_PATH = os.path.join(TLS_CERT_DIR, "key.pem")
 _TLS_IP_PATH = os.path.join(TLS_CERT_DIR, "ip.txt")
+_TLS_IDENTITY_PATH = os.path.join(TLS_CERT_DIR, "identity.json")
 
 
 def _read_cert_pem() -> str:
@@ -177,15 +206,44 @@ def _cert_fingerprint() -> str:
     return hashlib.sha256(cert.public_bytes(serialization.Encoding.DER)).hexdigest()
 
 
-def _generate_self_signed_cert(ip_addr: str, cert_dir: str) -> None:
-    """Generate a self-signed TLS certificate with the given IP as SAN."""
+def _tls_identity_stored() -> Optional[str]:
+    if os.path.isfile(_TLS_IDENTITY_PATH):
+        with open(_TLS_IDENTITY_PATH, "r") as f:
+            return f.read().strip()
+    if os.path.isfile(_TLS_IP_PATH):
+        with open(_TLS_IP_PATH, "r") as f:
+            ip = f.read().strip()
+        if ip:
+            return json.dumps({"dns": [], "ip": ip}, sort_keys=True)
+    return None
+
+
+def _tls_identity_current(san_ip: Optional[str], san_dns: list[str]) -> str:
+    return json.dumps({"dns": sorted(san_dns), "ip": san_ip}, sort_keys=True)
+
+
+def _generate_self_signed_cert(
+    san_ip: Optional[str],
+    san_dns: list[str],
+    cert_dir: str,
+) -> None:
+    """Generate a self-signed TLS certificate with IP and/or DNS SAN entries."""
+    sans: list = []
+    cn = "llm-agent"
+    if san_ip:
+        sans.append(x509.IPAddress(ipaddress.ip_address(san_ip)))
+        cn = f"llm-agent-{san_ip}"
+    for d in san_dns:
+        sans.append(x509.DNSName(d))
+        if cn == "llm-agent":
+            cn = f"llm-agent-{d}"
+    if not sans:
+        raise RuntimeError("internal: empty TLS SAN list")
     key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     subject = issuer = x509.Name([
-        x509.NameAttribute(NameOID.COMMON_NAME, f"llm-agent-{ip_addr}"),
+        x509.NameAttribute(NameOID.COMMON_NAME, cn),
     ])
-    san = x509.SubjectAlternativeName([
-        x509.IPAddress(ipaddress.ip_address(ip_addr)),
-    ])
+    san = x509.SubjectAlternativeName(sans)
     cert = (
         x509.CertificateBuilder()
         .subject_name(subject)
@@ -206,26 +264,37 @@ def _generate_self_signed_cert(ip_addr: str, cert_dir: str) -> None:
             serialization.PrivateFormat.TraditionalOpenSSL,
             serialization.NoEncryption(),
         ))
-    with open(os.path.join(cert_dir, "ip.txt"), "w") as f:
-        f.write(ip_addr)
-    logger.info("Generated self-signed TLS certificate for IP %s in %s", ip_addr, cert_dir)
+    ident = _tls_identity_current(san_ip, san_dns)
+    with open(_TLS_IDENTITY_PATH, "w") as f:
+        f.write(ident)
+    if san_ip:
+        with open(os.path.join(cert_dir, "ip.txt"), "w") as f:
+            f.write(san_ip)
+    elif os.path.exists(_TLS_IP_PATH):
+        try:
+            os.remove(_TLS_IP_PATH)
+        except OSError:
+            pass
+    logger.info(
+        "Generated self-signed TLS certificate (SAN ip=%r dns=%r) in %s",
+        san_ip,
+        san_dns,
+        cert_dir,
+    )
 
 
-def _ensure_tls_cert(ip_addr: str) -> None:
-    """Ensure a valid TLS cert exists for the given IP, regenerating if needed."""
+def _ensure_tls_cert(san_ip: Optional[str], san_dns: list[str]) -> None:
+    """Ensure a valid TLS cert exists for the given SANs, regenerating if needed."""
+    want = _tls_identity_current(san_ip, san_dns)
     need_regen = False
     if not os.path.exists(_TLS_CERT_PATH) or not os.path.exists(_TLS_KEY_PATH):
         need_regen = True
-    elif os.path.exists(_TLS_IP_PATH):
-        with open(_TLS_IP_PATH, "r") as f:
-            stored_ip = f.read().strip()
-        if stored_ip != ip_addr:
-            logger.info("IP changed from %s to %s — regenerating TLS cert", stored_ip, ip_addr)
-            need_regen = True
     else:
-        need_regen = True
+        stored = _tls_identity_stored()
+        if stored != want:
+            logger.info("TLS identity changed — regenerating cert")
+            need_regen = True
 
-    # Check if cert is expiring within 30 days
     if not need_regen:
         try:
             with open(_TLS_CERT_PATH, "rb") as f:
@@ -238,13 +307,38 @@ def _ensure_tls_cert(ip_addr: str) -> None:
             need_regen = True
 
     if need_regen:
-        _generate_self_signed_cert(ip_addr, TLS_CERT_DIR)
+        _generate_self_signed_cert(san_ip, san_dns, TLS_CERT_DIR)
 
 
-_DETECTED_IP = _detect_host_ip()
-_ensure_tls_cert(_DETECTED_IP)
+_TLS_SAN_IP, _TLS_SAN_DNS = _tls_san_ip_and_dns_from_env()
+_ensure_tls_cert(_TLS_SAN_IP, _TLS_SAN_DNS)
 
-AGENT_ADDRESS = os.environ.get("AGENT_ADDRESS") or f"https://{_DETECTED_IP}:8090"
+_DETECTED_IP = _TLS_SAN_IP or _detect_host_ip()
+
+AGENT_ADDRESS = (os.environ.get("AGENT_ADDRESS") or "").strip() or f"https://{_DETECTED_IP}:8090"
+
+
+def _warn_if_agent_address_not_reachable_from_internet() -> None:
+    """Docker bridge IPs / RFC1918 defaults are fine for LAN-only; k8s needs more."""
+    if (os.environ.get("AGENT_ADDRESS") or "").strip():
+        return
+    try:
+        p = urlparse(AGENT_ADDRESS)
+        h = p.hostname or ""
+        ip = ipaddress.ip_address(h)
+        if ip.is_private or ip.is_loopback or ip.is_link_local:
+            logger.warning(
+                "AGENT_ADDRESS is not set; using %s. Remote backends (e.g. llm-manager on k8s) "
+                "usually cannot open TCP to this address from Docker/OrbStack. "
+                "Set AGENT_ADDRESS (and redeploy) to a routable URL: Tailscale IP, VPN IP, or "
+                "hostname with port 8090 forwarded. See mac-mini-compose llm/compose.local.env.example.",
+                AGENT_ADDRESS,
+            )
+    except ValueError:
+        pass
+
+
+_warn_if_agent_address_not_reachable_from_internet()
 
 _RUNNER_ID: int | None = None
 _register_retry_task: Optional[asyncio.Task] = None
