@@ -22,6 +22,7 @@ import logging
 import os
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Optional
 
 import asyncpg
@@ -37,6 +38,14 @@ logger = logging.getLogger(__name__)
 
 
 SCHEDULER_LOCK_ID = 900001  # Must match main.py
+
+
+def _queued_age_seconds(created) -> Optional[float]:
+    """Wall-clock seconds since ``created_at`` (UTC), or None if unknown."""
+    if created is None or not isinstance(created, datetime):
+        return None
+    c = created if created.tzinfo else created.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - c).total_seconds()
 
 
 # ── Metrics ──────────────────────────────────────────────────────────────────
@@ -605,6 +614,29 @@ class SimplifiedScheduler:
 
                 head = batch[0]
                 model = head["model"]
+
+                max_q = float(os.environ.get("SCHEDULER_FAIL_QUEUED_OLDER_THAN_SEC", "0"))
+                if max_q > 0:
+                    age_sec = _queued_age_seconds(head.get("created_at"))
+                    if age_sec is not None and age_sec > max_q:
+                        err = (
+                            f"Exceeded SCHEDULER_FAIL_QUEUED_OLDER_THAN_SEC={max_q:.0f}s "
+                            f"(queued ~{age_sec / 3600:.2f}h). Common causes: every eligible GPU "
+                            f"busy with other work, allowed_runner_ids excludes idle hosts, "
+                            f"runners offline/draining/Ollama down, or model/vram rules block "
+                            f"placement. Model={model!r} job={head['id']!r}."
+                        )
+                        logger.error("scheduler: %s", err)
+                        for job in batch:
+                            await queue_db.update_job_status(
+                                self.pool, job["id"], "failed", error=err,
+                            )
+                            scheduler_jobs_completed_total.labels(
+                                model=job["model"], status="failed"
+                            ).inc()
+                        await asyncio.sleep(0)
+                        continue
+
                 provider = detect_provider(model)
 
                 if provider != ModelProvider.LOCAL:

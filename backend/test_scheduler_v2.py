@@ -7,11 +7,12 @@ shape. Swap and _run_job are exercised via integration; here we mock them.
 import asyncio
 import json
 import time
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from scheduler_v2 import SimplifiedScheduler, RunnerState
+from scheduler_v2 import SimplifiedScheduler, RunnerState, _queued_age_seconds
 import queue_db
 
 
@@ -381,6 +382,16 @@ class TestStaleInFlightHeal:
         with patch.object(queue_db, "get_job", new_callable=AsyncMock, return_value=None):
             _run(sched._heal_stale_in_flight_claims())
         assert a.in_flight_job_id is None
+
+
+class TestQueuedAgeSeconds:
+    def test_naive_datetime_treated_as_utc(self):
+        past = datetime.now(timezone.utc) - timedelta(hours=2)
+        naive = past.replace(tzinfo=None)
+        assert _queued_age_seconds(naive) >= 7190  # ~2h minus test skew
+
+    def test_returns_none_for_missing(self):
+        assert _queued_age_seconds(None) is None
 
 
 class TestLifecycle:

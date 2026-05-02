@@ -558,6 +558,19 @@ settings when set), the submission is rejected with HTTP 422.
 
 **Job statuses:** `queued` -> `waiting_for_eviction` -> `running` -> `completed` | `failed` | `cancelled`
 
+#### Why a job can sit in `queued` for hours
+
+The scheduler only moves work when it can **place** the head batch on a runner. It **does not** time out in the common case where **no eligible GPU is idle** (`eligible_idle=false` in logs): every runner that could accept the job (respecting `allowed_runner_ids`, draining flags, Ollama health, pins, and “model on disk + VRAM fits”) is **busy** with another job, so the queue waits. That can last as long as those runs take.
+
+Other causes:
+
+- **`allowed_runner_ids`** in job metadata limits placement; if those hosts are busy, offline, or draining, the job waits.
+- **Pinned model** on a busy GPU — work for that model must wait for the pin holder.
+- **No runners** heartbeating, or **model not downloaded** on any eligible host while other GPUs are idle — after ~`SCHEDULER_UNPLACEABLE_FAIL_SEC` (default 180s) with idle GPUs, the batch may be **failed** with an error; if **no** idle GPU exists, the job keeps waiting instead.
+- Optional **`SCHEDULER_FAIL_QUEUED_OLDER_THAN_SEC`** (default `0` = off): set to wall seconds (e.g. `28800` for 8h) to **fail** batches whose head job has been queued longer than that, with a message pointing at capacity and placement. Use when you prefer failing loudly over indefinite backlog.
+
+Throttled log line: `scheduler: no runner for model=... eligible_idle=... pinned_busy_wait=... exclusive_pin=... runners=[...]`.
+
 #### Queue Overview
 
 `GET /api/queue/status` returns:
