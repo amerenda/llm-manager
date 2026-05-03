@@ -164,11 +164,15 @@ class PostgresLeaderElector(LeaderElector):
 
 
 def _rfc3339_micros() -> str:
-    """Kubernetes Lease renewTime / acquireTime format."""
+    """Kubernetes Lease renewTime / acquireTime (RFC3339 with 6-digit fractional seconds).
+
+    The apiserver parses these as Go's metav1.MicroTime, which requires exactly
+    six digits after the decimal (e.g. ``.201000Z``), not three (``.201Z``).
+    """
     now = datetime.now(timezone.utc)
     s = now.strftime("%Y-%m-%dT%H:%M:%S")
     micro = f"{now.microsecond:06d}"
-    return f"{s}.{micro[:3]}Z"
+    return f"{s}.{micro}Z"
 
 
 def _parse_rfc3339(s: str) -> Optional[datetime]:
