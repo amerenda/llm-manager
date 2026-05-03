@@ -1,6 +1,7 @@
 """Pydantic models for the job queue system."""
 from typing import Optional
-from pydantic import BaseModel, Field
+
+from pydantic import BaseModel, ConfigDict
 
 
 class QueueJobRequest(BaseModel):
@@ -76,6 +77,8 @@ class ModelSettingsUpdate(BaseModel):
 
 
 class ModelSettings(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
     model_name: str
     do_not_evict: bool = False
     evictable: bool = True
@@ -102,6 +105,8 @@ class ModelAliasCreate(BaseModel):
 
 
 class ModelRunnerParams(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
     model_name: str
     runner_id: int
     hostname: Optional[str] = None

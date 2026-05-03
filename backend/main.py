@@ -29,7 +29,7 @@ from prometheus_client import (
     Histogram,
     generate_latest,
 )
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 import db
 from db import (
@@ -2799,6 +2799,8 @@ class ProfileUpdateRequest(BaseModel):
 
 
 class ProfileModelEntryRequest(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+
     model_safe: str
     model_unsafe: Optional[str] = None
     count: int = 1
