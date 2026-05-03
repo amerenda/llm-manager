@@ -23,7 +23,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Callable, Optional
 
 import asyncpg
 import httpx
@@ -197,10 +197,14 @@ class SimplifiedScheduler:
         get_runner_client: callable,
         lock_conn: Optional[asyncpg.Connection] = None,
         strategy: Optional[QueueStrategy] = None,
+        lock_session_app_name: Optional[str] = None,
+        on_lock_verify_failed: Optional[Callable[[str], None]] = None,
     ):
         self.pool = pool
         self.get_runner_client = get_runner_client
         self.lock_conn = lock_conn
+        self._lock_session_app_name = lock_session_app_name
+        self._on_lock_verify_failed = on_lock_verify_failed
         self.strategy: QueueStrategy = strategy or make_strategy()
 
         self._task: Optional[asyncio.Task] = None
@@ -226,6 +230,19 @@ class SimplifiedScheduler:
         if self._task and not self._task.done():
             self._task.cancel()
             logger.info("SimplifiedScheduler stopped")
+
+    def bind_lock_session(
+        self,
+        conn: Optional[asyncpg.Connection],
+        session_app_name: Optional[str],
+    ) -> None:
+        """Attach the Postgres session used for the scheduler advisory lock.
+
+        ``session_app_name`` must match ``server_settings['application_name']``
+        on that connection so a dead client can be identified server-side for
+        zombie lock cleanup (see main._retry_lock)."""
+        self.lock_conn = conn
+        self._lock_session_app_name = session_app_name
 
     # ── public compat surface (used by queue_routes.py) ──────────────────────
 
@@ -288,6 +305,13 @@ class SimplifiedScheduler:
             return True
         except Exception:
             logger.warning("Failed to verify scheduler lock — connection lost")
+            fn = self._on_lock_verify_failed
+            name = self._lock_session_app_name
+            if fn and name:
+                try:
+                    fn(name)
+                except Exception:
+                    logger.exception("on_lock_verify_failed callback raised")
             return False
 
     # ── runner state management ──────────────────────────────────────────────

@@ -1,0 +1,29 @@
+---
+# Lease-based leader election: bind to Deployment serviceAccount above.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: llm-manager-scheduler
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: llm-manager-scheduler-lease
+rules:
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  # Optional: tighten with resourceNames: ["llm-manager-scheduler"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: llm-manager-scheduler-lease
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: llm-manager-scheduler-lease
+subjects:
+  - kind: ServiceAccount
+    name: llm-manager-scheduler
+    namespace: REPLACE_NAMESPACE

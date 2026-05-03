@@ -40,6 +40,33 @@ def _make_sched(runners=None):
     return sched
 
 
+def test_verify_lock_failure_invokes_callback():
+    pool = MagicMock()
+    get_client = AsyncMock()
+    cb = MagicMock()
+    conn = AsyncMock()
+    conn.fetchval = AsyncMock(side_effect=OSError("connection lost"))
+    sched = SimplifiedScheduler(
+        pool,
+        get_client,
+        lock_conn=conn,
+        lock_session_app_name="schlk-abc123dead",
+        on_lock_verify_failed=cb,
+    )
+    assert _run(sched._verify_lock()) is False
+    cb.assert_called_once_with("schlk-abc123dead")
+
+
+def test_bind_lock_session_updates_holder():
+    pool = MagicMock()
+    get_client = AsyncMock()
+    sched = SimplifiedScheduler(pool, get_client)
+    c2 = MagicMock()
+    sched.bind_lock_session(c2, "schlk-new")
+    assert sched.lock_conn is c2
+    assert sched._lock_session_app_name == "schlk-new"
+
+
 # ── _pick_runner ─────────────────────────────────────────────────────────────
 
 class TestPickRunner:

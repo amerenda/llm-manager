@@ -12,6 +12,7 @@ import os
 import re
 import socket
 import time
+import uuid
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -69,6 +70,9 @@ AGENT_PSK = os.environ.get("LLM_MANAGER_AGENT_PSK", "")
 REGISTRATION_SECRET = os.environ.get("LLM_MANAGER_REGISTRATION_SECRET", "")
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://llm:llm@localhost:5432/llmmanager")
 DISABLE_SCHEDULER = os.environ.get("DISABLE_SCHEDULER", "").lower() in ("true", "1", "yes")
+LLM_MANAGER_PROCESS = (
+    os.environ.get("LLM_MANAGER_PROCESS", "combined").strip().lower() or "combined"
+)
 DISABLE_AUTH = os.environ.get("DISABLE_AUTH", "").lower() in ("true", "1", "yes")
 ENVIRONMENT = os.environ.get("ENVIRONMENT", "production")  # "production" or "uat"
 UAT_TEST_RUNNER = os.environ.get("UAT_TEST_RUNNER", "")  # runner_id for UAT connectivity tests
@@ -101,6 +105,11 @@ queue_jobs_completed = Counter("llm_queue_jobs_completed_total", "Total complete
 queue_depth_gauge = Gauge("llm_queue_depth", "Current queue depth")
 queue_active_jobs_gauge = Gauge("llm_queue_active_jobs", "Currently running jobs")
 queue_loading_jobs_gauge = Gauge("llm_queue_loading_jobs", "Jobs waiting for model load")
+runner_attached_jobs_gauge = Gauge(
+    "llm_runner_attached_jobs",
+    "Jobs running or loading_model on this runner (runner_id set)",
+    ["runner"],
+)
 queue_job_duration_seconds = Histogram("llm_queue_job_duration_seconds", "Job processing time", ["model"], buckets=[1, 5, 10, 30, 60, 120, 300])
 queue_job_wait_seconds = Histogram("llm_queue_job_wait_seconds", "Time job spent waiting in queue", ["model"], buckets=[0.5, 1, 5, 10, 30, 60, 120])
 queue_submission_errors_total = Counter(
@@ -207,8 +216,70 @@ async def _get_runner_ollama_base(pool: asyncpg.Pool, runner_id: Optional[int] =
 SCHEDULER_LOCK_ID = 900001  # Postgres advisory lock ID for scheduler
 STALE_SWEEP_LOCK_ID = 900002  # Only one replica runs stale in-progress recovery per tick
 
+
+def _new_scheduler_lock_app_name() -> str:
+    """Distinct application_name per lock connection (Postgres max 63 chars)."""
+    return f"schlk-{uuid.uuid4().hex[:12]}"
+
+
+def _scheduler_lock_connect_settings(base: dict, app_name: str) -> dict:
+    s = dict(base)
+    s["application_name"] = app_name[:63]
+    return s
+
+
+async def _terminate_scheduler_lock_zombies(
+    pool: asyncpg.Pool,
+    application_name: str,
+    lock_bigint_key: int,
+) -> int:
+    """Terminate server session(s) still holding our advisory lock after the client
+    connection died (asyncpg sees a dead socket; Postgres can keep the backend
+    idle forever — see 2026-05-02 incident). Only matches ``application_name``
+    so we never kill a healthy peer pod's lock session (different name)."""
+    classid = (lock_bigint_key >> 32) & 0xFFFFFFFF
+    objid = lock_bigint_key & 0xFFFFFFFF
+    n = 0
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT a.pid
+            FROM pg_locks l
+            JOIN pg_stat_activity a ON a.pid = l.pid
+            WHERE l.locktype = 'advisory'
+              AND l.database = (SELECT oid FROM pg_database
+                                WHERE datname = current_database())
+              AND l.classid = $1::integer
+              AND l.objid = $2::integer
+              AND l.granted
+              AND a.application_name = $3
+            """,
+            classid,
+            objid,
+            application_name,
+        )
+        for row in rows:
+            pid = row["pid"]
+            try:
+                if await conn.fetchval("SELECT pg_terminate_backend($1)", pid):
+                    n += 1
+            except Exception:
+                logger.warning(
+                    "pg_terminate_backend failed for pid=%s (may already be gone)",
+                    pid,
+                    exc_info=True,
+                )
+    return n
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    if LLM_MANAGER_PROCESS == "scheduler":
+        raise RuntimeError(
+            "LLM_MANAGER_PROCESS=scheduler is not valid for the API entrypoint. "
+            "Run the dedicated worker instead: python -m scheduler_worker "
+            "(same container image; set command to python -m scheduler_worker)."
+        )
     # TCP keepalives on every pooled connection reduce stale half-open TCP after
     # network blips; max_inactive_connection_lifetime retires idle pool conns.
     _pg_server_settings = {
@@ -229,132 +300,231 @@ async def lifespan(app: FastAPI):
     await init_db(pool)
     await queue_db.init_queue_tables(pool)
     logger.info("Database connected: %s", DATABASE_URL)
-
-    # Acquire advisory lock for scheduler — only one pod runs it.
-    # TCP keepalives ensure the server-side session dies within ~90s if the
-    # client disappears (network blip). Without this, PostgreSQL keeps the
-    # zombie session alive for hours, holding the advisory lock and silently
-    # blocking all watchdog re-acquisition attempts.
-    lock_conn = await asyncpg.connect(
-        DATABASE_URL, server_settings=_pg_server_settings
-    )
-    got_lock = await lock_conn.fetchval(
-        "SELECT pg_try_advisory_lock($1)", SCHEDULER_LOCK_ID
-    )
-    app.state.lock_conn = lock_conn
+    app.state.scheduler_zombie_lock_app_name = None
 
     async def get_runner(runner_id=None):
         return await _get_runner_client(pool, runner_id=runner_id)
-    scheduler = Scheduler(pool, get_runner, lock_conn=lock_conn if got_lock else None)
-    app.state.scheduler = scheduler
-    logger.info("Scheduler variant: %s", _SCHEDULER_VARIANT)
 
-    if DISABLE_SCHEDULER:
-        logger.info("Scheduler disabled via DISABLE_SCHEDULER env var")
-    elif got_lock:
-        recovered = await queue_db.recover_stuck_jobs(pool)
-        if recovered:
-            logger.warning("Recovered %d jobs stuck in loading_model/running → queued", recovered)
-        orphaned = await db.recover_stuck_ops(pool)
-        if orphaned:
-            logger.warning("Marked %d background ops as failed (orphaned by previous pod)", orphaned)
-        scheduler.start()
-        logger.info("Queue scheduler started (advisory lock acquired)")
-    else:
-        logger.info("Scheduler skipped — another pod holds the lock")
+    lock_retry_task = None
+    scheduler_runner_sync_task = None
+    lock_conn = None
+    got_lock = False
 
-    # Background watchdog: acquire the advisory lock (if not held) and start the
-    # scheduler. Runs on ALL pods for the lifetime of the process so that:
-    # 1. A standby pod picks up the lock when the primary loses it.
-    # 2. The primary pod can recover if its own lock_conn dies while idle.
-    #
-    # Root-cause of the 2026-04-28 outage: the old _retry_lock returned after
-    # first acquiring the lock, leaving the scheduler unmonitored. When the
-    # primary pod's lock_conn was eventually closed by PostgreSQL (idle
-    # connection cleanup), the advisory lock was released but no pod attempted
-    # to re-acquire it. The standby pod's _retry_lock had a dead lock_conn from
-    # an earlier disconnect and silently ate every exception, making it
-    # permanently stuck. Result: scheduler dead on all pods, jobs stuck queued.
-    async def _retry_lock():
-        nonlocal got_lock, lock_conn
-        while not DISABLE_SCHEDULER:
-            await asyncio.sleep(15)
+    if LLM_MANAGER_PROCESS == "combined":
+        # Acquire advisory lock for scheduler — only one pod runs it.
+        # TCP keepalives ensure the server-side session dies within ~90s if the
+        # client disappears (network blip). Without this, PostgreSQL keeps the
+        # zombie session alive for hours, holding the advisory lock and silently
+        # blocking all watchdog re-acquisition attempts.
+        #
+        # Each lock connection uses a unique application_name so that if the
+        # client gives up while Postgres still holds the session, the watchdog can
+        # pg_terminate_backend only that session (2026-05-02).
+        initial_lock_app_name = _new_scheduler_lock_app_name()
+        lock_conn = await asyncpg.connect(
+            DATABASE_URL,
+            server_settings=_scheduler_lock_connect_settings(
+                _pg_server_settings, initial_lock_app_name
+            ),
+        )
+        got_lock = await lock_conn.fetchval(
+            "SELECT pg_try_advisory_lock($1)", SCHEDULER_LOCK_ID
+        )
+        app.state.lock_conn = lock_conn
 
-            # If we hold the lock and the scheduler is running, nothing to do.
-            if got_lock and scheduler._running:
-                continue
+        def _on_scheduler_lock_verify_failed(session_name: str) -> None:
+            app.state.scheduler_zombie_lock_app_name = session_name
+            logger.warning(
+                "Scheduler advisory lock session %r lost client connection; "
+                "will terminate server backend if re-acquire fails repeatedly",
+                session_name,
+            )
 
-            # We either don't hold the lock, or the scheduler stopped. In either
-            # case, try to acquire the lock on a fresh connection — the existing
-            # lock_conn may be dead (that's often why we're here).
-            if got_lock and not scheduler._running:
-                logger.warning(
-                    "Scheduler stopped unexpectedly — releasing lock state "
-                    "and attempting to re-acquire"
-                )
-                got_lock = False
+        scheduler = Scheduler(
+            pool,
+            get_runner,
+            lock_conn=lock_conn if got_lock else None,
+            lock_session_app_name=initial_lock_app_name if got_lock else None,
+            on_lock_verify_failed=_on_scheduler_lock_verify_failed,
+        )
+        app.state.scheduler = scheduler
+        logger.info("Scheduler variant: %s", _SCHEDULER_VARIANT)
 
-            fresh_conn = None
-            try:
-                fresh_conn = await asyncpg.connect(
-                    DATABASE_URL, server_settings=_pg_server_settings
-                )
-                acquired = await fresh_conn.fetchval(
-                    "SELECT pg_try_advisory_lock($1)", SCHEDULER_LOCK_ID
-                )
-                if not acquired:
-                    # Another pod holds the lock — check again next tick.
-                    await fresh_conn.close()
+        if DISABLE_SCHEDULER:
+            logger.info("Scheduler disabled via DISABLE_SCHEDULER env var")
+        elif got_lock:
+            recovered = await queue_db.recover_stuck_jobs(pool)
+            if recovered:
+                logger.warning("Recovered %d jobs stuck in loading_model/running → queued", recovered)
+            orphaned = await db.recover_stuck_ops(pool)
+            if orphaned:
+                logger.warning("Marked %d background ops as failed (orphaned by previous pod)", orphaned)
+            scheduler.start()
+            logger.info("Queue scheduler started (advisory lock acquired)")
+        else:
+            logger.info("Scheduler skipped — another pod holds the lock")
+
+        # Background watchdog: acquire the advisory lock (if not held) and start the
+        # scheduler. Runs on ALL pods for the lifetime of the process so that:
+        # 1. A standby pod picks up the lock when the primary loses it.
+        # 2. The primary pod can recover if its own lock_conn dies while idle.
+        #
+        # Root-cause of the 2026-04-28 outage: the old _retry_lock returned after
+        # first acquiring the lock, leaving the scheduler unmonitored. When the
+        # primary pod's lock_conn was eventually closed by PostgreSQL (idle
+        # connection cleanup), the advisory lock was released but no pod attempted
+        # to re-acquire it. The standby pod's _retry_lock had a dead lock_conn from
+        # an earlier disconnect and silently ate every exception, making it
+        # permanently stuck. Result: scheduler dead on all pods, jobs stuck queued.
+        zombie_fail_threshold = int(
+            os.environ.get("SCHEDULER_ZOMBIE_LOCK_FAILS", "4")
+        )
+
+        async def _retry_lock():
+            nonlocal got_lock, lock_conn
+            consecutive_zombie_fails = 0
+            while not DISABLE_SCHEDULER:
+                await asyncio.sleep(15)
+
+                # If we hold the lock and the scheduler is running, nothing to do.
+                if got_lock and scheduler._running:
+                    consecutive_zombie_fails = 0
                     continue
 
-                # We acquired the lock. Replace the old (possibly dead) lock_conn.
-                try:
-                    await lock_conn.close()
-                except Exception:
-                    pass
-                lock_conn = fresh_conn
-                app.state.lock_conn = lock_conn
-                scheduler.lock_conn = lock_conn
-                got_lock = True
-                fresh_conn = None  # don't double-close in finally
+                # We either don't hold the lock, or the scheduler stopped. In either
+                # case, try to acquire the lock on a fresh connection — the existing
+                # lock_conn may be dead (that's often why we're here).
+                if got_lock and not scheduler._running:
+                    logger.warning(
+                        "Scheduler stopped unexpectedly — releasing lock state "
+                        "and attempting to re-acquire"
+                    )
+                    got_lock = False
 
-                # Recover jobs the previous lock holder may have orphaned
-                # mid-swap/mid-run. Without this, jobs stuck in
-                # 'loading_model' or 'running' are never picked up since
-                # get_pending_jobs only returns 'queued' statuses.
+                zombie_name = getattr(app.state, "scheduler_zombie_lock_app_name", None)
+                fresh_conn = None
                 try:
-                    recovered = await queue_db.recover_stuck_jobs(pool)
-                    if recovered:
-                        logger.warning(
-                            "Recovered %d jobs stuck in loading_model/running → queued",
-                            recovered,
-                        )
-                except Exception:
-                    logger.exception("recover_stuck_jobs failed on lock retry")
-                # Same for background_ops (pull/update/sync): asyncio tasks
-                # don't survive a pod restart, so any op still marked
-                # 'running' from the previous pod is a zombie.
-                try:
-                    orphaned = await db.recover_stuck_ops(pool)
-                    if orphaned:
-                        logger.warning(
-                            "Marked %d background ops as failed (orphaned by previous pod)",
-                            orphaned,
-                        )
-                except Exception:
-                    logger.exception("recover_stuck_ops failed on lock retry")
-                scheduler.start()
-                logger.info("Queue scheduler started (advisory lock acquired on retry)")
-
-            except Exception:
-                logger.exception("lock_retry: error attempting to acquire scheduler lock")
-                if fresh_conn is not None:
-                    try:
+                    fresh_app_name = _new_scheduler_lock_app_name()
+                    fresh_conn = await asyncpg.connect(
+                        DATABASE_URL,
+                        server_settings=_scheduler_lock_connect_settings(
+                            _pg_server_settings, fresh_app_name
+                        ),
+                    )
+                    acquired = await fresh_conn.fetchval(
+                        "SELECT pg_try_advisory_lock($1)", SCHEDULER_LOCK_ID
+                    )
+                    if not acquired:
                         await fresh_conn.close()
+                        fresh_conn = None
+                        if zombie_name and zombie_fail_threshold > 0:
+                            consecutive_zombie_fails += 1
+                            if consecutive_zombie_fails >= zombie_fail_threshold:
+                                killed = await _terminate_scheduler_lock_zombies(
+                                    pool, zombie_name, SCHEDULER_LOCK_ID
+                                )
+                                logger.warning(
+                                    "scheduler lock: terminated %d zombie backend(s) "
+                                    "for session %r (failed re-acquire %d times)",
+                                    killed,
+                                    zombie_name,
+                                    consecutive_zombie_fails,
+                                )
+                                app.state.scheduler_zombie_lock_app_name = None
+                                consecutive_zombie_fails = 0
+                        else:
+                            consecutive_zombie_fails = 0
+                        continue
+
+                    consecutive_zombie_fails = 0
+                    app.state.scheduler_zombie_lock_app_name = None
+
+                    # We acquired the lock. Replace the old (possibly dead) lock_conn.
+                    try:
+                        await lock_conn.close()
                     except Exception:
                         pass
+                    lock_conn = fresh_conn
+                    app.state.lock_conn = lock_conn
+                    scheduler.bind_lock_session(lock_conn, fresh_app_name)
+                    got_lock = True
+                    fresh_conn = None  # don't double-close in finally
 
-    lock_retry_task = asyncio.create_task(_retry_lock()) if not DISABLE_SCHEDULER else None
+                    # Recover jobs the previous lock holder may have orphaned
+                    # mid-swap/mid-run. Without this, jobs stuck in
+                    # 'loading_model' or 'running' are never picked up since
+                    # get_pending_jobs only returns 'queued' statuses.
+                    try:
+                        recovered = await queue_db.recover_stuck_jobs(pool)
+                        if recovered:
+                            logger.warning(
+                                "Recovered %d jobs stuck in loading_model/running → queued",
+                                recovered,
+                            )
+                    except Exception:
+                        logger.exception("recover_stuck_jobs failed on lock retry")
+                    # Same for background_ops (pull/update/sync): asyncio tasks
+                    # don't survive a pod restart, so any op still marked
+                    # 'running' from the previous pod is a zombie.
+                    try:
+                        orphaned = await db.recover_stuck_ops(pool)
+                        if orphaned:
+                            logger.warning(
+                                "Marked %d background ops as failed (orphaned by previous pod)",
+                                orphaned,
+                            )
+                    except Exception:
+                        logger.exception("recover_stuck_ops failed on lock retry")
+                    scheduler.start()
+                    logger.info("Queue scheduler started (advisory lock acquired on retry)")
+
+                except Exception:
+                    logger.exception("lock_retry: error attempting to acquire scheduler lock")
+                    if fresh_conn is not None:
+                        try:
+                            await fresh_conn.close()
+                        except Exception:
+                            pass
+
+        lock_retry_task = asyncio.create_task(_retry_lock()) if not DISABLE_SCHEDULER else None
+
+    elif LLM_MANAGER_PROCESS == "api":
+        app.state.lock_conn = None
+        scheduler = Scheduler(
+            pool,
+            get_runner,
+            lock_conn=None,
+            lock_session_app_name=None,
+            on_lock_verify_failed=None,
+        )
+        app.state.scheduler = scheduler
+        logger.info(
+            "Scheduler variant: %s (LLM_MANAGER_PROCESS=api: runner state sync only)",
+            _SCHEDULER_VARIANT,
+        )
+        if DISABLE_SCHEDULER:
+            logger.info("Scheduler disabled via DISABLE_SCHEDULER env var")
+        else:
+            try:
+                await scheduler._reconcile_runners()
+            except Exception:
+                logger.exception("scheduler _reconcile_runners at API startup failed")
+
+            async def _api_scheduler_runner_sync():
+                while True:
+                    await asyncio.sleep(30)
+                    try:
+                        await scheduler._refresh_runners()
+                        await scheduler._sync_idle_loaded_models_from_agents()
+                    except Exception:
+                        logger.exception("API scheduler runner sync tick failed")
+
+            scheduler_runner_sync_task = asyncio.create_task(_api_scheduler_runner_sync())
+
+    else:
+        raise RuntimeError(
+            f"Invalid LLM_MANAGER_PROCESS={LLM_MANAGER_PROCESS!r}; use 'combined' or 'api'."
+        )
 
     async def _stale_queue_sweeper():
         """Re-queue wedged loading_model/running rows. Uses a short-lived
@@ -493,22 +663,34 @@ async def lifespan(app: FastAPI):
 
     if lock_retry_task and not lock_retry_task.done():
         lock_retry_task.cancel()
+        try:
+            await lock_retry_task
+        except asyncio.CancelledError:
+            pass
+    if scheduler_runner_sync_task and not scheduler_runner_sync_task.done():
+        scheduler_runner_sync_task.cancel()
+        try:
+            await scheduler_runner_sync_task
+        except asyncio.CancelledError:
+            pass
     if stale_sweep_task and not stale_sweep_task.done():
         stale_sweep_task.cancel()
     config_metrics_task.cancel()
 
     scheduler.stop()
-    if got_lock:
-        try:
-            await lock_conn.execute(
-                "SELECT pg_advisory_unlock($1)", SCHEDULER_LOCK_ID
-            )
-        except Exception:
-            pass
-    try:
-        await lock_conn.close()
-    except Exception:
-        pass
+    if LLM_MANAGER_PROCESS == "combined":
+        if got_lock and lock_conn is not None:
+            try:
+                await lock_conn.execute(
+                    "SELECT pg_advisory_unlock($1)", SCHEDULER_LOCK_ID
+                )
+            except Exception:
+                pass
+        if lock_conn is not None:
+            try:
+                await lock_conn.close()
+            except Exception:
+                pass
     await pool.close()
 
 
@@ -2915,6 +3097,8 @@ async def metrics_endpoint():
             runners = await db.get_active_runners(app.state.db)
             active_runners_gauge.set(len(runners))
             now = time.time()
+            attached = dict(await queue_db.count_attached_jobs_by_runner(app.state.db))
+            runner_attached_jobs_gauge.clear()
             for r in runners:
                 ls = r.get("last_seen")
                 if ls:
@@ -2924,6 +3108,9 @@ async def metrics_endpoint():
                     else:
                         age = 0
                     runner_last_seen_seconds.labels(runner=r["hostname"]).set(round(age, 1))
+                host = r.get("hostname")
+                if host:
+                    runner_attached_jobs_gauge.labels(runner=host).set(attached.get(host, 0))
         except Exception:
             pass
         try:

@@ -24,4 +24,6 @@ USER llmmanager
 
 EXPOSE 8081
 CMD ["python", "main.py"]
+# HA split: run the dedicated scheduler with the same image —
+# CMD ["python", "-m", "scheduler_worker"]
 # cache bust 1774547545
