@@ -23,3 +23,11 @@ Examples: [scheduler-deployment.yaml.example](scheduler-deployment.yaml.example)
 Configure the API Deployment with env `LLM_MANAGER_PROCESS=api` (and omit the scheduler Deployment if you migrate from `combined`; keep `combined` as default for backwards compatibility).
 
 **Invalid:** `LLM_MANAGER_PROCESS=scheduler` on `main.py` — that value is refused with a hint to run `python -m scheduler_worker` instead.
+
+### Rollout pitfalls (lessons learned)
+
+- **`maxUnavailable: 0`** on the scheduler means the **new** pod must become **Ready** (startup + readiness probes) **before** any old pod is removed. If probes are too aggressive (`timeoutSeconds` defaults to 1s), increase them (e.g. 3–5s) in your real Deployment manifests.
+- **Same image tag** on **both** `llm-manager-backend` and `llm-manager-scheduler` (CI should bump both; the worker is only a different `command`).
+- **Never run `combined` API and a separate scheduler** against the same DB — you risk **two dispatch loops**. Prod API should use `LLM_MANAGER_PROCESS=api` when scheduler pods exist.
+- **K8s Lease** `renewTime` / `acquireTime` must match **MicroTime** (six digits after the decimal). Older images that emitted millisecond-only strings will get **400** from the apiserver until upgraded.
+- **Leadership handoff**: the dispatch loop must **fully exit** before becoming leader again; the scheduler uses `stop_and_wait()` on leadership loss so restarts are safe.

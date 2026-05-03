@@ -60,7 +60,15 @@ class _SchedulerHealthHandler(BaseHTTPRequestHandler):
 def _start_health_http(port: int) -> None:
     """Serve /health on a background thread so kube probes are not starved by the asyncio elector."""
     global _health_httpd, _health_thread
-    _health_httpd = HTTPServer(("0.0.0.0", port), _SchedulerHealthHandler)
+    try:
+        _health_httpd = HTTPServer(("0.0.0.0", port), _SchedulerHealthHandler)
+    except OSError as e:
+        logger.error(
+            "Scheduler health bind failed on 0.0.0.0:%s (is the port in use?): %s",
+            port,
+            e,
+        )
+        raise
     _health_thread = threading.Thread(
         target=_health_httpd.serve_forever,
         name="scheduler-health",
@@ -162,7 +170,7 @@ async def main() -> None:
                 scheduler.start()
 
             async def on_leadership_lost() -> None:
-                scheduler.stop()
+                await scheduler.stop_and_wait()
 
             loop = asyncio.get_running_loop()
             install_sigterm(elector, loop)
@@ -173,7 +181,7 @@ async def main() -> None:
             await elector.run(on_leadership_gained, on_leadership_lost)
         finally:
             if scheduler is not None:
-                scheduler.stop()
+                await scheduler.stop_and_wait()
             if elector is not None:
                 await elector.shutdown()
             await pool.close()

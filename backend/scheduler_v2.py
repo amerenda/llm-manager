@@ -217,19 +217,39 @@ class SimplifiedScheduler:
     # ── lifecycle ────────────────────────────────────────────────────────────
 
     def start(self):
-        if self._task is None or self._task.done():
-            self._running = True
-            self._task = asyncio.create_task(self._loop())
-            logger.info(
-                "SimplifiedScheduler started (one-model-per-GPU, strategy=%s)",
-                self.strategy.name,
+        if self._task is not None and not self._task.done():
+            logger.warning(
+                "SimplifiedScheduler start() skipped: dispatch loop still running",
             )
+            return
+        self._running = True
+        self._task = asyncio.create_task(self._loop())
+        logger.info(
+            "SimplifiedScheduler started (one-model-per-GPU, strategy=%s)",
+            self.strategy.name,
+        )
 
     def stop(self):
+        """Request stop; the asyncio task may still be winding down. Prefer
+        :meth:`stop_and_wait` when you must start again in the same process
+        (K8s/postgres leader handoff)."""
         self._running = False
         if self._task and not self._task.done():
             self._task.cancel()
-            logger.info("SimplifiedScheduler stopped")
+        logger.info("SimplifiedScheduler stopped")
+
+    async def stop_and_wait(self) -> None:
+        """Cancel the dispatch loop and wait until it has exited."""
+        self._running = False
+        t = self._task
+        if t is not None and not t.done():
+            t.cancel()
+            try:
+                await t
+            except asyncio.CancelledError:
+                pass
+        self._task = None
+        logger.info("SimplifiedScheduler stopped (loop finished)")
 
     def bind_lock_session(
         self,

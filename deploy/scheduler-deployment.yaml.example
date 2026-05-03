@@ -20,6 +20,14 @@ spec:
         - name: scheduler
           image: ghcr.io/example/llm-manager-backend:latest
           command: ["python", "-m", "scheduler_worker"]
+          # Optional: set explicit timeouts if probes flake under load (default 1s).
+          # startupProbe:
+          #   httpGet:
+          #     path: /health
+          #     port: 8081
+          #   periodSeconds: 5
+          #   failureThreshold: 30
+          #   timeoutSeconds: 5
           envFrom:
             - secretRef:
                 name: llm-manager-backend-database
