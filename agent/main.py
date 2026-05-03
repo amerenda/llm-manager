@@ -533,9 +533,9 @@ async def _heartbeat_once():
     global _RUNNER_ID
     if not _RUNNER_ID or not BACKEND_URL:
         return
-    # Auto-rotate TLS cert if expiring within 30 days
+    # Auto-rotate TLS cert if expiring within 30 days (same SANs as AGENT_ADDRESS).
     try:
-        _ensure_tls_cert(_DETECTED_IP)
+        _ensure_tls_cert(_TLS_SAN_IP, _TLS_SAN_DNS)
     except Exception:
         pass
     try:

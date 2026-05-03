@@ -52,6 +52,10 @@ def _make_ssl_context(cert_pem: str) -> ssl.SSLContext:
         ctx.load_verify_locations(cert_path)
     finally:
         os.unlink(cert_path)
+    # Trust store is exactly the agent's leaf cert (pinning). Do not require
+    # SAN/CN to match the connect host — runners may register under a routable
+    # LAN IP while an older cert only listed a bridge address, etc.
+    ctx.check_hostname = False
     return ctx
 
 
