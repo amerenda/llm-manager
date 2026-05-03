@@ -11,6 +11,8 @@ import asyncio
 import logging
 import os
 import signal
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Optional
 
 import asyncpg
@@ -35,59 +37,54 @@ logger = logging.getLogger(__name__)
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://llm:llm@localhost:5432/llmmanager")
 DISABLE_SCHEDULER = os.environ.get("DISABLE_SCHEDULER", "").lower() in ("true", "1", "yes")
 
-
-_health_tcp_server: Optional[asyncio.AbstractServer] = None
-
-_HEALTH_BODY = (
-    b'{"ok":true,"service":"llm-manager-scheduler"}',
-)
+_health_httpd: Optional[HTTPServer] = None
+_health_thread: Optional[threading.Thread] = None
 
 
-async def _health_client(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-    try:
-        header = await reader.readline()
-        # Drain rest of request (keep-alive not used)
-        while True:
-            line = await reader.readline()
-            if line in (b"\r\n", b"\n", b""):
-                break
-        path = header.split()[1] if len(header.split()) > 1 else b""
-        if header.startswith(b"GET ") and path.startswith(b"/health"):
-            h = (
-                b"HTTP/1.1 200 OK\r\n"
-                b"Content-Type: application/json\r\n"
-                b"Content-Length: "
-                + str(len(_HEALTH_BODY)).encode()
-                + b"\r\nConnection: close\r\n\r\n"
-                + _HEALTH_BODY
-            )
-            writer.write(h)
+class _SchedulerHealthHandler(BaseHTTPRequestHandler):
+    def log_message(self, _format: str, *_args: object) -> None:
+        return
+
+    def do_GET(self) -> None:
+        if self.path == "/health" or self.path.startswith("/health?"):
+            body = b'{"ok":true,"service":"llm-manager-scheduler"}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
         else:
-            writer.write(b"HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n")
-        await writer.drain()
-    except Exception:
-        pass
-    finally:
-        writer.close()
+            self.send_error(404, "not found")
+
+
+def _start_health_http(port: int) -> None:
+    """Serve /health on a background thread so kube probes are not starved by the asyncio elector."""
+    global _health_httpd, _health_thread
+    _health_httpd = HTTPServer(("0.0.0.0", port), _SchedulerHealthHandler)
+    _health_thread = threading.Thread(
+        target=_health_httpd.serve_forever,
+        name="scheduler-health",
+        daemon=True,
+    )
+    _health_thread.start()
+    logger.info("Scheduler health server on 0.0.0.0:%s (thread)", port)
+
+
+def _stop_health_http() -> None:
+    global _health_httpd, _health_thread
+    if _health_httpd is not None:
         try:
-            await writer.wait_closed()
+            _health_httpd.shutdown()
+        except Exception:
+            logger.warning("health server shutdown failed", exc_info=True)
+        try:
+            _health_httpd.server_close()
         except Exception:
             pass
-
-
-async def _run_health_server(port: int) -> None:
-    """Minimal HTTP so k8s can probe :8081 (avoid uvicorn: it steals SIGTERM)."""
-    global _health_tcp_server
-    server = await asyncio.start_server(
-        _health_client,
-        host="0.0.0.0",
-        port=port,
-    )
-    _health_tcp_server = server
-    try:
-        await server.serve_forever()
-    finally:
-        _health_tcp_server = None
+        if _health_thread is not None and _health_thread.is_alive():
+            _health_thread.join(timeout=10)
+        _health_httpd = None
+        _health_thread = None
 
 
 async def _wait_shutdown_event() -> None:
@@ -107,10 +104,8 @@ async def _wait_shutdown_event() -> None:
 
 async def main() -> None:
     health_port = int(os.environ.get("SCHEDULER_HEALTH_PORT", "8081"))
-    health_task: asyncio.Task[None] | None = None
     if health_port > 0:
-        health_task = asyncio.create_task(_run_health_server(health_port))
-        await asyncio.sleep(0)  # allow health server to start scheduling
+        _start_health_http(health_port)
 
     try:
         if DISABLE_SCHEDULER:
@@ -184,19 +179,8 @@ async def main() -> None:
             await pool.close()
 
     finally:
-        if health_task is not None:
-            srv = _health_tcp_server
-            if srv is not None:
-                srv.close()
-                try:
-                    await srv.wait_closed()
-                except Exception:
-                    pass
-            health_task.cancel()
-            try:
-                await health_task
-            except asyncio.CancelledError:
-                pass
+        if health_port > 0:
+            _stop_health_http()
 
 
 if __name__ == "__main__":
