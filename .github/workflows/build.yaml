@@ -254,7 +254,8 @@ jobs:
           if [[ "$BACKEND_CHANGED" == "true" ]]; then
             sed -i "s|amerenda/llm-manager:backend-[^ ]*|amerenda/llm-manager:backend-${TAG}|g" \
               apps/llm-manager/backend-uat/deployment.yaml \
-              apps/llm-manager/backend/deployment.yaml
+              apps/llm-manager/backend/deployment.yaml \
+              apps/llm-manager/backend/scheduler-deployment.yaml
           fi
           if [[ "$FRONTEND_CHANGED" == "true" ]]; then
             sed -i "s|amerenda/llm-manager:frontend-[^ ]*|amerenda/llm-manager:frontend-${TAG}|g" \
