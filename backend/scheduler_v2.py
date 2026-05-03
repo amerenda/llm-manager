@@ -271,6 +271,12 @@ class SimplifiedScheduler:
         return self._current_job_id
 
     @property
+    def is_dispatch_loop_running(self) -> bool:
+        """True while the asyncio task for :meth:`_loop` exists and has not finished."""
+        t = self._task
+        return t is not None and not t.done()
+
+    @property
     def loaded_models(self) -> dict[str, dict]:
         """Shape-compat with old Scheduler. Each runner contributes at most one entry."""
         out: dict[str, dict] = {}

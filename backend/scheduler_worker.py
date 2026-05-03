@@ -35,6 +35,10 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://llm:llm@localhost:5432/llmmanager")
+
+# If the dispatch asyncio task exits while we still hold the K8s/Postgres lease, jobs
+# stay queued forever (lease renews on the elector coroutine). Watchdog restarts the loop.
+DISPATCH_WATCHDOG_SEC = float(os.environ.get("SCHEDULER_DISPATCH_WATCHDOG_SEC", "45"))
 DISABLE_SCHEDULER = os.environ.get("DISABLE_SCHEDULER", "").lower() in ("true", "1", "yes")
 
 _health_httpd: Optional[HTTPServer] = None
@@ -93,6 +97,38 @@ def _stop_health_http() -> None:
             _health_thread.join(timeout=10)
         _health_httpd = None
         _health_thread = None
+
+
+async def _dispatch_loop_watchdog(
+    elector,
+    scheduler: SimplifiedScheduler,
+    pool: asyncpg.Pool,
+) -> None:
+    if DISPATCH_WATCHDOG_SEC <= 0:
+        return
+    while True:
+        await asyncio.sleep(DISPATCH_WATCHDOG_SEC)
+        try:
+            if not elector.is_leader():
+                continue
+            if scheduler.is_dispatch_loop_running:
+                continue
+            recovered = await queue_db.recover_stuck_jobs(pool)
+            if recovered:
+                logger.warning(
+                    "Dispatch watchdog: recovered %d stuck jobs before restart",
+                    recovered,
+                )
+            logger.error(
+                "Dispatch loop not running while leader — restarting SimplifiedScheduler "
+                "(likely loop exited without lease loss; see prior logs for exceptions)"
+            )
+            await scheduler.stop_and_wait()
+            scheduler.start()
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("scheduler dispatch watchdog tick failed")
 
 
 async def _wait_shutdown_event() -> None:
@@ -178,7 +214,21 @@ async def main() -> None:
                 "Scheduler worker running (leader backend=%s)",
                 os.environ.get("SCHEDULER_LEADER_BACKEND", "none"),
             )
-            await elector.run(on_leadership_gained, on_leadership_lost)
+            watchdog: asyncio.Task | None = None
+            if DISPATCH_WATCHDOG_SEC > 0:
+                watchdog = asyncio.create_task(
+                    _dispatch_loop_watchdog(elector, scheduler, pool),
+                    name="scheduler-dispatch-watchdog",
+                )
+            try:
+                await elector.run(on_leadership_gained, on_leadership_lost)
+            finally:
+                if watchdog is not None:
+                    watchdog.cancel()
+                    try:
+                        await watchdog
+                    except asyncio.CancelledError:
+                        pass
         finally:
             if scheduler is not None:
                 await scheduler.stop_and_wait()

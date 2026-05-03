@@ -50,6 +50,10 @@ async def init_scheduler_lease_table(pool: asyncpg.Pool) -> None:
 class LeaderElector(ABC):
     """Drive scheduler start/stop from leadership changes."""
 
+    def is_leader(self) -> bool:
+        """True while this process holds leadership (K8s/Postgres lease) or is the sole noop leader."""
+        return False
+
     @abstractmethod
     async def run(
         self,
@@ -68,14 +72,20 @@ class NoopLeaderElector(LeaderElector):
 
     def __init__(self) -> None:
         self._stop = asyncio.Event()
+        self._is_leader = False
+
+    def is_leader(self) -> bool:
+        return self._is_leader
 
     async def run(
         self,
         on_leadership_gained: Callable[[], Awaitable[None]],
         on_leadership_lost: Callable[[], Awaitable[None]],
     ) -> None:
+        self._is_leader = True
         await on_leadership_gained()
         await self._stop.wait()
+        self._is_leader = False
         await on_leadership_lost()
 
     async def shutdown(self) -> None:
@@ -98,6 +108,9 @@ class PostgresLeaderElector(LeaderElector):
         self.tick_sec = tick_sec
         self._stop = asyncio.Event()
         self._is_leader = False
+
+    def is_leader(self) -> bool:
+        return self._is_leader
 
     async def shutdown(self) -> None:
         self._stop.set()
@@ -219,6 +232,9 @@ class K8sLeaseLeaderElector(LeaderElector):
             f"{self._api_base}/apis/coordination.k8s.io/v1/namespaces/"
             f"{namespace}/leases/{lease_name}"
         )
+
+    def is_leader(self) -> bool:
+        return self._is_leader
 
     async def shutdown(self) -> None:
         self._stop.set()
