@@ -505,10 +505,17 @@ async def lifespan(app: FastAPI):
         if DISABLE_SCHEDULER:
             logger.info("Scheduler disabled via DISABLE_SCHEDULER env var")
         else:
-            try:
-                await scheduler._reconcile_runners()
-            except Exception:
-                logger.exception("scheduler _reconcile_runners at API startup failed")
+            # Uvicorn does not bind the listen socket until lifespan startup finishes
+            # (everything before yield). _reconcile_runners hits the network and can
+            # exceed probe deadlines → connection refused on :8081. Run reconcile in
+            # the background so /health comes up quickly.
+            async def _initial_reconcile():
+                try:
+                    await scheduler._reconcile_runners()
+                except Exception:
+                    logger.exception("scheduler _reconcile_runners at API startup failed")
+
+            asyncio.create_task(_initial_reconcile())
 
             async def _api_scheduler_runner_sync():
                 while True:
