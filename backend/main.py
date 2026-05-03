@@ -38,7 +38,11 @@ from db import (
 )
 from gpu import vram_for_model
 from agent_version_compare import agent_versions_equivalent
-from llm_agent import LLMAgentClient, client_from_runner_row
+from llm_agent import LLMAgentClient
+from runner_client import (
+    get_runner_llm_client as _get_runner_client,
+    llm_agent_client_for_runner_row as _llm_agent_client_for_runner_row,
+)
 from scheduler_v2 import SimplifiedScheduler as Scheduler
 from scheduler_v2 import fastpath_duration_seconds, fastpath_requests_total
 
@@ -143,45 +147,8 @@ def _inc_request(endpoint: str, method: str, status: int):
 _AGENT_AGG_TIMEOUT = httpx.Timeout(5.0, read=25.0)
 
 
-def _llm_agent_client_for_runner_row(r: dict) -> LLMAgentClient:
-    """Build an agent client from a DB runner row (no extra query)."""
-    return client_from_runner_row(r, AGENT_PSK)
-
-
 # ── Runner helpers ─────────────────────────────────────────────────────────────
-
-async def _get_runner_client(
-    pool: asyncpg.Pool,
-    runner_id: Optional[int] = None,
-    allowed_runner_ids: Optional[list[int]] = None,
-) -> LLMAgentClient:
-    """Return an LLMAgentClient pointed at an active (enabled) runner.
-    If allowed_runner_ids is set, only those runners are candidates.
-
-    When runner_id is None (fallback path used by /api/llm/models/load,
-    /api/llm/models/unload, library pull helpers, etc.) draining runners
-    are excluded. An explicit runner_id overrides — admins can still
-    target a drained runner for maintenance ops.
-
-    Regression 2026-04-22: archlinux was drained, alphabetical ordering
-    in get_active_runners put it first, and a UI "load model" test
-    landed a 35b model on it anyway — archlinux's 17 GB GPU overflowed
-    to RAM and the host died."""
-    runners_list = await db.get_active_runners(pool)
-    if allowed_runner_ids:
-        runners_list = [r for r in runners_list if r["id"] in allowed_runner_ids]
-    if not runners_list:
-        raise HTTPException(503, "No active llm-runners available")
-    if runner_id is not None:
-        r = next((x for x in runners_list if x["id"] == runner_id), None)
-        if not r:
-            raise HTTPException(404, "Runner not found or inactive")
-    else:
-        eligible = [x for x in runners_list if not x.get("draining")]
-        if not eligible:
-            raise HTTPException(503, "No active llm-runners available (all are draining)")
-        r = eligible[0]
-    return _llm_agent_client_for_runner_row(r)
+# _get_runner_client / _llm_agent_client_for_runner_row live in runner_client.py
 
 
 async def _get_runner_ollama_base(pool: asyncpg.Pool, runner_id: Optional[int] = None) -> str:

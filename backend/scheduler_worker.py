@@ -23,6 +23,7 @@ from leader_election import (
     install_sigterm,
     make_leader_elector,
 )
+from runner_client import get_runner_llm_client
 from scheduler_v2 import SimplifiedScheduler
 
 logging.basicConfig(
@@ -142,10 +143,8 @@ async def main() -> None:
             if backend in ("postgres", "pg", "sql"):
                 await init_scheduler_lease_table(pool)
 
-            import main as api_main  # noqa: E402
-
             async def get_runner(runner_id=None):
-                return await api_main._get_runner_client(pool, runner_id=runner_id)
+                return await get_runner_llm_client(pool, runner_id=runner_id)
 
             scheduler = SimplifiedScheduler(pool, get_runner, lock_conn=None)
             elector = make_leader_elector(
