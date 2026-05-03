@@ -21,6 +21,17 @@ from gpu import vram_for_model
 
 logger = logging.getLogger(__name__)
 
+# Library browse probes each runner's /v1/status; use a tighter connect budget than
+# pulls so a dead agent does not block the UI for LLM_AGENT_CONNECT_TIMEOUT (minutes).
+def _library_probe_connect_seconds() -> float:
+    raw = (os.environ.get("LLM_AGENT_LIBRARY_PROBE_CONNECT_TIMEOUT") or "").strip()
+    if raw:
+        try:
+            return float(raw)
+        except ValueError:
+            pass
+    return 12.0
+
 
 def _norm_digest(d: Optional[str]) -> str:
     """Normalize a manifest digest for comparison. Ollama's /api/tags reports
@@ -165,7 +176,7 @@ async def browse_library(
         try:
             psk = os.environ.get("LLM_MANAGER_AGENT_PSK", "")
             client = client_from_runner_row(runner, psk)
-            _ac = float(os.environ.get("LLM_AGENT_CONNECT_TIMEOUT", "120"))
+            _ac = _library_probe_connect_seconds()
             st = await client.status(
                 timeout=httpx.Timeout(connect=_ac, read=25.0, write=_ac, pool=45.0)
             )
