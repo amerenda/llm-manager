@@ -253,6 +253,44 @@ class SimplifiedScheduler:
         self._task = None
         logger.info("SimplifiedScheduler stopped (loop finished)")
 
+    def abandon_dispatch_task(self) -> None:
+        """Clear dispatch bookkeeping without joining the loop task.
+
+        Used when :meth:`stop_and_wait` hits a timeout (watchdog / shutdown): the
+        old ``_loop`` task may be stuck in an await that does not yield to cancel
+        promptly. We cancel it and drop the handle so :meth:`start` can spawn a
+        new loop. If the old task later wakes, it sees ``_running`` False and exits.
+        """
+        self._running = False
+        t = self._task
+        self._task = None
+        if t is not None and not t.done():
+            t.cancel()
+        logger.warning(
+            "SimplifiedScheduler: dispatch task handle cleared without join "
+            "(stuck loop; cancelled best-effort)"
+        )
+
+    async def bounded_stop_and_wait(self, *, context: str) -> None:
+        """Like :meth:`stop_and_wait` but never blocks past ``SCHEDULER_WATCHDOG_STOP_TIMEOUT_SEC``.
+
+        If the dispatch task ignores cancel inside a long await, :meth:`abandon_dispatch_task`
+        clears bookkeeping so a new loop can be started (watchdog / shutdown).
+        """
+        lim = float(os.environ.get("SCHEDULER_WATCHDOG_STOP_TIMEOUT_SEC", "120"))
+        if lim <= 0:
+            await self.stop_and_wait()
+            return
+        try:
+            await asyncio.wait_for(self.stop_and_wait(), timeout=lim)
+        except asyncio.TimeoutError:
+            logger.critical(
+                "%s: stop_and_wait exceeded %.0fs — abandoning stuck dispatch task",
+                context,
+                lim,
+            )
+            self.abandon_dispatch_task()
+
     def bind_lock_session(
         self,
         conn: Optional[asyncpg.Connection],

@@ -651,7 +651,7 @@ async def lifespan(app: FastAPI):
         stale_sweep_task.cancel()
     config_metrics_task.cancel()
 
-    await scheduler.stop_and_wait()
+    await scheduler.bounded_stop_and_wait(context="API lifespan shutdown")
     if LLM_MANAGER_PROCESS == "combined":
         if got_lock and lock_conn is not None:
             try:

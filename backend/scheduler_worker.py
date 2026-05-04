@@ -114,7 +114,7 @@ async def _restart_scheduler_watchdog(
             recovered,
         )
     logger.error("Dispatch watchdog: %s", reason)
-    await scheduler.stop_and_wait()
+    await scheduler.bounded_stop_and_wait(context="Dispatch watchdog")
     scheduler.start()
 
 
@@ -231,7 +231,7 @@ async def main() -> None:
                 scheduler.start()
 
             async def on_leadership_lost() -> None:
-                await scheduler.stop_and_wait()
+                await scheduler.bounded_stop_and_wait(context="Leadership lost")
 
             loop = asyncio.get_running_loop()
             install_sigterm(elector, loop)
@@ -256,7 +256,7 @@ async def main() -> None:
                         pass
         finally:
             if scheduler is not None:
-                await scheduler.stop_and_wait()
+                await scheduler.bounded_stop_and_wait(context="Scheduler worker shutdown")
             if elector is not None:
                 await elector.shutdown()
             await pool.close()
