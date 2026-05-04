@@ -213,6 +213,8 @@ class SimplifiedScheduler:
         self._runners: dict[int, RunnerState] = {}  # keyed by runner_id
         self._last_idle_model_sync_mono: float = 0.0
         self._last_no_runner_log_mono: float = 0.0
+        # Monotonic time at the start of the current / last `_loop` iteration (watchdog liveness).
+        self._last_loop_tick_mono: float = 0.0
 
     # ── lifecycle ────────────────────────────────────────────────────────────
 
@@ -275,6 +277,21 @@ class SimplifiedScheduler:
         """True while the asyncio task for :meth:`_loop` exists and has not finished."""
         t = self._task
         return t is not None and not t.done()
+
+    @property
+    def dispatch_loop_tick_stale_seconds(self) -> float:
+        """Seconds since :meth:`_loop` last began an iteration (top of ``while`` body).
+
+        Returns ``0`` when no dispatch task is running so the worker watchdog can
+        treat "task dead" vs "task alive but wedged" separately.
+        """
+        t = self._task
+        if t is None or t.done():
+            return 0.0
+        tick = self._last_loop_tick_mono
+        if tick <= 0:
+            return 0.0
+        return max(0.0, time.monotonic() - tick)
 
     @property
     def loaded_models(self) -> dict[str, dict]:
@@ -616,6 +633,7 @@ class SimplifiedScheduler:
         runner's chat call returned, even when other runners were idle. Each
         batch runs sequentially on its assigned runner (Ollama is serial
         anyway); parallelism is only across runners."""
+        self._last_loop_tick_mono = time.monotonic()
         await self._reconcile_runners()
         idle_counter = 0
         active_tasks: set[asyncio.Task] = set()
@@ -625,6 +643,7 @@ class SimplifiedScheduler:
         head_unplaceable_since: float | None = None
         head_unplaceable_key: str | None = None
         while self._running:
+            self._last_loop_tick_mono = time.monotonic()
             try:
                 # Reap completed dispatch tasks so the set doesn't grow unbounded
                 active_tasks = {t for t in active_tasks if not t.done()}

@@ -39,6 +39,9 @@ DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://llm:llm@localhost:54
 # If the dispatch asyncio task exits while we still hold the K8s/Postgres lease, jobs
 # stay queued forever (lease renews on the elector coroutine). Watchdog restarts the loop.
 DISPATCH_WATCHDOG_SEC = float(os.environ.get("SCHEDULER_DISPATCH_WATCHDOG_SEC", "45"))
+# If `_loop` is still "running" but wedged inside a long await, tick age grows without bound;
+# restart when leader and no iteration start for this many seconds (0 disables).
+SCHEDULER_LOOP_STALE_SEC = float(os.environ.get("SCHEDULER_LOOP_STALE_SEC", "600"))
 DISABLE_SCHEDULER = os.environ.get("DISABLE_SCHEDULER", "").lower() in ("true", "1", "yes")
 
 _health_httpd: Optional[HTTPServer] = None
@@ -99,6 +102,22 @@ def _stop_health_http() -> None:
         _health_thread = None
 
 
+async def _restart_scheduler_watchdog(
+    scheduler: SimplifiedScheduler,
+    pool: asyncpg.Pool,
+    reason: str,
+) -> None:
+    recovered = await queue_db.recover_stuck_jobs(pool)
+    if recovered:
+        logger.warning(
+            "Dispatch watchdog: recovered %d stuck jobs before restart",
+            recovered,
+        )
+    logger.error("Dispatch watchdog: %s", reason)
+    await scheduler.stop_and_wait()
+    scheduler.start()
+
+
 async def _dispatch_loop_watchdog(
     elector,
     scheduler: SimplifiedScheduler,
@@ -111,20 +130,26 @@ async def _dispatch_loop_watchdog(
         try:
             if not elector.is_leader():
                 continue
-            if scheduler.is_dispatch_loop_running:
-                continue
-            recovered = await queue_db.recover_stuck_jobs(pool)
-            if recovered:
-                logger.warning(
-                    "Dispatch watchdog: recovered %d stuck jobs before restart",
-                    recovered,
-                )
-            logger.error(
-                "Dispatch loop not running while leader — restarting SimplifiedScheduler "
-                "(likely loop exited without lease loss; see prior logs for exceptions)"
+            task_dead = not scheduler.is_dispatch_loop_running
+            stale_age = scheduler.dispatch_loop_tick_stale_seconds
+            tick_stale = (
+                SCHEDULER_LOOP_STALE_SEC > 0
+                and stale_age >= SCHEDULER_LOOP_STALE_SEC
             )
-            await scheduler.stop_and_wait()
-            scheduler.start()
+            if not task_dead and not tick_stale:
+                continue
+            if task_dead:
+                reason = (
+                    "Dispatch loop not running while leader — restarting SimplifiedScheduler "
+                    "(likely loop exited without lease loss; see prior logs for exceptions)"
+                )
+            else:
+                reason = (
+                    f"No dispatch loop iteration for {stale_age:.0f}s "
+                    f"(threshold {SCHEDULER_LOOP_STALE_SEC:.0f}s) while leader — "
+                    "restarting SimplifiedScheduler (likely stuck await in pool or agent HTTP)"
+                )
+            await _restart_scheduler_watchdog(scheduler, pool, reason)
         except asyncio.CancelledError:
             raise
         except Exception:
