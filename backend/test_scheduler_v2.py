@@ -136,10 +136,14 @@ class TestPickRunner:
 
     def test_idle_fits_but_no_download_skipped(self):
         # Core regression fix: runner fits VRAM but doesn't have the model on
-        # disk. Pre-fix this was picked, the swap failed, the fallback loaded
-        # on the drained runner anyway. Post-fix: no pick — job waits.
-        a = RunnerState(runner_id=1, hostname="a", gpu_total_gb=40,
-                        current_model="something-else")
+        # disk. Heartbeat lists other models — we must not pick (swap would fail).
+        a = RunnerState(
+            runner_id=1,
+            hostname="a",
+            gpu_total_gb=40,
+            current_model="something-else",
+            downloaded_models={"llama3.2:1b"},
+        )
         sched = _make_sched([a])
         assert _run(sched._pick_runner("qwen3.6:35b-a3b")) is None
 
@@ -158,11 +162,19 @@ class TestPickRunner:
         sched = _make_sched([a])
         assert _run(sched._pick_runner("qwen3:14b")) is a
 
-    def test_unknown_gpu_total_not_picked_without_download(self):
+    def test_unknown_gpu_total_picked_when_heartbeat_inventory_empty(self):
+        # Empty downloaded_models means no /api/tags snapshot yet — still try
+        # placement; _swap_model will live-probe before load.
         a = RunnerState(runner_id=1, hostname="a", gpu_total_gb=0,
                         downloaded_models=set())
         sched = _make_sched([a])
-        assert _run(sched._pick_runner("qwen3:14b")) is None
+        assert _run(sched._pick_runner("qwen3:14b")) is a
+
+    def test_nonempty_gpu_picked_when_heartbeat_inventory_empty(self):
+        a = RunnerState(runner_id=1, hostname="a", gpu_total_gb=40,
+                        downloaded_models=set())
+        sched = _make_sched([a])
+        assert _run(sched._pick_runner("qwen3:14b")) is a
 
     def test_no_runners(self):
         sched = _make_sched([])

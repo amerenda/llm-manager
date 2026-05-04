@@ -63,6 +63,29 @@ async def _resolve_app(request: Request, authorization: Optional[str]) -> Option
     return row["id"]
 
 
+async def _resolve_queue_job_alias(pool, body: QueueJobRequest) -> QueueJobRequest:
+    """Resolve model alias to base model and merge alias parameters (parity with /v1/chat/completions)."""
+    row = await queue_db.get_model_alias(pool, body.model)
+    if not row:
+        return body
+    fields_set = body.model_fields_set
+    data = body.model_dump()
+    ap = row.get("parameters") or {}
+    if isinstance(ap, str):
+        ap = json.loads(ap)
+    for k, v in ap.items():
+        if k in QueueJobRequest.model_fields and k != "model" and k not in fields_set:
+            data[k] = v
+    sp = row.get("system_prompt")
+    if sp:
+        msgs = list(data.get("messages") or [])
+        if not any(m.get("role") == "system" for m in msgs):
+            msgs.insert(0, {"role": "system", "content": sp})
+            data["messages"] = msgs
+    data["model"] = row["base_model"]
+    return QueueJobRequest(**data)
+
+
 def _enriched_job_metadata(
     metadata: Optional[dict], allowed_runner_ids: Optional[list[int]]
 ) -> Optional[dict]:
@@ -97,7 +120,11 @@ async def submit_job(body: QueueJobRequest, request: Request,
             app_row = await db.get_app_by_id(pool, app_id)
             allowed_runner_ids = list((app_row or {}).get("allowed_runner_ids") or [])
 
-        await queue_policy.ensure_category_access(pool, app_id, body.model)
+        label_model = body.model
+        body = await _resolve_queue_job_alias(pool, body)
+        await queue_policy.ensure_category_access(
+            pool, app_id, body.model, batch_model_label=label_model,
+        )
 
         # Pre-check VRAM
         check = await scheduler.check_submission(body.model, allowed_runner_ids=allowed_runner_ids)
@@ -158,34 +185,39 @@ async def submit_batch(body: QueueBatchRequest, request: Request,
     # Resolve priority once per batch
     priority = await queue_policy.priority_for_app(pool, app_id)
 
+    check: dict = {"ok": True}
+    resolved: list[QueueJobRequest] = []
     for job_req in body.jobs:
+        label_model = job_req.model
+        job_eff = await _resolve_queue_job_alias(pool, job_req)
+        resolved.append(job_eff)
         await queue_policy.ensure_category_access(
-            pool, app_id, job_req.model, batch_model_label=job_req.model
+            pool, app_id, job_eff.model, batch_model_label=label_model,
         )
 
-        # Pre-check VRAM for each unique model
-        check = await scheduler.check_submission(job_req.model, allowed_runner_ids=allowed_runner_ids)
+        # Pre-check VRAM for each job (resolved base model)
+        check = await scheduler.check_submission(job_eff.model, allowed_runner_ids=allowed_runner_ids)
         if not check["ok"]:
             raise HTTPException(422, {
                 "error": check["error"],
-                "message": f"Model {job_req.model}: {check['message']}",
+                "message": f"Model {label_model}: {check['message']}",
                 "batch_id": batch_id,
             })
     await _check_rate_limit(pool, app_id)
 
-    for job_req in body.jobs:
+    for job_eff in resolved:
         job_id = str(uuid.uuid4())[:12]
         meta = _enriched_job_metadata(
-            job_req.metadata,
+            job_eff.metadata,
             allowed_runner_ids if allowed_runner_ids else None,
         )
         await queue_db.insert_job(
-            pool, job_id, batch_id, app_id, job_req.model,
-            job_req.model_dump(exclude={"model", "metadata"}),
+            pool, job_id, batch_id, app_id, job_eff.model,
+            job_eff.model_dump(exclude={"model", "metadata"}),
             meta,
             priority=priority,
         )
-        resp = QueueJobResponse(job_id=job_id, status="queued", model=job_req.model)
+        resp = QueueJobResponse(job_id=job_id, status="queued", model=job_eff.model)
         if check.get("warning"):
             resp.warning = check["message"]
             resp.evicting = check.get("evicting")

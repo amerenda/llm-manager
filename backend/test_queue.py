@@ -496,6 +496,7 @@ class TestResolvedVramGbForModel:
 
 import auth
 import main
+import queue_routes
 
 
 @asynccontextmanager
@@ -517,12 +518,17 @@ _original_lifespan = main.app.router.lifespan_context
 
 
 @pytest.fixture
-def client():
+def client(monkeypatch):
     """TestClient with mocked lifespan, DB pool, scheduler, and admin auth."""
     main.app.router.lifespan_context = _noop_lifespan
     auth.SESSION_SECRET = "test-secret"
     auth.GITHUB_ALLOWED_USERS = {"testuser"}
     token = auth.create_session_token("testuser")
+
+    async def _no_alias(_pool, _name):
+        return None
+
+    monkeypatch.setattr(queue_routes.queue_db, "get_model_alias", _no_alias)
     with TestClient(main.app, raise_server_exceptions=False, cookies={auth.COOKIE_NAME: token}) as c:
         yield c
     main.app.router.lifespan_context = _original_lifespan
@@ -595,6 +601,33 @@ class TestSubmitJob:
             "model": "qwen2.5:7b",
         })
         assert resp.status_code == 422
+
+    @patch("queue_db.get_pending_jobs", new_callable=AsyncMock, return_value=[])
+    @patch("queue_db.insert_job", new_callable=AsyncMock, return_value={"id": "abc123"})
+    def test_submit_resolves_model_alias_for_scheduler(self, mock_insert, mock_pending, client, monkeypatch):
+        async def _alias(_pool, name):
+            if name == "my-alias":
+                return {
+                    "alias_name": "my-alias",
+                    "base_model": "qwen2.5:7b",
+                    "system_prompt": "Be brief",
+                    "parameters": {"temperature": 0.2},
+                }
+            return None
+
+        monkeypatch.setattr(queue_routes.queue_db, "get_model_alias", _alias)
+        resp = client.post("/api/queue/submit", json={
+            "model": "my-alias",
+            "messages": [{"role": "user", "content": "hello"}],
+        })
+        assert resp.status_code == 200
+        assert resp.json()["model"] == "qwen2.5:7b"
+        args, _kwargs = mock_insert.call_args
+        assert args[4] == "qwen2.5:7b"
+        req = args[5]
+        assert req["messages"][0] == {"role": "system", "content": "Be brief"}
+        assert req["messages"][1] == {"role": "user", "content": "hello"}
+        assert req["temperature"] == 0.2
 
 
 class TestSubmitBatch:

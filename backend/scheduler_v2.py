@@ -1005,7 +1005,13 @@ class SimplifiedScheduler:
             if not r.is_idle:
                 continue
             if not r.has_downloaded(model):
-                continue
+                # Non-empty heartbeat inventory that omits this model → runner
+                # truly does not have the blob; picking it would force a doomed swap.
+                if r.downloaded_models:
+                    continue
+                # Empty inventory: agent has not yet reported /api/tags (restart
+                # race, transient Ollama error). _swap_model live-lists models
+                # before load — better than stalling the queue forever.
             cap = r.gpu_total_gb
             if cap > 0:
                 if need <= cap:
