@@ -291,6 +291,30 @@ function RunnerDetail({ runner, target }: { runner: Runner; target: string }) {
         )}
       </div>
 
+      {/* GPU stack versions */}
+      {isGpu && (
+        <div className="border-t border-gray-800 pt-3 space-y-1.5">
+          <p className="text-xs text-gray-500 font-medium uppercase tracking-wide">GPU Stack</p>
+          <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-gray-400">
+            {caps.gpu_vendor === 'nvidia' && (
+              <>
+                <span>NVIDIA: <span className="font-mono text-gray-200">{caps.nvidia_driver_version || 'unknown'}</span></span>
+                <span>CUDA: <span className="font-mono text-gray-200">{caps.cuda_driver_version || 'unknown'}</span></span>
+              </>
+            )}
+            {caps.gpu_vendor === 'amd' && (
+              <>
+                <span>AMD: <span className="font-mono text-gray-200">{caps.amd_driver_version || 'unknown'}</span></span>
+                <span>ROCm: <span className="font-mono text-gray-200">{caps.rocm_version || 'unknown'}</span></span>
+              </>
+            )}
+            {caps.gpu_vendor === 'unified' && (
+              <span>Unified memory host (no discrete GPU driver stack)</span>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Ollama version + upgrade — GPU runners only */}
       {isGpu && (
         <div className="border-t border-gray-800 pt-3 space-y-2">

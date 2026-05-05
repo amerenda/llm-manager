@@ -15,6 +15,7 @@ import random
 import shlex
 import shutil
 import socket
+import subprocess
 import time
 import uuid
 from pathlib import Path
@@ -62,6 +63,10 @@ logger = logging.getLogger(__name__)
 # ── GPU backend detection (NVIDIA via pynvml, AMD via sysfs) ─────────────────
 _GPU_BACKEND = "none"  # "nvidia", "amd", or "none"
 _amd_sysfs_dir = ""  # path to /sys/class/drm/cardN/device/ for AMD
+_NVIDIA_DRIVER_VERSION: str = ""
+_CUDA_DRIVER_VERSION: str = ""
+_AMD_DRIVER_VERSION: str = ""
+_ROCM_VERSION: str = ""
 
 try:
     import pynvml
@@ -89,6 +94,81 @@ if _GPU_BACKEND == "none":
 
 if _GPU_BACKEND == "none":
     logger.warning("No GPU backend detected — VRAM stats will be unavailable")
+
+
+def _cuda_driver_version_from_nvml(raw: int) -> str:
+    """Convert NVML CUDA driver int (e.g. 12040) to dotted version."""
+    if raw <= 0:
+        return ""
+    major = raw // 1000
+    minor = (raw % 1000) // 10
+    patch = raw % 10
+    if patch:
+        return f"{major}.{minor}.{patch}"
+    return f"{major}.{minor}"
+
+
+def _detect_nvidia_versions() -> tuple[str, str]:
+    """Return (nvidia_driver_version, cuda_driver_version) when available."""
+    nvidia_driver = ""
+    cuda_driver = ""
+    if _GPU_BACKEND == "nvidia":
+        try:
+            drv = pynvml.nvmlSystemGetDriverVersion()
+            if isinstance(drv, bytes):
+                drv = drv.decode(errors="replace")
+            nvidia_driver = str(drv).strip()
+        except Exception as exc:
+            logger.debug("Could not read NVIDIA driver version from NVML: %s", exc)
+        try:
+            cuda_raw = int(pynvml.nvmlSystemGetCudaDriverVersion_v2())
+            cuda_driver = _cuda_driver_version_from_nvml(cuda_raw)
+        except Exception as exc:
+            logger.debug("Could not read CUDA driver version from NVML: %s", exc)
+    return nvidia_driver, cuda_driver
+
+
+def _detect_amd_versions() -> tuple[str, str]:
+    """Return (amdgpu_driver_version, rocm_version) when available."""
+    amd_driver = ""
+    rocm_version = ""
+    for path in ("/sys/module/amdgpu/version",):
+        try:
+            if os.path.isfile(path):
+                with open(path) as f:
+                    amd_driver = f.read().strip()
+                if amd_driver:
+                    break
+        except Exception:
+            pass
+    for path in (
+        "/opt/rocm/.info/version",
+        "/opt/rocm/.info/version-dev",
+    ):
+        try:
+            if os.path.isfile(path):
+                with open(path) as f:
+                    rocm_version = f.read().strip()
+                if rocm_version:
+                    break
+        except Exception:
+            pass
+    if not rocm_version:
+        rocminfo = shutil.which("rocminfo")
+        if rocminfo:
+            try:
+                out = subprocess.check_output([rocminfo], text=True, stderr=subprocess.STDOUT, timeout=5)
+                for line in out.splitlines():
+                    if "ROCm version" in line:
+                        rocm_version = line.split(":", 1)[-1].strip()
+                        break
+            except Exception:
+                pass
+    return amd_driver, rocm_version
+
+
+_NVIDIA_DRIVER_VERSION, _CUDA_DRIVER_VERSION = _detect_nvidia_versions()
+_AMD_DRIVER_VERSION, _ROCM_VERSION = _detect_amd_versions()
 
 OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 # Ollama model storage — used for disk space reporting
@@ -502,6 +582,10 @@ async def _build_capabilities() -> dict:
     comfyui_ok = await _comfyui_ok()
     caps = {
         "gpu_vendor": gpu.get("gpu_vendor", "none"),
+        "nvidia_driver_version": _NVIDIA_DRIVER_VERSION,
+        "cuda_driver_version": _CUDA_DRIVER_VERSION,
+        "amd_driver_version": _AMD_DRIVER_VERSION,
+        "rocm_version": _ROCM_VERSION,
         "gpu_vram_total_bytes": gpu["vram_total_bytes"],
         "gpu_vram_used_bytes": gpu["vram_used_bytes"],
         "gpu_vram_free_bytes": max(0, gpu["vram_total_bytes"] - gpu["vram_used_bytes"]),
@@ -950,6 +1034,10 @@ async def status():
     return {
         "node": NODE,
         "gpu_vendor": gpu.get("gpu_vendor", "none"),
+        "nvidia_driver_version": _NVIDIA_DRIVER_VERSION,
+        "cuda_driver_version": _CUDA_DRIVER_VERSION,
+        "amd_driver_version": _AMD_DRIVER_VERSION,
+        "rocm_version": _ROCM_VERSION,
         "gpu_vram_used_bytes": gpu["vram_used_bytes"],
         "gpu_vram_total_bytes": gpu["vram_total_bytes"],
         "gpu_vram_pct": gpu["vram_pct"],

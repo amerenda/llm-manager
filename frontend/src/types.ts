@@ -70,6 +70,10 @@ export interface Runner {
     disk_free_bytes?: number
     loaded_models?: string[]
     gpu_vendor?: string
+    nvidia_driver_version?: string
+    cuda_driver_version?: string
+    amd_driver_version?: string
+    rocm_version?: string
     comfyui_running?: boolean
     agent_version?: string
     auto_update?: boolean
