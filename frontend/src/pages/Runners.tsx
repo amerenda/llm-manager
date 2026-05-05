@@ -683,6 +683,12 @@ function OllamaSettingsPanel({ runner }: { runner: Runner }) {
           )}
           {data && (
             <>
+              {data.models_dir && (
+                <div className="flex items-center gap-2 text-xs text-gray-400 bg-gray-900/50 rounded px-2 py-1.5">
+                  <span className="text-gray-500 font-mono uppercase text-[10px] tracking-wide shrink-0">Models path</span>
+                  <span className="font-mono text-gray-200 truncate">{data.models_dir}</span>
+                </div>
+              )}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
                 {keys.map(k => {
                   const h = OLLAMA_FIELD_HELP[k] ?? { label: k, placeholder: '', hint: '' }

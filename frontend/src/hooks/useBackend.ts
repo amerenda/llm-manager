@@ -405,6 +405,7 @@ export interface OllamaSettingsResponse {
   settings: Record<string, string>
   allowlist: Record<string, 'int' | 'bool' | 'enum' | 'duration' | 'str'>
   env_file: string
+  models_dir?: string
 }
 
 export interface OllamaVersionResponse {

@@ -1983,6 +1983,7 @@ async def get_ollama_settings():
         "settings": settings,
         "allowlist": {k: v[0] for k, v in _OLLAMA_SETTINGS_ALLOWLIST.items()},
         "env_file": path,
+        "models_dir": OLLAMA_MODELS_DIR,
     }
 
 
