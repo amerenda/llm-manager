@@ -678,8 +678,9 @@ function OllamaSettingsPanel({ runner }: { runner: Runner }) {
     if (data?.settings) setDraft(data.settings)
   }, [data])
 
-  const dirty = data ? JSON.stringify(draft) !== JSON.stringify(data.settings) : false
-  const keys = data ? Object.keys(data.allowlist) : []
+  const settings = data?.settings ?? {}
+  const dirty = data ? JSON.stringify(draft) !== JSON.stringify(settings) : false
+  const keys = Object.keys(data?.allowlist ?? {})
   const runtimeKeys = keys.filter(k => !k.endsWith('_HOST_PATH'))
   const advancedKeys = keys.filter(k => k.endsWith('_HOST_PATH'))
 
@@ -734,7 +735,7 @@ function OllamaSettingsPanel({ runner }: { runner: Runner }) {
           )}
           {data && (
             <>
-              {data.models_dir && (
+                {data.models_dir && (
                 <div className="flex items-center gap-2 text-xs text-gray-400 bg-gray-900/50 rounded px-2 py-1.5">
                   <span className="text-gray-500 font-mono uppercase text-[10px] tracking-wide shrink-0">Models path</span>
                   <span className="font-mono text-gray-200 truncate">{data.models_dir}</span>
@@ -755,7 +756,7 @@ function OllamaSettingsPanel({ runner }: { runner: Runner }) {
                 </div>
               )}
               <p className="text-[10px] text-gray-600 font-mono">
-                defaults: {data.env_files.defaults} | ui overrides: {data.env_files.ui_overrides}
+                defaults: {data.env_files?.defaults ?? data.env_file ?? '—'} | ui overrides: {data.env_files?.ui_overrides ?? '—'}
               </p>
 
               <div className="flex items-center gap-2 pt-1">
@@ -780,7 +781,7 @@ function OllamaSettingsPanel({ runner }: { runner: Runner }) {
                   Apply (restart Ollama)
                 </button>
                 <button
-                  onClick={() => data.settings && setDraft(data.settings)}
+                  onClick={() => setDraft(settings)}
                   disabled={!dirty || update.isPending}
                   className="flex items-center gap-1 text-xs text-gray-400 hover:text-gray-200 disabled:opacity-40 px-2 py-1.5"
                 >

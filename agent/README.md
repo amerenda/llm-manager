@@ -90,6 +90,7 @@ The backend pod injects this via the `agent-psk` ExternalSecret. To rotate:
 | `COMPOSE_PROFILE` | `nvidia-full` / `amd-full` | Active compose profile on Linux; Mac Mini stack often uses `""` |
 | `OLLAMA_MODELS_PATH` | `/opt/ollama/models` | Models directory (bind-mounted into Ollama) |
 | `MODEL_STORAGE_PATH` | same as above | Agent's view of the same path |
+| `AGENT_DISK_STAT_PATH` | *(optional)* | Override path used for disk stats; useful on Mac/bridge stacks to track the Ollama data mount directly |
 | `AGENT_IMAGE_TAG` | `latest` | Pinned agent image tag (rewritten on self-update) |
 | `OLLAMA_IMAGE_TAG` | `0.21.0` | NVIDIA Ollama tag |
 | `OLLAMA_AMD_IMAGE_TAG` | `0.21.0-rocm` | AMD Ollama tag |

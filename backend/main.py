@@ -2716,7 +2716,30 @@ async def get_runner_ollama_settings(runner_id: int):
     """Read a runner's Ollama tunables (contents of ollama.env)."""
     _inc_request(f"/api/llm/runners/{runner_id}/ollama-settings", "GET", 200)
     client = await _get_runner_client(app.state.db, runner_id)
-    return await client.get_ollama_settings()
+    data = await client.get_ollama_settings()
+    if not isinstance(data, dict):
+        return {
+            "settings": {},
+            "sources": {},
+            "allowlist": {},
+            "targets": {},
+            "env_files": {"defaults": "—", "ui_overrides": "—"},
+        }
+    settings = data.get("settings") if isinstance(data.get("settings"), dict) else {}
+    sources = data.get("sources") if isinstance(data.get("sources"), dict) else {}
+    allowlist = data.get("allowlist") if isinstance(data.get("allowlist"), dict) else {}
+    targets = data.get("targets") if isinstance(data.get("targets"), dict) else {}
+    env_files = data.get("env_files") if isinstance(data.get("env_files"), dict) else {}
+    defaults = str(env_files.get("defaults") or data.get("env_file") or "—")
+    ui_overrides = str(env_files.get("ui_overrides") or "—")
+    return {
+        **data,
+        "settings": settings,
+        "sources": sources,
+        "allowlist": allowlist,
+        "targets": targets,
+        "env_files": {"defaults": defaults, "ui_overrides": ui_overrides},
+    }
 
 
 class OllamaSettingsUpdateRequest(BaseModel):

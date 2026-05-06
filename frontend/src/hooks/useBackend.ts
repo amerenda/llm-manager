@@ -402,12 +402,13 @@ export function useDeleteStaleRunners() {
 // ── Ollama runtime settings (per-runner) ──────────────────────────────────
 
 export interface OllamaSettingsResponse {
-  settings: Record<string, string>
-  sources: Record<string, string>
-  allowlist: Record<string, 'int' | 'bool' | 'enum' | 'duration' | 'str' | 'path'>
+  settings?: Record<string, string>
+  sources?: Record<string, string>
+  allowlist?: Record<string, 'int' | 'bool' | 'enum' | 'duration' | 'str' | 'path'>
+  env_file?: string
   models_dir?: string
-  targets: Record<string, 'ui' | 'default'>
-  env_files: {
+  targets?: Record<string, 'ui' | 'default'>
+  env_files?: {
     defaults: string
     ui_overrides: string
   }

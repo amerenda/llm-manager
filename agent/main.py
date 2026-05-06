@@ -167,6 +167,38 @@ def _detect_amd_versions() -> tuple[str, str]:
     return amd_driver, rocm_version
 
 
+def _refresh_gpu_driver_versions() -> None:
+    """Refresh cached GPU driver/runtime version strings at runtime."""
+    global _NVIDIA_DRIVER_VERSION, _CUDA_DRIVER_VERSION, _AMD_DRIVER_VERSION, _ROCM_VERSION
+    old = (_NVIDIA_DRIVER_VERSION, _CUDA_DRIVER_VERSION, _AMD_DRIVER_VERSION, _ROCM_VERSION)
+    if _GPU_BACKEND == "nvidia":
+        _NVIDIA_DRIVER_VERSION, _CUDA_DRIVER_VERSION = _detect_nvidia_versions()
+        if not _NVIDIA_DRIVER_VERSION:
+            nvidia_smi = shutil.which("nvidia-smi")
+            if nvidia_smi:
+                try:
+                    out = subprocess.check_output(
+                        [nvidia_smi, "--query-gpu=driver_version", "--format=csv,noheader"],
+                        text=True,
+                        stderr=subprocess.STDOUT,
+                        timeout=5,
+                    )
+                    _NVIDIA_DRIVER_VERSION = (out.splitlines()[0].strip() if out.splitlines() else "")
+                except Exception:
+                    pass
+    elif _GPU_BACKEND == "amd":
+        _AMD_DRIVER_VERSION, _ROCM_VERSION = _detect_amd_versions()
+    new = (_NVIDIA_DRIVER_VERSION, _CUDA_DRIVER_VERSION, _AMD_DRIVER_VERSION, _ROCM_VERSION)
+    if old != new:
+        logger.info(
+            "GPU driver versions refreshed: nvidia=%s cuda=%s amd=%s rocm=%s",
+            _NVIDIA_DRIVER_VERSION or "unknown",
+            _CUDA_DRIVER_VERSION or "unknown",
+            _AMD_DRIVER_VERSION or "unknown",
+            _ROCM_VERSION or "unknown",
+        )
+
+
 _NVIDIA_DRIVER_VERSION, _CUDA_DRIVER_VERSION = _detect_nvidia_versions()
 _AMD_DRIVER_VERSION, _ROCM_VERSION = _detect_amd_versions()
 
@@ -174,6 +206,7 @@ OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 # Ollama model storage — used for disk space reporting
 # MODEL_STORAGE_PATH takes priority, then OLLAMA_MODELS, then default
 OLLAMA_MODELS_DIR = os.environ.get("MODEL_STORAGE_PATH") or os.environ.get("OLLAMA_MODELS", os.path.expanduser("~/.ollama/models"))
+AGENT_DISK_STAT_PATH = (os.environ.get("AGENT_DISK_STAT_PATH") or "").strip()
 COMFYUI_URL = os.environ.get("COMFYUI_URL", "http://localhost:8188")
 COMFYUI_OUTPUT_DIR = os.environ.get("COMFYUI_OUTPUT_DIR", "/outputs")
 COMFYUI_IMAGE = os.environ.get("COMFYUI_IMAGE", "murderbot-image-comfyui:latest")
@@ -574,6 +607,7 @@ async def lifespan(app: FastAPI):
 
 
 async def _build_capabilities() -> dict:
+    _refresh_gpu_driver_versions()
     loaded = await _ollama_loaded_models()
     ollama_loaded_bytes = sum(int(m.get("size_bytes", 0) or 0) for m in loaded)
     gpu = _gpu_stats(ollama_loaded_bytes=ollama_loaded_bytes)
@@ -876,11 +910,12 @@ def _sys_stats() -> dict:
 
 def _disk_stats() -> dict:
     """Disk usage for the Ollama model storage path."""
+    logical_path = AGENT_DISK_STAT_PATH or OLLAMA_MODELS_DIR
     # The container mounts the host root at /hostfs.  MODEL_STORAGE_PATH is a
     # *host* path (e.g. /mnt/storage/models) which won't exist inside the
     # container.  Prefer the /hostfs-prefixed version for the actual statvfs
     # call so we report the correct mount point instead of falling back to /.
-    path = OLLAMA_MODELS_DIR
+    path = logical_path
     hostfs_path = f"/hostfs{path}"
     if not os.path.exists(path) and os.path.exists(hostfs_path):
         path = hostfs_path
@@ -898,14 +933,14 @@ def _disk_stats() -> dict:
             "disk_total_gb": round(usage.total / 1e9, 2),
             "disk_used_gb": round(usage.used / 1e9, 2),
             "disk_free_gb": round(usage.free / 1e9, 2),
-            "disk_path": OLLAMA_MODELS_DIR,
+            "disk_path": logical_path,
         }
     except Exception as exc:
-        logger.warning("Disk stats failed for %s: %s", OLLAMA_MODELS_DIR, exc)
+        logger.warning("Disk stats failed for %s: %s", logical_path, exc)
         return {
             "disk_total_bytes": 0, "disk_used_bytes": 0, "disk_free_bytes": 0,
             "disk_total_gb": 0, "disk_used_gb": 0, "disk_free_gb": 0,
-            "disk_path": OLLAMA_MODELS_DIR,
+            "disk_path": logical_path,
         }
 
 
@@ -1026,6 +1061,7 @@ async def health():
 
 @app.get("/v1/status")
 async def status():
+    _refresh_gpu_driver_versions()
     t0 = time.time()
     loaded = await _ollama_loaded_models()
     ollama_loaded_bytes = sum(int(m.get("size_bytes", 0) or 0) for m in loaded)
