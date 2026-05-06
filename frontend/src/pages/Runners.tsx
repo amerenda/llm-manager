@@ -65,6 +65,17 @@ function RunnerDetail({ runner, target }: { runner: Runner; target: string }) {
     target && caps.agent_version && !agentVersionsEquivalent(caps.agent_version, target),
   )
 
+  const configDiagIssues: string[] = (() => {
+    const d = caps.config_diagnostics
+    if (!d) return []
+    const items: string[] = []
+    if (!d.agent_address_configured) items.push('AGENT_ADDRESS missing')
+    if (!d.backend_url_configured) items.push('BACKEND_URL missing')
+    if (!d.compose_dir_configured) items.push('COMPOSE_DIR missing')
+    if (!d.ollama_defaults_present) items.push('ollama.env missing')
+    return items
+  })()
+
   return (
     <div className="border-t border-gray-800 pt-3 mt-3 space-y-4">
       {/* Resource bars from live status */}
@@ -314,25 +325,13 @@ function RunnerDetail({ runner, target }: { runner: Runner; target: string }) {
           </div>
         </div>
       )}
-      {caps.config_diagnostics && (
-        <div className="border-t border-gray-800 pt-3 space-y-1.5">
-          <p className="text-xs text-gray-500 font-medium uppercase tracking-wide">Runner Config Diagnostics</p>
-          <div className="flex flex-wrap items-center gap-2 text-[11px]">
-            <span className={caps.config_diagnostics.agent_address_configured ? 'text-green-400' : 'text-red-400'}>
-              AGENT_ADDRESS {caps.config_diagnostics.agent_address_configured ? 'ok' : 'missing'}
-            </span>
-            <span className={caps.config_diagnostics.backend_url_configured ? 'text-green-400' : 'text-red-400'}>
-              BACKEND_URL {caps.config_diagnostics.backend_url_configured ? 'ok' : 'missing'}
-            </span>
-            <span className={caps.config_diagnostics.compose_dir_configured ? 'text-green-400' : 'text-red-400'}>
-              COMPOSE_DIR {caps.config_diagnostics.compose_dir_configured ? 'ok' : 'missing'}
-            </span>
-            <span className={caps.config_diagnostics.ollama_defaults_present ? 'text-green-400' : 'text-amber-400'}>
-              ollama.env {caps.config_diagnostics.ollama_defaults_present ? 'present' : 'missing'}
-            </span>
-            <span className={caps.config_diagnostics.ollama_ui_overrides_present ? 'text-green-400' : 'text-gray-500'}>
-              ollama.ui.env {caps.config_diagnostics.ollama_ui_overrides_present ? 'present' : 'not yet created'}
-            </span>
+      {configDiagIssues.length > 0 && (
+        <div className="border-t border-amber-900/40 bg-amber-950/15 pt-3 px-2 pb-2 rounded-lg space-y-1.5">
+          <p className="text-xs text-amber-400 font-medium uppercase tracking-wide">Runner Config Diagnostics</p>
+          <div className="flex flex-wrap items-center gap-2 text-[11px] text-red-400">
+            {configDiagIssues.map((msg) => (
+              <span key={msg} className="font-mono">{msg}</span>
+            ))}
           </div>
         </div>
       )}
