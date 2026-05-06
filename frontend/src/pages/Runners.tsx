@@ -76,6 +76,22 @@ function RunnerDetail({ runner, target }: { runner: Runner; target: string }) {
     return items
   })()
 
+  // Disk must match GET /api/llm/status?runner_id= (agent /v1/status) — same numbers the
+  // backend uses for pull guards; heartbeat caps can lag or have matched a bad path historically.
+  const diskFromLiveStatus =
+    s && !s.error && s.disk_total_gb != null && s.disk_total_gb > 0
+      ? {
+          totalBytes: s.disk_total_gb * 1e9,
+          usedBytes: (s.disk_used_gb ?? 0) * 1e9,
+          freeBytes: (s.disk_free_gb ?? 0) * 1e9,
+          path: s.disk_path,
+        }
+      : null
+  const diskTotalBytes = diskFromLiveStatus?.totalBytes ?? caps.disk_total_bytes
+  const diskUsedBytes = diskFromLiveStatus?.usedBytes ?? caps.disk_used_bytes ?? 0
+  const diskFreeBytes = diskFromLiveStatus?.freeBytes ?? caps.disk_free_bytes ?? 0
+  const diskPathHint = diskFromLiveStatus?.path ?? caps.disk_path
+
   return (
     <div className="border-t border-gray-800 pt-3 mt-3 space-y-4">
       {/* Resource bars from live status */}
@@ -102,15 +118,15 @@ function RunnerDetail({ runner, target }: { runner: Runner; target: string }) {
           </div>
         ) : null}
 
-        {/* Disk */}
-        {caps.disk_total_bytes ? (
-          <div className="space-y-1">
+        {/* Disk — live /v1/status first (same as backend); else heartbeat caps */}
+        {diskTotalBytes ? (
+          <div className="space-y-1" title={diskPathHint ? `Stat path: ${diskPathHint}` : undefined}>
             <div className="flex justify-between text-xs text-gray-500">
               <span className="flex items-center gap-1"><HardDrive className="w-3 h-3" />Disk</span>
-              <span>{fmtBytes(caps.disk_free_bytes ?? 0)} free / {fmtBytes(caps.disk_total_bytes)}</span>
+              <span>{fmtBytes(diskFreeBytes)} free / {fmtBytes(diskTotalBytes)}</span>
             </div>
             <ProgressBar
-              pct={Math.round(((caps.disk_used_bytes ?? 0) / caps.disk_total_bytes) * 100)}
+              pct={Math.round((diskUsedBytes / diskTotalBytes) * 100)}
               thresholds={{ red: 95, yellow: 85 }}
             />
           </div>

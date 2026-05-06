@@ -732,6 +732,7 @@ async def _build_capabilities() -> dict:
         "disk_total_bytes": disk["disk_total_bytes"],
         "disk_used_bytes": disk["disk_used_bytes"],
         "disk_free_bytes": disk["disk_free_bytes"],
+        "disk_path": disk.get("disk_path"),
         "comfyui_running": comfyui_ok,
         "loaded_models": [m["name"] for m in loaded],
         # Per-runner authoritative "what's on disk" set, with digests so the
@@ -1042,19 +1043,9 @@ def _disk_stats() -> dict:
     try:
         usage = shutil.disk_usage(path)
         report_path = logical_path
-        # Docker Desktop / Linux VM bind mounts often report a tiny synthetic size (~4 GiB)
-        # for the host path. On unified-memory (Mac) agents, prefer the VM root fs when larger.
-        if _unified_vram_enabled():
-            min_plausible = int(os.environ.get("AGENT_DISK_MIN_PLAUSIBLE_BYTES", str(12 * 1024 * 1024 * 1024)))
-            if usage.total < min_plausible:
-                for fb in ("/", "/tmp"):
-                    try:
-                        u2 = shutil.disk_usage(fb)
-                        if u2.total > usage.total:
-                            usage = u2
-                            report_path = f"{logical_path} (via {fb})"
-                    except OSError:
-                        pass
+        # Do not substitute ``/`` or the Docker Desktop Linux VM root here: on Mac, that
+        # filesystem is huge and unrelated to the APFS volume where Ollama bind-mounts
+        # actually write — it made the UI show ~50 GiB free while pulls failed with ENOSPC.
         return {
             "disk_total_bytes": usage.total,
             "disk_used_bytes": usage.used,

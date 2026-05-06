@@ -68,6 +68,7 @@ export interface Runner {
     disk_total_bytes?: number
     disk_used_bytes?: number
     disk_free_bytes?: number
+    disk_path?: string
     loaded_models?: string[]
     gpu_vendor?: string
     nvidia_driver_version?: string
