@@ -177,6 +177,47 @@ def _detect_amd_versions() -> tuple[str, str]:
                     break
         except Exception:
             pass
+    # DRM bound-driver sysfs (works when /sys/module/amdgpu isn't mounted in the container)
+    if not amd_driver and _amd_sysfs_dir:
+        mod_ver = os.path.join(_amd_sysfs_dir, "driver", "module", "version")
+        try:
+            if os.path.isfile(mod_ver):
+                with open(mod_ver) as f:
+                    amd_driver = f.read().strip()
+        except Exception:
+            pass
+    if not amd_driver:
+        import glob as _glob
+
+        for mod_ver in sorted(_glob.glob("/sys/class/drm/card[0-9]*/device/driver/module/version")):
+            try:
+                if os.path.isfile(mod_ver):
+                    with open(mod_ver) as f:
+                        amd_driver = f.read().strip()
+                    if amd_driver:
+                        break
+            except Exception:
+                pass
+    if not amd_driver:
+        rsmi = shutil.which("rocm-smi")
+        if rsmi:
+            try:
+                out = subprocess.check_output(
+                    [rsmi, "--showdriverversion"],
+                    text=True,
+                    stderr=subprocess.STDOUT,
+                    timeout=8,
+                )
+                # e.g. "Driver version: 6.8.9" or amdgpu component lines
+                m = re.search(
+                    r"(?:Driver version|driver version|AMDGPU driver)\s*:\s*([^\s\n]+)",
+                    out,
+                    re.I,
+                )
+                if m:
+                    amd_driver = m.group(1).strip()
+            except Exception:
+                pass
     for path in (
         "/opt/rocm/.info/version",
         "/opt/rocm/.info/version-dev",
