@@ -229,11 +229,12 @@ def _detect_amd_versions() -> tuple[str, str]:
                     amd_driver = m.group(1).strip()
             except Exception:
                 pass
+    # Prefer host /hostfs first: slim images may ship a stub /opt/rocm/.info/version (wrong).
     for path in (
-        "/opt/rocm/.info/version",
-        "/opt/rocm/.info/version-dev",
         "/hostfs/opt/rocm/.info/version",
         "/hostfs/opt/rocm/.info/version-dev",
+        "/opt/rocm/.info/version",
+        "/opt/rocm/.info/version-dev",
     ):
         try:
             if os.path.isfile(path):
@@ -258,10 +259,10 @@ def _detect_amd_versions() -> tuple[str, str]:
         rocm_version = (os.environ.get("ROCM_VERSION") or os.environ.get("ROCM_LIB_VERSION") or "").strip()
     if not rocm_version:
         for path in (
-            "/opt/rocm/include/rocm_version.h",
-            "/opt/rocm/lib/include/rocm_version.h",
             "/hostfs/opt/rocm/include/rocm_version.h",
             "/hostfs/opt/rocm/lib/include/rocm_version.h",
+            "/opt/rocm/include/rocm_version.h",
+            "/opt/rocm/lib/include/rocm_version.h",
         ):
             try:
                 with open(path) as f:
@@ -277,6 +278,17 @@ def _detect_amd_versions() -> tuple[str, str]:
                     break
             except Exception:
                 pass
+    # Arch and other distros often omit /sys/module/amdgpu/version; in-kernel amdgpu matches kernel release.
+    if not amd_driver:
+        try:
+            hr = "/hostfs/proc/sys/kernel/osrelease"
+            if os.path.isfile(hr):
+                with open(hr) as f:
+                    kr = f.read().strip()
+                if kr:
+                    amd_driver = f"linux-{kr}"
+        except Exception:
+            pass
     return amd_driver, rocm_version
 
 
