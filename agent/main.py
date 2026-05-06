@@ -168,7 +168,11 @@ def _detect_amd_versions() -> tuple[str, str]:
     """Return (amdgpu_driver_version, rocm_version) when available."""
     amd_driver = ""
     rocm_version = ""
-    for path in ("/sys/module/amdgpu/version",):
+    # Komodo stacks mount host root at /hostfs:ro — ROCm lives on the host, not in the slim agent image.
+    for path in (
+        "/sys/module/amdgpu/version",
+        "/hostfs/sys/module/amdgpu/version",
+    ):
         try:
             if os.path.isfile(path):
                 with open(path) as f:
@@ -189,15 +193,22 @@ def _detect_amd_versions() -> tuple[str, str]:
     if not amd_driver:
         import glob as _glob
 
-        for mod_ver in sorted(_glob.glob("/sys/class/drm/card[0-9]*/device/driver/module/version")):
-            try:
-                if os.path.isfile(mod_ver):
-                    with open(mod_ver) as f:
-                        amd_driver = f.read().strip()
-                    if amd_driver:
-                        break
-            except Exception:
-                pass
+        _mod_globs = (
+            "/sys/class/drm/card[0-9]*/device/driver/module/version",
+            "/hostfs/sys/class/drm/card[0-9]*/device/driver/module/version",
+        )
+        for pattern in _mod_globs:
+            for mod_ver in sorted(_glob.glob(pattern)):
+                try:
+                    if os.path.isfile(mod_ver):
+                        with open(mod_ver) as f:
+                            amd_driver = f.read().strip()
+                        if amd_driver:
+                            break
+                except Exception:
+                    pass
+            if amd_driver:
+                break
     if not amd_driver:
         rsmi = shutil.which("rocm-smi")
         if rsmi:
@@ -221,6 +232,8 @@ def _detect_amd_versions() -> tuple[str, str]:
     for path in (
         "/opt/rocm/.info/version",
         "/opt/rocm/.info/version-dev",
+        "/hostfs/opt/rocm/.info/version",
+        "/hostfs/opt/rocm/.info/version-dev",
     ):
         try:
             if os.path.isfile(path):
@@ -247,6 +260,8 @@ def _detect_amd_versions() -> tuple[str, str]:
         for path in (
             "/opt/rocm/include/rocm_version.h",
             "/opt/rocm/lib/include/rocm_version.h",
+            "/hostfs/opt/rocm/include/rocm_version.h",
+            "/hostfs/opt/rocm/lib/include/rocm_version.h",
         ):
             try:
                 with open(path) as f:
