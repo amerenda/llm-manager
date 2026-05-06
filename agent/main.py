@@ -1001,14 +1001,25 @@ def _gpu_stats(*, ollama_loaded_bytes: int = 0) -> dict:
 
 
 def _sys_stats() -> dict:
+    """Host-ish memory stats. On Apple-Silicon unified agents in Docker, ``vm.total`` is the
+    Linux VM slice (~8 GiB), not physical Mac RAM — match ``_gpu_stats`` override so
+    ``/v1/status`` mem_* aligns with gpu_vram_* and the Runners UI (collapsed vs expanded).
+    """
     cpu = psutil.cpu_percent(interval=0.1)
     vm = psutil.virtual_memory()
+    used = int(vm.used)
+    total = int(vm.total)
+    if _unified_vram_enabled():
+        override = _unified_vram_total_override_bytes()
+        if override is not None:
+            total = override
+        used = min(max(0, used), total)
     return {
         "cpu_pct": cpu,
-        "mem_used_bytes": vm.used,
-        "mem_total_bytes": vm.total,
-        "mem_used_gb": round(vm.used / 1e9, 2),
-        "mem_total_gb": round(vm.total / 1e9, 2),
+        "mem_used_bytes": used,
+        "mem_total_bytes": total,
+        "mem_used_gb": round(used / 1e9, 2),
+        "mem_total_gb": round(total / 1e9, 2),
     }
 
 
