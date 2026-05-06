@@ -316,6 +316,25 @@ COMFYUI_OUTPUT_DIR = os.environ.get("COMFYUI_OUTPUT_DIR", "/outputs")
 COMFYUI_IMAGE = os.environ.get("COMFYUI_IMAGE", "murderbot-image-comfyui:latest")
 COMFYUI_CONTAINER = os.environ.get("COMFYUI_CONTAINER", "comfyui")
 OLLAMA_CONTAINER = os.environ.get("OLLAMA_CONTAINER", "")
+
+
+def _parse_float_env(name: str, default: float) -> float:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def _ollama_chat_http_timeout() -> httpx.Timeout:
+    """Connect bounded; long read for slow TTFT (e.g. ROCm) — must stay ≥ manager→agent read timeout."""
+    read = _parse_float_env("OLLAMA_CHAT_READ_TIMEOUT", 600.0)
+    connect = _parse_float_env("OLLAMA_CHAT_CONNECT_TIMEOUT", 30.0)
+    return httpx.Timeout(connect=connect, read=read, write=connect, pool=45.0)
+
+
 # Docker default hostname is the container id (short hex). Prefer a stable host name.
 NODE = (
     os.environ.get("RUNNER_HOSTNAME")
@@ -1333,12 +1352,13 @@ async def chat_completions(request: Request):
         stream_endpoint = f"{OLLAMA_URL}/v1/chat/completions" if use_openai_compat else f"{OLLAMA_URL}/api/chat"
         async def _stream_gen() -> AsyncGenerator[bytes, None]:
             try:
-                async with httpx.AsyncClient(timeout=300) as c:
+                _t = _ollama_chat_http_timeout()
+                async with httpx.AsyncClient(timeout=_t) as c:
                     async with c.stream(
                         "POST",
                         stream_endpoint,
                         json=ollama_body,
-                        timeout=300,
+                        timeout=_t,
                     ) as resp:
                         if resp.status_code != 200:
                             err = await resp.aread()
@@ -1381,7 +1401,7 @@ async def chat_completions(request: Request):
     else:
         endpoint = f"{OLLAMA_URL}/v1/chat/completions" if use_openai_compat else f"{OLLAMA_URL}/api/chat"
         try:
-            async with httpx.AsyncClient(timeout=300) as c:
+            async with httpx.AsyncClient(timeout=_ollama_chat_http_timeout()) as c:
                 r = await c.post(endpoint, json=ollama_body)
                 if r.status_code != 200:
                     raise HTTPException(status_code=r.status_code, detail=r.text)
