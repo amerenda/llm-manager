@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import re
+import secrets
 import socket
 import time
 import uuid
@@ -79,6 +80,8 @@ LLM_MANAGER_PROCESS = (
     os.environ.get("LLM_MANAGER_PROCESS", "combined").strip().lower() or "combined"
 )
 DISABLE_AUTH = os.environ.get("DISABLE_AUTH", "").lower() in ("true", "1", "yes")
+# Bearer token for CI/automation: PUT /api/runners/target-version only. If unset, only GitHub session auth works.
+LLM_MANAGER_AUTOMATION_TOKEN = (os.environ.get("LLM_MANAGER_AUTOMATION_TOKEN") or "").strip()
 ENVIRONMENT = os.environ.get("ENVIRONMENT", "production")  # "production" or "uat"
 UAT_TEST_RUNNER = os.environ.get("UAT_TEST_RUNNER", "")  # runner_id for UAT connectivity tests
 UAT_TEST_MODEL = os.environ.get("UAT_TEST_MODEL", "")  # model name for UAT connectivity tests
@@ -795,6 +798,18 @@ async def admin_auth_middleware(request: Request, call_next):
             pass  # fall through to admin auth check below
         else:
             return await call_next(request)
+
+    # CI: bump global agent image target (GitHub Actions notify-agents job)
+    if (
+        path == "/api/runners/target-version"
+        and method == "PUT"
+        and LLM_MANAGER_AUTOMATION_TOKEN
+    ):
+        auth_header = request.headers.get("Authorization", "")
+        if auth_header.startswith("Bearer "):
+            bearer = auth_header[7:].strip()
+            if bearer and secrets.compare_digest(bearer, LLM_MANAGER_AUTOMATION_TOKEN):
+                return await call_next(request)
 
     # Skip auth for non-API routes (docs, openapi.json, etc.)
     if not path.startswith("/api/"):

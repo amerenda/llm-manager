@@ -12,6 +12,7 @@ import logging
 import os
 import plistlib
 import random
+import re
 import shlex
 import shutil
 import socket
@@ -108,6 +109,20 @@ def _cuda_driver_version_from_nvml(raw: int) -> str:
     return f"{major}.{minor}"
 
 
+def _nvidia_driver_version_from_proc() -> str:
+    """Kernel driver version from /proc (works in slim images without nvidia-smi)."""
+    try:
+        with open("/proc/driver/nvidia/version", "r") as f:
+            text = f.read()
+        # e.g. "NVRM version: NVIDIA UNIX x86_64 Kernel Module  535.183.01  Tue ..."
+        m = re.search(r"Kernel Module\s+(\d+\.\d+(?:\.\d+)?)", text)
+        if m:
+            return m.group(1).strip()
+    except Exception:
+        pass
+    return ""
+
+
 def _detect_nvidia_versions() -> tuple[str, str]:
     """Return (nvidia_driver_version, cuda_driver_version) when available."""
     nvidia_driver = ""
@@ -120,6 +135,8 @@ def _detect_nvidia_versions() -> tuple[str, str]:
             nvidia_driver = str(drv).strip()
         except Exception as exc:
             logger.debug("Could not read NVIDIA driver version from NVML: %s", exc)
+        if not nvidia_driver:
+            nvidia_driver = _nvidia_driver_version_from_proc()
         try:
             cuda_raw = int(pynvml.nvmlSystemGetCudaDriverVersion_v2())
             cuda_driver = _cuda_driver_version_from_nvml(cuda_raw)
@@ -162,6 +179,27 @@ def _detect_amd_versions() -> tuple[str, str]:
                     if "ROCm version" in line:
                         rocm_version = line.split(":", 1)[-1].strip()
                         break
+            except Exception:
+                pass
+    if not rocm_version:
+        rocm_version = (os.environ.get("ROCM_VERSION") or os.environ.get("ROCM_LIB_VERSION") or "").strip()
+    if not rocm_version:
+        for path in (
+            "/opt/rocm/include/rocm_version.h",
+            "/opt/rocm/lib/include/rocm_version.h",
+        ):
+            try:
+                with open(path) as f:
+                    text = f.read()
+                maj_m = re.search(r"ROCM_VERSION_MAJOR\s+(\d+)", text)
+                min_m = re.search(r"ROCM_VERSION_MINOR\s+(\d+)", text)
+                pat_m = re.search(r"ROCM_VERSION_PATCH\s+(\d+)", text)
+                if maj_m and min_m:
+                    parts = [maj_m.group(1), min_m.group(1)]
+                    if pat_m:
+                        parts.append(pat_m.group(1))
+                    rocm_version = ".".join(parts)
+                    break
             except Exception:
                 pass
     return amd_driver, rocm_version
@@ -1720,6 +1758,9 @@ _OLLAMA_SETTINGS_ALLOWLIST = {
     "OLLAMA_MODELS_HOST_PATH":   ("path", None, "ui"),
 }
 
+# Host paths that only take effect after docker compose / stack redeploy (volume binds).
+_OLLAMA_HOST_BIND_KEYS = frozenset({"OLLAMA_DATA_HOST_PATH", "OLLAMA_MODELS_HOST_PATH"})
+
 
 def _merge_homebrew_ollama_plist(
     plist_path: str,
@@ -2055,11 +2096,24 @@ async def get_ollama_settings():
                         sources[k] = "native_plist"
         except Exception as e:
             logger.warning("Could not read OLLAMA_BREW_SERVICE_PLIST: %s", e)
+    disk_stat = (AGENT_DISK_STAT_PATH or "").strip()
+    storage_paths = {
+        "ollama_models_dir_container": OLLAMA_MODELS_DIR,
+        "ollama_data_host_path_effective": (settings.get("OLLAMA_DATA_HOST_PATH") or "").strip(),
+        "ollama_models_host_path_effective": (settings.get("OLLAMA_MODELS_HOST_PATH") or "").strip(),
+        "agent_disk_stat_path": disk_stat or None,
+        "bind_note": (
+            "OLLAMA_*_HOST_PATH values are read at `docker compose up` time. "
+            "After changing them here, redeploy the stack so mounts match; "
+            "restarting only the Ollama container reuses existing volume binds."
+        ),
+    }
     return {
         "settings": settings,
         "sources": sources,
         "allowlist": {k: v[0] for k, v in _OLLAMA_SETTINGS_ALLOWLIST.items()},
         "models_dir": OLLAMA_MODELS_DIR,
+        "storage_paths": storage_paths,
         "targets": {k: v[2] for k, v in _OLLAMA_SETTINGS_ALLOWLIST.items()},
         "env_files": {
             "defaults": defaults_path,
@@ -2094,12 +2148,17 @@ async def put_ollama_settings(req: OllamaSettingsRequest):
     # Caller can explicitly clear a key by passing empty string.
     current_ui = _parse_env_file(ui_path)
     merged_ui = {**current_ui, **normalized}
-    # Effective config = defaults + UI overrides.
-    merged, _sources = _merge_ollama_settings_with_sources(defaults_path, ui_path)
+    # Effective config = defaults + UI overrides (before writing the UI file).
+    prev_merged, _sources = _merge_ollama_settings_with_sources(defaults_path, ui_path)
+    merged = dict(prev_merged)
     merged.update({k: v for k, v in normalized.items() if v != ""})
     for k, v in normalized.items():
         if v == "":
             merged.pop(k, None)
+    bind_changed = any(
+        (prev_merged.get(k) or "") != (merged.get(k) or "")
+        for k in _OLLAMA_HOST_BIND_KEYS
+    )
     # Drop empty-string values from the container env (they mean "unset"),
     # but keep them commented-out in the file for visibility.
     container_env = {k: v for k, v in merged.items() if v != ""}
@@ -2130,10 +2189,17 @@ async def put_ollama_settings(req: OllamaSettingsRequest):
             _restart_native_ollama_brew()
         except RuntimeError as e:
             raise HTTPException(500, f"Saved tunables but failed to restart Ollama: {e}")
+        msg = f"Native Ollama restarted with {len(container_env)} tuning(s)."
+        if bind_changed:
+            msg += (
+                " Host path settings were updated in ollama.ui.env — if your setup uses bind mounts, "
+                "re-sync or redeploy so the host paths match."
+            )
         return {
             "ok": True,
             "applied": container_env,
-            "message": f"Native Ollama restarted with {len(container_env)} tuning(s).",
+            "redeploy_required": bool(bind_changed),
+            "message": msg,
         }
 
     try:
@@ -2144,10 +2210,17 @@ async def put_ollama_settings(req: OllamaSettingsRequest):
         logger.exception("recreate failed")
         raise HTTPException(500, f"Wrote UI override env but failed to recreate container: {e}")
 
+    msg = f"Ollama restarted with {len(container_env)} tuning(s)."
+    if bind_changed:
+        msg += (
+            " Host path(s) in ollama.ui.env changed — run a full stack redeploy (Komodo / docker compose) "
+            "so llm-agent and ollama volume mounts pick up the new paths; container recreate alone cannot rebind host directories."
+        )
     return {
         "ok": True,
         "applied": container_env,
-        "message": f"Ollama restarted with {len(container_env)} tuning(s).",
+        "redeploy_required": bind_changed,
+        "message": msg,
     }
 
 

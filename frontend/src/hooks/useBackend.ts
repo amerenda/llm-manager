@@ -401,12 +401,21 @@ export function useDeleteStaleRunners() {
 
 // ── Ollama runtime settings (per-runner) ──────────────────────────────────
 
+export interface OllamaStoragePaths {
+  ollama_models_dir_container?: string
+  ollama_data_host_path_effective?: string
+  ollama_models_host_path_effective?: string
+  agent_disk_stat_path?: string | null
+  bind_note?: string
+}
+
 export interface OllamaSettingsResponse {
   settings?: Record<string, string>
   sources?: Record<string, string>
   allowlist?: Record<string, 'int' | 'bool' | 'enum' | 'duration' | 'str' | 'path'>
   env_file?: string
   models_dir?: string
+  storage_paths?: OllamaStoragePaths
   targets?: Record<string, 'ui' | 'default'>
   env_files?: {
     defaults: string
@@ -456,7 +465,7 @@ export function useUpdateOllamaSettings() {
   const qc = useQueryClient()
   return useMutation({
     mutationFn: ({ runnerId, settings }: { runnerId: number; settings: Record<string, string> }) =>
-      put<{ ok: boolean; applied: Record<string, string>; message: string }>(
+      put<{ ok: boolean; applied: Record<string, string>; message: string; redeploy_required?: boolean }>(
         `/api/llm/runners/${runnerId}/ollama-settings`, { settings }),
     onSuccess: (_d, v) => {
       qc.invalidateQueries({ queryKey: ['ollama-settings', v.runnerId] })

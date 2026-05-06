@@ -662,8 +662,8 @@ const OLLAMA_FIELD_HELP: Record<string, { label: string; placeholder: string; hi
   OLLAMA_KEEP_ALIVE:        { label: 'Keep-alive',            placeholder: '5m',               hint: 'How long to keep a model in VRAM after last use. -1 = forever.' },
   OLLAMA_MAX_QUEUE:         { label: 'Max queued requests',   placeholder: '512',              hint: 'Past this, Ollama rejects with 503.' },
   OLLAMA_HOST:              { label: 'Listen address',        placeholder: '127.0.0.1:11434',  hint: 'Leave as-is unless you know why.' },
-  OLLAMA_DATA_HOST_PATH:    { label: 'Ollama data path',      placeholder: '/home/alex/.ollama', hint: 'Host path mounted at /root/.ollama. High impact: changing this can hide existing models.' },
-  OLLAMA_MODELS_HOST_PATH:  { label: 'Ollama models path',    placeholder: '/mnt/storage/models', hint: 'Host path mounted into the agent for model visibility and optional separate Ollama model dir.' },
+  OLLAMA_DATA_HOST_PATH:    { label: 'Ollama data path',      placeholder: '/home/alex/.ollama', hint: 'Host directory for Ollama state (compose → /root/.ollama). Saved to ollama.ui.env; a full stack redeploy is required for new binds to apply.' },
+  OLLAMA_MODELS_HOST_PATH:  { label: 'Ollama models path',    placeholder: '/mnt/storage/models', hint: 'Host directory for models (agent RO mount + compose). Changing it updates env only — redeploy the stack so mounts and disk stats match.' },
 }
 
 function OllamaSettingsPanel({ runner }: { runner: Runner }) {
@@ -671,7 +671,7 @@ function OllamaSettingsPanel({ runner }: { runner: Runner }) {
   const { data, isLoading, error, refetch } = useOllamaSettings(runner.id, open)
   const update = useUpdateOllamaSettings()
   const [draft, setDraft] = useState<Record<string, string>>({})
-  const [msg, setMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
+  const [msg, setMsg] = useState<{ kind: 'ok' | 'err'; text: string; redeploy?: boolean } | null>(null)
 
   // Seed the draft from server whenever we open or the server value changes.
   useEffect(() => {
@@ -735,10 +735,35 @@ function OllamaSettingsPanel({ runner }: { runner: Runner }) {
           )}
           {data && (
             <>
-                {data.models_dir && (
-                <div className="flex items-center gap-2 text-xs text-gray-400 bg-gray-900/50 rounded px-2 py-1.5">
-                  <span className="text-gray-500 font-mono uppercase text-[10px] tracking-wide shrink-0">Models path</span>
-                  <span className="font-mono text-gray-200 truncate">{data.models_dir}</span>
+              {(data.models_dir || data.storage_paths) && (
+                <div className="space-y-1.5 text-xs text-gray-400 bg-gray-900/50 rounded px-2 py-1.5">
+                  {data.models_dir && (
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="text-gray-500 font-mono uppercase text-[10px] tracking-wide shrink-0">Models (container)</span>
+                      <span className="font-mono text-gray-200 truncate">{data.models_dir}</span>
+                    </div>
+                  )}
+                  {data.storage_paths?.ollama_data_host_path_effective ? (
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="text-gray-500 font-mono uppercase text-[10px] tracking-wide shrink-0">Data (host)</span>
+                      <span className="font-mono text-gray-200 truncate">{data.storage_paths.ollama_data_host_path_effective}</span>
+                    </div>
+                  ) : null}
+                  {data.storage_paths?.ollama_models_host_path_effective ? (
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="text-gray-500 font-mono uppercase text-[10px] tracking-wide shrink-0">Models (host)</span>
+                      <span className="font-mono text-gray-200 truncate">{data.storage_paths.ollama_models_host_path_effective}</span>
+                    </div>
+                  ) : null}
+                  {data.storage_paths?.agent_disk_stat_path ? (
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="text-gray-500 font-mono uppercase text-[10px] tracking-wide shrink-0">Disk stat path</span>
+                      <span className="font-mono text-gray-200 truncate">{data.storage_paths.agent_disk_stat_path}</span>
+                    </div>
+                  ) : null}
+                  {data.storage_paths?.bind_note ? (
+                    <p className="text-[10px] text-amber-400/90 leading-snug">{data.storage_paths.bind_note}</p>
+                  ) : null}
                 </div>
               )}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
@@ -769,7 +794,10 @@ function OllamaSettingsPanel({ runner }: { runner: Runner }) {
                     update.mutate(
                       { runnerId: runner.id, settings: draft },
                       {
-                        onSuccess: (d) => { setMsg({ kind: 'ok', text: d.message }); refetch() },
+                        onSuccess: (d) => {
+                          setMsg({ kind: 'ok', text: d.message, redeploy: Boolean(d.redeploy_required) })
+                          refetch()
+                        },
                         onError: (e) => setMsg({ kind: 'err', text: (e as Error).message }),
                       }
                     )
@@ -791,9 +819,16 @@ function OllamaSettingsPanel({ runner }: { runner: Runner }) {
               </div>
 
               {msg && (
-                <p className={`text-xs ${msg.kind === 'ok' ? 'text-green-400' : 'text-red-400'}`}>
-                  {msg.text}
-                </p>
+                <div className="space-y-1">
+                  <p className={`text-xs ${msg.kind === 'ok' ? 'text-green-400' : 'text-red-400'}`}>
+                    {msg.text}
+                  </p>
+                  {msg.kind === 'ok' && msg.redeploy && (
+                    <p className="text-xs text-amber-400">
+                      Full stack redeploy (Komodo / docker compose) is required so volume binds match the new host paths.
+                    </p>
+                  )}
+                </div>
               )}
             </>
           )}

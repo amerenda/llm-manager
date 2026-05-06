@@ -317,21 +317,29 @@ jobs:
       - name: Set target version on llm-manager
         env:
           TAG: ${{ needs.set-tag.outputs.tag }}
+          LLM_MANAGER_AUTOMATION_TOKEN: ${{ secrets.LLM_MANAGER_AUTOMATION_TOKEN }}
         run: |
           # Tell llm-manager backend about the new agent version
           # Agents will pick this up on their next heartbeat and self-update
+          # Requires LLM_MANAGER_AUTOMATION_TOKEN (K8s secret + GitHub Actions secret) when prod auth is on
+          AUTH=()
+          if [[ -n "${LLM_MANAGER_AUTOMATION_TOKEN:-}" ]]; then
+            AUTH=( -H "Authorization: Bearer ${LLM_MANAGER_AUTOMATION_TOKEN}" )
+          fi
           # Try internal k8s service first, fall back to external URL
           curl -sf -X PUT \
+            "${AUTH[@]}" \
             "http://llm-manager-backend.llm-manager.svc.cluster.local:8081/api/runners/target-version" \
             -H "Content-Type: application/json" \
             -d "{\"target_version\": \"${TAG}\"}" \
             && echo "Agent target version set to ${TAG}" \
             || curl -sf -X PUT \
+            "${AUTH[@]}" \
               "https://llm-manager-backend.amer.dev/api/runners/target-version" \
               -H "Content-Type: application/json" \
               -d "{\"target_version\": \"${TAG}\"}" \
               && echo "Agent target version set to ${TAG} (via external URL)" \
-              || echo "Warning: could not set agent target version"
+              || echo "Warning: could not set agent target version (set GitHub secret LLM_MANAGER_AUTOMATION_TOKEN to match cluster secret llm-manager-automation-token)"
 
   notify-failure:
     if: failure()

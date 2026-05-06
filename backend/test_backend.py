@@ -251,6 +251,46 @@ class TestAuthEnforcement:
         )
         assert resp.status_code == 200
 
+    def test_put_target_version_requires_auth_without_automation_token(self, unauthed_client):
+        resp = unauthed_client.put(
+            "/api/runners/target-version",
+            json={"target_version": "sha-abc"},
+        )
+        assert resp.status_code == 401
+
+
+class TestAutomationBearerTargetVersion:
+    """LLM_MANAGER_AUTOMATION_TOKEN allows CI to set global agent tag without a session."""
+
+    @patch("main.db.set_global_setting", new_callable=AsyncMock)
+    def test_put_target_version_accepts_matching_bearer(self, mock_set, unauthed_client):
+        old = main.LLM_MANAGER_AUTOMATION_TOKEN
+        main.LLM_MANAGER_AUTOMATION_TOKEN = "ci-test-automation-token"
+        try:
+            resp = unauthed_client.put(
+                "/api/runners/target-version",
+                json={"target_version": "sha-deadbeef"},
+                headers={"Authorization": "Bearer ci-test-automation-token"},
+            )
+            assert resp.status_code == 200
+            assert resp.json() == {"ok": True, "target_version": "sha-deadbeef"}
+            mock_set.assert_awaited_once()
+        finally:
+            main.LLM_MANAGER_AUTOMATION_TOKEN = old
+
+    def test_put_target_version_rejects_wrong_bearer(self, unauthed_client):
+        old = main.LLM_MANAGER_AUTOMATION_TOKEN
+        main.LLM_MANAGER_AUTOMATION_TOKEN = "ci-test-automation-token"
+        try:
+            resp = unauthed_client.put(
+                "/api/runners/target-version",
+                json={"target_version": "sha-x"},
+                headers={"Authorization": "Bearer wrong-token"},
+            )
+            assert resp.status_code == 401
+        finally:
+            main.LLM_MANAGER_AUTOMATION_TOKEN = old
+
 
 class TestGpuEndpoint:
     def test_gpu_returns_zeros_when_no_runner(self, client):
