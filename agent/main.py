@@ -256,8 +256,6 @@ def _detect_amd_versions() -> tuple[str, str]:
             except Exception:
                 pass
     if not rocm_version:
-        rocm_version = (os.environ.get("ROCM_VERSION") or os.environ.get("ROCM_LIB_VERSION") or "").strip()
-    if not rocm_version:
         for path in (
             "/hostfs/opt/rocm/include/rocm_version.h",
             "/hostfs/opt/rocm/lib/include/rocm_version.h",
@@ -289,6 +287,15 @@ def _detect_amd_versions() -> tuple[str, str]:
                     amd_driver = f"linux-{kr}"
         except Exception:
             pass
+    # Compose / GitOps can inject these on the host (see archlinux/llm/pre-deploy.sh). They win over
+    # in-container stubs (e.g. wrong /opt/rocm/.info/version in the image) so Runners → GPU stack is
+    # never stuck on "unknown" until a new agent image ships.
+    _env_amd = (os.environ.get("AGENT_AMD_DRIVER_VERSION") or os.environ.get("AMD_DRIVER_VERSION") or "").strip()
+    _env_rocm = (os.environ.get("ROCM_VERSION") or os.environ.get("ROCM_LIB_VERSION") or "").strip()
+    if _env_amd:
+        amd_driver = _env_amd
+    if _env_rocm:
+        rocm_version = _env_rocm
     return amd_driver, rocm_version
 
 
