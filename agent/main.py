@@ -1024,8 +1024,49 @@ def _sys_stats() -> dict:
     }
 
 
+def _disk_stats_from_usage(path: str, report_path: str) -> dict:
+    usage = shutil.disk_usage(path)
+    return {
+        "disk_total_bytes": usage.total,
+        "disk_used_bytes": usage.used,
+        "disk_free_bytes": usage.free,
+        "disk_total_gb": round(usage.total / 1e9, 2),
+        "disk_used_gb": round(usage.used / 1e9, 2),
+        "disk_free_gb": round(usage.free / 1e9, 2),
+        "disk_path": report_path,
+    }
+
+
+def _disk_stats_try_hostfs(host_abs: str, report_path: str) -> dict | None:
+    """Use host root mounted at /hostfs (Komodo stacks) so statvfs sees the real volume.
+
+    Bind mounts alone break on OrbStack / some Docker-on-Mac setups: ``disk_usage`` on
+    ``/host-ollama-data`` returned ~4 GiB total and 0 free while APFS had ~50 GiB free.
+    """
+    if not host_abs.startswith("/"):
+        return None
+    via = f"/hostfs{host_abs}"
+    if not os.path.exists(via):
+        return None
+    try:
+        return _disk_stats_from_usage(via, report_path)
+    except Exception as exc:
+        logger.warning("Disk stats failed for host path %s (%s): %s", report_path, via, exc)
+        return None
+
+
 def _disk_stats() -> dict:
     """Disk usage for the Ollama model storage path."""
+    # Prefer real host paths under /hostfs when the stack mounts ``/:/hostfs:ro`` (Komodo
+    # compose). Order: models dir (large pulls) then Ollama data dir (unified Mac layout).
+    models_host = (os.environ.get("OLLAMA_MODELS_HOST_PATH") or "").strip()
+    data_host = (os.environ.get("OLLAMA_DATA_HOST_PATH") or "").strip()
+    for hp, label in ((models_host, models_host), (data_host, data_host)):
+        if hp:
+            got = _disk_stats_try_hostfs(hp, label)
+            if got:
+                return got
+
     logical_path = AGENT_DISK_STAT_PATH or OLLAMA_MODELS_DIR
     # The container mounts the host root at /hostfs.  MODEL_STORAGE_PATH is a
     # *host* path (e.g. /mnt/storage/models) which won't exist inside the
@@ -1046,15 +1087,7 @@ def _disk_stats() -> dict:
         # Do not substitute ``/`` or the Docker Desktop Linux VM root here: on Mac, that
         # filesystem is huge and unrelated to the APFS volume where Ollama bind-mounts
         # actually write — it made the UI show ~50 GiB free while pulls failed with ENOSPC.
-        return {
-            "disk_total_bytes": usage.total,
-            "disk_used_bytes": usage.used,
-            "disk_free_bytes": usage.free,
-            "disk_total_gb": round(usage.total / 1e9, 2),
-            "disk_used_gb": round(usage.used / 1e9, 2),
-            "disk_free_gb": round(usage.free / 1e9, 2),
-            "disk_path": report_path,
-        }
+        return _disk_stats_from_usage(path, report_path)
     except Exception as exc:
         logger.warning("Disk stats failed for %s: %s", logical_path, exc)
         return {
