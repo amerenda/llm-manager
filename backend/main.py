@@ -14,6 +14,7 @@ import socket
 import time
 import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import Optional
 
 import asyncpg
@@ -1398,6 +1399,29 @@ def _public_runner_row(r: dict) -> dict:
     return out
 
 
+def _runner_offline_diagnostics(last_seen, capabilities: dict) -> dict:
+    diag = (capabilities.get("config_diagnostics") or {}) if isinstance(capabilities, dict) else {}
+    age_seconds = None
+    if last_seen is not None:
+        try:
+            age_seconds = max(0.0, (datetime.now(timezone.utc) - last_seen).total_seconds())
+        except Exception:
+            age_seconds = None
+    likely_causes = []
+    if not diag.get("agent_address_configured", True):
+        likely_causes.append("AGENT_ADDRESS missing or stale")
+    if not diag.get("backend_url_configured", True):
+        likely_causes.append("BACKEND_URL missing")
+    if not diag.get("compose_dir_configured", True):
+        likely_causes.append("COMPOSE_DIR missing")
+    if not diag.get("ollama_defaults_present", True):
+        likely_causes.append("ollama.env missing from compose directory")
+    return {
+        "age_seconds": round(age_seconds, 1) if isinstance(age_seconds, (float, int)) else None,
+        "likely_causes": likely_causes,
+    }
+
+
 @app.get("/api/runners")
 async def list_runners(request: Request):
     """Return all recent runners (including disabled) for UI display.
@@ -1416,6 +1440,7 @@ async def list_runners(request: Request):
         rs = runner_state.get(r["id"])
         r["current_model"] = rs.current_model if rs else None
         r["in_flight_job_id"] = rs.in_flight_job_id if rs else None
+        r["offline_diagnostics"] = _runner_offline_diagnostics(r.get("last_seen"), r.get("capabilities") or {})
     if _session_admin_user(request):
         return rows
     return [_public_runner_row(r) for r in rows]

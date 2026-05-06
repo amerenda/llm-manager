@@ -580,6 +580,8 @@ async def _build_capabilities() -> dict:
     disk = _disk_stats()
     downloaded = await _ollama_downloaded_models()
     comfyui_ok = await _comfyui_ok()
+    defaults_path = _ollama_env_file()
+    ui_path = _ollama_ui_env_file()
     caps = {
         "gpu_vendor": gpu.get("gpu_vendor", "none"),
         "nvidia_driver_version": _NVIDIA_DRIVER_VERSION,
@@ -600,6 +602,13 @@ async def _build_capabilities() -> dict:
         # polling of /v1/models from library_routes.py.
         "downloaded_models": downloaded,
         "agent_version": AGENT_VERSION,
+        "config_diagnostics": {
+            "agent_address_configured": bool((os.environ.get("AGENT_ADDRESS") or "").strip()),
+            "backend_url_configured": bool((BACKEND_URL or "").strip()),
+            "compose_dir_configured": bool((COMPOSE_DIR or "").strip()),
+            "ollama_defaults_present": os.path.isfile(defaults_path),
+            "ollama_ui_overrides_present": os.path.isfile(ui_path),
+        },
     }
     # Always include TLS cert so heartbeats don't wipe it
     try:
@@ -1636,11 +1645,19 @@ async def restart_ollama():
 # reservations are preserved; only the env vars change.
 
 def _ollama_env_file() -> str:
-    """Path to ollama tunables file: mounted llm/ dir on Mac, else GPU /host-compose."""
+    """Path to GitOps default Ollama tunables file."""
     base = (COMPOSE_DIR_LOCAL or "").strip()
     if base:
         return os.path.join(base, "ollama.env")
     return "/host-compose/ollama.env"
+
+
+def _ollama_ui_env_file() -> str:
+    """Path to UI-managed Ollama overrides (wins over defaults)."""
+    base = (COMPOSE_DIR_LOCAL or "").strip()
+    if base:
+        return os.path.join(base, "ollama.ui.env")
+    return "/host-compose/ollama.ui.env"
 
 
 def _native_ollama() -> bool:
@@ -1649,19 +1666,22 @@ def _native_ollama() -> bool:
 
 
 _OLLAMA_SETTINGS_ALLOWLIST = {
-    # key → (type, validator or None)
-    "OLLAMA_NUM_CTX":            ("int", lambda v: 1 <= int(v) <= 1_048_576),
-    "OLLAMA_FLASH_ATTENTION":    ("bool", None),          # "0" / "1" / "true" / "false"
-    "OLLAMA_KV_CACHE_TYPE":      ("enum", {"f16", "q8_0", "q4_0"}),
-    "OLLAMA_NUM_GPU":            ("int", lambda v: 0 <= int(v) <= 999),
-    "OLLAMA_NUM_PARALLEL":       ("int", lambda v: 1 <= int(v) <= 64),
-    "OLLAMA_MAX_LOADED_MODELS":  ("int", lambda v: 1 <= int(v) <= 64),
-    "OLLAMA_KEEP_ALIVE":         ("duration", None),      # "30s", "5m", "2h", "-1"
-    "OLLAMA_MAX_QUEUE":          ("int", lambda v: 1 <= int(v) <= 65535),
-    "OLLAMA_HOST":               ("str", None),           # "127.0.0.1:11434" etc
+    # key → (type, validator or None, target_file)
+    "OLLAMA_NUM_CTX":            ("int", lambda v: 1 <= int(v) <= 1_048_576, "ui"),
+    "OLLAMA_FLASH_ATTENTION":    ("bool", None, "ui"),          # "0" / "1" / "true" / "false"
+    "OLLAMA_KV_CACHE_TYPE":      ("enum", {"f16", "q8_0", "q4_0"}, "ui"),
+    "OLLAMA_NUM_GPU":            ("int", lambda v: 0 <= int(v) <= 999, "ui"),
+    "OLLAMA_NUM_PARALLEL":       ("int", lambda v: 1 <= int(v) <= 64, "ui"),
+    "OLLAMA_MAX_LOADED_MODELS":  ("int", lambda v: 1 <= int(v) <= 64, "ui"),
+    "OLLAMA_KEEP_ALIVE":         ("duration", None, "ui"),      # "30s", "5m", "2h", "-1"
+    "OLLAMA_MAX_QUEUE":          ("int", lambda v: 1 <= int(v) <= 65535, "ui"),
+    "OLLAMA_HOST":               ("str", None, "ui"),           # "127.0.0.1:11434" etc
     # ROCm/HIP override — needed for new AMD GPUs (e.g. gfx1201 RX 9070 XT) whose
     # Tensile libs aren't bundled yet. Set to "11.0.0" to use gfx1100 (RDNA 3) libs.
-    "HSA_OVERRIDE_GFX_VERSION":  ("str", None),
+    "HSA_OVERRIDE_GFX_VERSION":  ("str", None, "ui"),
+    # Deployment/path settings: GitOps provides defaults, UI overrides win.
+    "OLLAMA_DATA_HOST_PATH":     ("path", None, "ui"),
+    "OLLAMA_MODELS_HOST_PATH":   ("path", None, "ui"),
 }
 
 
@@ -1739,7 +1759,7 @@ def _validate_ollama_setting(key: str, value) -> str:
     ready to write to ollama.env. Raises ValueError on invalid input."""
     if key not in _OLLAMA_SETTINGS_ALLOWLIST:
         raise ValueError(f"unknown setting: {key}")
-    kind, rule = _OLLAMA_SETTINGS_ALLOWLIST[key]
+    kind, rule, _target = _OLLAMA_SETTINGS_ALLOWLIST[key]
     if value is None or value == "":
         return ""  # empty = unset (comment out)
     if kind == "int":
@@ -1765,10 +1785,13 @@ def _validate_ollama_setting(key: str, value) -> str:
         if not re.fullmatch(r"\d+(ms|s|m|h)", s):
             raise ValueError(f"{key} must be a duration (e.g. 30s, 5m, 2h) or -1, got {value!r}")
         return s
-    # str: pass through with light sanity
+    # str/path: pass through with light sanity
     s = str(value).strip()
     if "\n" in s or "\r" in s:
         raise ValueError(f"{key} contains a newline")
+    if kind == "path":
+        if not s.startswith("/"):
+            raise ValueError(f"{key} must be an absolute path")
     return s
 
 
@@ -1798,9 +1821,24 @@ def _parse_env_file(path: str) -> dict:
     return result
 
 
+def _merge_ollama_settings_with_sources(defaults_path: str, overrides_path: str) -> tuple[dict, dict]:
+    """Return effective settings and per-key source (default/ui_override)."""
+    defaults = _parse_env_file(defaults_path)
+    overrides = _parse_env_file(overrides_path)
+    merged: dict[str, str] = {}
+    sources: dict[str, str] = {}
+    for key in _OLLAMA_SETTINGS_ALLOWLIST.keys():
+        if key in overrides:
+            merged[key] = overrides[key]
+            sources[key] = "ui_override"
+        elif key in defaults:
+            merged[key] = defaults[key]
+            sources[key] = "default"
+    return merged, sources
+
+
 def _write_env_file(path: str, settings: dict) -> None:
-    """Rewrite ollama.env preserving the commented-out template and setting
-    only keys with non-empty values. Keys with empty value are commented out."""
+    """Rewrite env file preserving commented template in allowlist order."""
     # Known order for stability
     ordered_keys = list(_OLLAMA_SETTINGS_ALLOWLIST.keys())
     lines = [
@@ -1964,9 +2002,10 @@ def _recreate_ollama_container(new_env: dict, new_image: Optional[str] = None) -
 
 @app.get("/v1/ollama/settings")
 async def get_ollama_settings():
-    """Read the current ollama.env tunings + show which keys are controllable."""
-    path = _ollama_env_file()
-    settings = _parse_env_file(path)
+    """Read effective defaults + UI overrides and show controllable keys."""
+    defaults_path = _ollama_env_file()
+    ui_path = _ollama_ui_env_file()
+    settings, sources = _merge_ollama_settings_with_sources(defaults_path, ui_path)
     plist_path = (os.environ.get("OLLAMA_BREW_SERVICE_PLIST") or "").strip()
     if _native_ollama() and plist_path and os.path.isfile(plist_path):
         try:
@@ -1977,13 +2016,19 @@ async def get_ollama_settings():
                 for k in _OLLAMA_SETTINGS_ALLOWLIST:
                     if k in ev and k not in settings:
                         settings[k] = str(ev[k])
+                        sources[k] = "native_plist"
         except Exception as e:
             logger.warning("Could not read OLLAMA_BREW_SERVICE_PLIST: %s", e)
     return {
         "settings": settings,
+        "sources": sources,
         "allowlist": {k: v[0] for k, v in _OLLAMA_SETTINGS_ALLOWLIST.items()},
-        "env_file": path,
         "models_dir": OLLAMA_MODELS_DIR,
+        "targets": {k: v[2] for k, v in _OLLAMA_SETTINGS_ALLOWLIST.items()},
+        "env_files": {
+            "defaults": defaults_path,
+            "ui_overrides": ui_path,
+        },
     }
 
 
@@ -1995,7 +2040,7 @@ class OllamaSettingsRequest(BaseModel):
 
 @app.put("/v1/ollama/settings")
 async def put_ollama_settings(req: OllamaSettingsRequest):
-    """Validate, write ollama.env, then restart Ollama (container recreate or brew)."""
+    """Validate, write UI overrides file, then restart Ollama."""
     # Validate + normalize every incoming value first; bail before touching disk.
     normalized: dict = {}
     for k, v in (req.settings or {}).items():
@@ -2007,18 +2052,24 @@ async def put_ollama_settings(req: OllamaSettingsRequest):
     if not _native_ollama() and not _DOCKER_OK:
         raise HTTPException(503, "Docker not available inside agent container")
 
-    # Keep any currently-set keys the caller didn't include (partial updates).
+    defaults_path = _ollama_env_file()
+    ui_path = _ollama_ui_env_file()
+    # Keep any currently-set UI keys the caller didn't include (partial updates).
     # Caller can explicitly clear a key by passing empty string.
-    path = _ollama_env_file()
-    current = _parse_env_file(path)
-    merged = {**current, **normalized}
+    current_ui = _parse_env_file(ui_path)
+    merged_ui = {**current_ui, **normalized}
+    # Effective config = defaults + UI overrides.
+    merged, _sources = _merge_ollama_settings_with_sources(defaults_path, ui_path)
+    merged.update({k: v for k, v in normalized.items() if v != ""})
+    for k, v in normalized.items():
+        if v == "":
+            merged.pop(k, None)
     # Drop empty-string values from the container env (they mean "unset"),
     # but keep them commented-out in the file for visibility.
     container_env = {k: v for k, v in merged.items() if v != ""}
 
-    # Write new file first (on disk), then restart. If restart fails, the
-    # file is still the desired state — user can fix and re-apply.
-    _write_env_file(path, merged)
+    # Write UI overrides first; defaults are GitOps-owned.
+    _write_env_file(ui_path, merged_ui)
 
     if _native_ollama():
         plist_path = (os.environ.get("OLLAMA_BREW_SERVICE_PLIST") or "").strip()
@@ -2037,7 +2088,7 @@ async def put_ollama_settings(req: OllamaSettingsRequest):
             logger.warning(
                 "Native Ollama: OLLAMA_BREW_SERVICE_PLIST unset — wrote %s only; "
                 "Ollama may ignore until plist is configured or process restarted manually",
-                path,
+                ui_path,
             )
         try:
             _restart_native_ollama_brew()
@@ -2052,10 +2103,10 @@ async def put_ollama_settings(req: OllamaSettingsRequest):
     try:
         _recreate_ollama_container(container_env)
     except RuntimeError as e:
-        raise HTTPException(500, f"Wrote ollama.env but failed to recreate container: {e}")
+        raise HTTPException(500, f"Wrote UI override env but failed to recreate container: {e}")
     except Exception as e:
         logger.exception("recreate failed")
-        raise HTTPException(500, f"Wrote ollama.env but failed to recreate container: {e}")
+        raise HTTPException(500, f"Wrote UI override env but failed to recreate container: {e}")
 
     return {
         "ok": True,

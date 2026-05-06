@@ -51,13 +51,20 @@ voice assistants  → /v1/chat/completions (API key)
 
 ### `agent/` — LLM Agent (runs on each GPU host)
 
-Docker Compose service deployed on the GPU machine alongside Ollama and ComfyUI.
+Docker Compose stack on each GPU host (in this homelab, deployed via **Komodo** from `komodo-dean-gitops` `llm/` stacks). Wraps Ollama (text) and optionally ComfyUI (images) depending on the compose file.
 
 - **Port:** 8090 (PSK-authenticated on all endpoints except `/health`, `/metrics`)
 - **Wraps:** Ollama (text inference) + ComfyUI (image generation)
 - **Auth:** All requests require `X-Agent-PSK` header matching `LLM_MANAGER_AGENT_PSK`
 
 See [agent/README.md](agent/README.md) for installation.
+
+UI-wins config contract for runner Ollama settings:
+
+1. GitOps defaults live in `ollama.env` and stack `.env`.
+2. UI writes only `ollama.ui.env` through `PUT /v1/ollama/settings`.
+3. Effective runtime config is `ollama.env` + `ollama.ui.env` (override wins).
+4. Pre-deploy scripts merge path overrides (`OLLAMA_DATA_HOST_PATH`, `OLLAMA_MODELS_HOST_PATH`) into stack `.env` so compose interpolation also honors UI overrides after redeploy.
 
 ### `backend/` — Backend (k8s Deployment)
 
@@ -152,44 +159,33 @@ AGENT_ADDRESS=http://murderbot.amer.home:8090
 
 ---
 
-## Agent Installation
+## Agent installation
 
-### Prerequisites
+**Homelab default:** the **llm-agent and Ollama** (and related compose services) are **not** installed by hand from this repo alone. They are deployed from **[`komodo-dean-gitops`](https://github.com/amerenda/komodo-dean-gitops)** as Periphery stacks under each host's `llm/` directory (e.g. `murderbot/llm/`, `archlinux/llm/`, `mac-mini-m4/llm/`). Komodo pulls compose + `pre-deploy` secrets (Bitwarden), then runs Docker Compose. Host bootstrap (Docker, BWS machine token, Periphery) lives in **[`ansible-playbooks`](https://github.com/amerenda/ansible-playbooks)** (`setup-debian-komodo.yml`, `setup-archlinux-komodo.yml`, `setup-macmini.yml`, etc.).
 
-- Docker + Docker Compose with NVIDIA runtime
-- Ollama running on the host (not in Docker) at port 11434
-- LAN access to the k3s cluster
+See **[agent/README.md](agent/README.md)** for per-stack differences (Linux `network_mode: host` + GPU profiles vs Mac Mini bridge stack) and environment variables.
 
-### Setup
+### Ad-hoc / development (this repo's `agent/compose.yaml`)
 
 ```bash
 cd agent/
 cp .env.example .env
-# Edit .env — set LLM_MANAGER_AGENT_PSK, BACKEND_URL, AGENT_ADDRESS
-nano .env
+# Edit .env — PSK, BACKEND_URL, AGENT_ADDRESS; on AMD set VIDEO_GID / RENDER_GID from the host
+cp ollama.env.example ollama.env   # optional; UI can manage tunables once running
 
-docker compose up -d
-docker compose logs -f   # confirm "Registered with backend as runner_id=N"
+docker compose --profile nvidia up -d    # or --profile amd
+docker compose logs -f   # confirm registration with the backend
 ```
 
-### `.env` reference
+### `.env` essentials
 
 ```bash
-# PSK — must match llm-manager-agent-psk Bitwarden secret / k8s ExternalSecret
 LLM_MANAGER_AGENT_PSK=your-psk-here
-
-# Backend URL — always use HTTPS (PSK would be in cleartext over HTTP)
 BACKEND_URL=https://llm-manager-backend.amer.dev
-
-# This host's stable LAN IP (mDNS names won't resolve from k8s pods)
 AGENT_ADDRESS=http://10.100.20.19:8090
 ```
 
-### Auto-start on boot
-
-```bash
-bash install.sh   # installs systemd user service
-```
+Compose starts **Docker-managed Ollama** alongside the agent unless you use a stack that points the agent at an existing Ollama URL (see Komodo `llm` compose files).
 
 ---
 
@@ -477,6 +473,12 @@ gitops/
 CI (`.github/workflows/build.yaml`) builds and pushes Docker images on every push
 to `main`, then updates the image tags in `gitops/backend/deployment.yaml` and
 `gitops/ui/deployment.yaml` via a commit.
+
+### Gitignored paths (local dev)
+
+Do not commit secrets or local venvs. This repo’s `.gitignore` excludes among
+other things: `.env`, `agent/.env`, `agent/ollama.env`, `__pycache__/`, `.venv/`,
+`backend/.venv/`, `agent/tls/`, and editor swap files.
 
 ---
 

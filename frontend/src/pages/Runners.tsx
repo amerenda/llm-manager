@@ -314,6 +314,28 @@ function RunnerDetail({ runner, target }: { runner: Runner; target: string }) {
           </div>
         </div>
       )}
+      {caps.config_diagnostics && (
+        <div className="border-t border-gray-800 pt-3 space-y-1.5">
+          <p className="text-xs text-gray-500 font-medium uppercase tracking-wide">Runner Config Diagnostics</p>
+          <div className="flex flex-wrap items-center gap-2 text-[11px]">
+            <span className={caps.config_diagnostics.agent_address_configured ? 'text-green-400' : 'text-red-400'}>
+              AGENT_ADDRESS {caps.config_diagnostics.agent_address_configured ? 'ok' : 'missing'}
+            </span>
+            <span className={caps.config_diagnostics.backend_url_configured ? 'text-green-400' : 'text-red-400'}>
+              BACKEND_URL {caps.config_diagnostics.backend_url_configured ? 'ok' : 'missing'}
+            </span>
+            <span className={caps.config_diagnostics.compose_dir_configured ? 'text-green-400' : 'text-red-400'}>
+              COMPOSE_DIR {caps.config_diagnostics.compose_dir_configured ? 'ok' : 'missing'}
+            </span>
+            <span className={caps.config_diagnostics.ollama_defaults_present ? 'text-green-400' : 'text-amber-400'}>
+              ollama.env {caps.config_diagnostics.ollama_defaults_present ? 'present' : 'missing'}
+            </span>
+            <span className={caps.config_diagnostics.ollama_ui_overrides_present ? 'text-green-400' : 'text-gray-500'}>
+              ollama.ui.env {caps.config_diagnostics.ollama_ui_overrides_present ? 'present' : 'not yet created'}
+            </span>
+          </div>
+        </div>
+      )}
 
       {/* Ollama version + upgrade — GPU runners only */}
       {isGpu && (
@@ -626,7 +648,7 @@ export function Runners() {
 // ── Ollama tunables panel ────────────────────────────────────────────────
 // Per-runner form that reads /api/llm/runners/{id}/ollama-settings, lets the
 // admin edit allow-listed Ollama env vars, and applies them. Applying writes
-// ollama.env on the host and recreates the Ollama container — ~5–15s of
+// the UI override file on the host and recreates the Ollama container — ~5–15s of
 // downtime. Strong recommendation to drain the runner first; the panel shows
 // a warning when an in-flight job is present.
 
@@ -640,6 +662,8 @@ const OLLAMA_FIELD_HELP: Record<string, { label: string; placeholder: string; hi
   OLLAMA_KEEP_ALIVE:        { label: 'Keep-alive',            placeholder: '5m',               hint: 'How long to keep a model in VRAM after last use. -1 = forever.' },
   OLLAMA_MAX_QUEUE:         { label: 'Max queued requests',   placeholder: '512',              hint: 'Past this, Ollama rejects with 503.' },
   OLLAMA_HOST:              { label: 'Listen address',        placeholder: '127.0.0.1:11434',  hint: 'Leave as-is unless you know why.' },
+  OLLAMA_DATA_HOST_PATH:    { label: 'Ollama data path',      placeholder: '/home/alex/.ollama', hint: 'Host path mounted at /root/.ollama. High impact: changing this can hide existing models.' },
+  OLLAMA_MODELS_HOST_PATH:  { label: 'Ollama models path',    placeholder: '/mnt/storage/models', hint: 'Host path mounted into the agent for model visibility and optional separate Ollama model dir.' },
 }
 
 function OllamaSettingsPanel({ runner }: { runner: Runner }) {
@@ -656,6 +680,33 @@ function OllamaSettingsPanel({ runner }: { runner: Runner }) {
 
   const dirty = data ? JSON.stringify(draft) !== JSON.stringify(data.settings) : false
   const keys = data ? Object.keys(data.allowlist) : []
+  const runtimeKeys = keys.filter(k => !k.endsWith('_HOST_PATH'))
+  const advancedKeys = keys.filter(k => k.endsWith('_HOST_PATH'))
+
+  const renderField = (k: string) => {
+    const h = OLLAMA_FIELD_HELP[k] ?? { label: k, placeholder: '', hint: '' }
+    const val = draft[k] ?? ''
+    const source = data?.sources?.[k] ?? 'unset'
+    const sourceLabel = source === 'ui_override' ? 'UI override' : source === 'default' ? 'GitOps default' : source
+    const isHighImpact = k === 'OLLAMA_DATA_HOST_PATH' || k === 'OLLAMA_MODELS_HOST_PATH'
+    return (
+      <label key={k} className="flex flex-col gap-0.5">
+        <span className="text-[11px] text-gray-400">
+          {h.label}
+          <span className="ml-2 text-gray-600 font-mono">{k}</span>
+          <span className="ml-2 text-[10px] text-gray-500">{sourceLabel}</span>
+        </span>
+        <input
+          type="text"
+          value={val}
+          placeholder={h.placeholder}
+          onChange={e => setDraft({ ...draft, [k]: e.target.value })}
+          className="bg-gray-950 border border-gray-700 rounded px-2 py-1 text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-brand-600 font-mono"
+        />
+        <span className={`text-[10px] ${isHighImpact ? 'text-amber-400' : 'text-gray-600'}`}>{h.hint}</span>
+      </label>
+    )
+  }
 
   return (
     <div className="border-t border-gray-800 pt-3">
@@ -690,27 +741,22 @@ function OllamaSettingsPanel({ runner }: { runner: Runner }) {
                 </div>
               )}
               <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-                {keys.map(k => {
-                  const h = OLLAMA_FIELD_HELP[k] ?? { label: k, placeholder: '', hint: '' }
-                  const val = draft[k] ?? ''
-                  return (
-                    <label key={k} className="flex flex-col gap-0.5">
-                      <span className="text-[11px] text-gray-400">
-                        {h.label}
-                        <span className="ml-2 text-gray-600 font-mono">{k}</span>
-                      </span>
-                      <input
-                        type="text"
-                        value={val}
-                        placeholder={h.placeholder}
-                        onChange={e => setDraft({ ...draft, [k]: e.target.value })}
-                        className="bg-gray-950 border border-gray-700 rounded px-2 py-1 text-xs text-gray-200 placeholder-gray-600 focus:outline-none focus:border-brand-600 font-mono"
-                      />
-                      <span className="text-[10px] text-gray-600">{h.hint}</span>
-                    </label>
-                  )
-                })}
+                {runtimeKeys.map(renderField)}
               </div>
+              {advancedKeys.length > 0 && (
+                <div className="space-y-2 border border-amber-900/40 bg-amber-950/20 rounded-lg p-2">
+                  <div className="text-[11px] text-amber-300 font-medium">Advanced deployment/path tunables</div>
+                  <p className="text-[10px] text-amber-400">
+                    These values affect host mounts and can make existing models appear missing until paths are corrected.
+                  </p>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                    {advancedKeys.map(renderField)}
+                  </div>
+                </div>
+              )}
+              <p className="text-[10px] text-gray-600 font-mono">
+                defaults: {data.env_files.defaults} | ui overrides: {data.env_files.ui_overrides}
+              </p>
 
               <div className="flex items-center gap-2 pt-1">
                 <button

@@ -74,6 +74,13 @@ export interface Runner {
     cuda_driver_version?: string
     amd_driver_version?: string
     rocm_version?: string
+    config_diagnostics?: {
+      agent_address_configured?: boolean
+      backend_url_configured?: boolean
+      compose_dir_configured?: boolean
+      ollama_defaults_present?: boolean
+      ollama_ui_overrides_present?: boolean
+    }
     comfyui_running?: boolean
     agent_version?: string
     auto_update?: boolean

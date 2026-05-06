@@ -403,9 +403,14 @@ export function useDeleteStaleRunners() {
 
 export interface OllamaSettingsResponse {
   settings: Record<string, string>
-  allowlist: Record<string, 'int' | 'bool' | 'enum' | 'duration' | 'str'>
-  env_file: string
+  sources: Record<string, string>
+  allowlist: Record<string, 'int' | 'bool' | 'enum' | 'duration' | 'str' | 'path'>
   models_dir?: string
+  targets: Record<string, 'ui' | 'default'>
+  env_files: {
+    defaults: string
+    ui_overrides: string
+  }
 }
 
 export interface OllamaVersionResponse {

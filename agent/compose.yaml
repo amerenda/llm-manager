@@ -9,12 +9,13 @@
 #   amd     / amd-full    — llm-agent-amd + Ollama-ROCm
 #   (the -full aliases exist for compat with existing .env files)
 #
-# install.sh picks the right profile. Direct usage:
+# Pick a profile explicitly (nvidia vs amd). Example:
 #   docker compose --profile nvidia up -d
 #
 # Env:
 #   .env         — agent credentials + paths (PSK, BACKEND_URL, COMPOSE_DIR, OLLAMA_MODELS_PATH, HSA_OVERRIDE_GFX_VERSION)
-#   ollama.env   — Ollama runtime tunables the UI edits (NUM_CTX, FLASH_ATTENTION, KV_CACHE_TYPE, ...)
+#   ollama.env   — GitOps defaults for Ollama tunables
+#   ollama.ui.env — UI-managed overrides (wins on restart/redeploy)
 
 services:
   llm-agent:
@@ -88,6 +89,8 @@ services:
     env_file:
       - path: ollama.env
         required: false
+      - path: ollama.ui.env
+        required: false
     environment:
       OLLAMA_HOST: ${OLLAMA_HOST:-127.0.0.1:11434}
     volumes:
@@ -109,6 +112,8 @@ services:
     env_file:
       - path: ollama.env
         required: false
+      - path: ollama.ui.env
+        required: false
     environment:
       OLLAMA_HOST: ${OLLAMA_HOST:-127.0.0.1:11434}
       HSA_OVERRIDE_GFX_VERSION: ${HSA_OVERRIDE_GFX_VERSION:-}
@@ -119,7 +124,7 @@ services:
     # define a `render` group in /etc/group, so passing names fails on
     # distros where the agent container isn't involved (Arch, etc.). GIDs
     # are resolved directly by the kernel against host device perms.
-    # install.sh detects the host GIDs and writes them to .env.
+    # Set VIDEO_GID and RENDER_GID in .env to match the host (e.g. getent group video).
     group_add:
       - "${VIDEO_GID:-44}"
       - "${RENDER_GID:-107}"

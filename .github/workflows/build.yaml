@@ -40,7 +40,7 @@ jobs:
           }
           echo "backend=$(check '^backend/')" >> "$GITHUB_OUTPUT"
           echo "frontend=$(check '^frontend/')" >> "$GITHUB_OUTPUT"
-          # Agent builds only when code/deps change, not for config files like compose.yaml or install.sh
+          # Agent builds only when code/deps change, not for config-only files like compose.yaml
           echo "agent=$(check '^agent/(Dockerfile|main\.py|requirements)')" >> "$GITHUB_OUTPUT"
           cat "$GITHUB_OUTPUT"
 

@@ -2,56 +2,44 @@
 
 Runs on every GPU host in the fleet. Wraps an Ollama container plus (optionally) ComfyUI, exposes an mTLS/PSK-authenticated HTTP API on port **8090** with Prometheus metrics, and self-registers with the llm-manager backend.
 
-Ollama is **always compose-managed** by this agent — host-managed Ollama is not supported. The Models page in the UI edits `ollama.env` and triggers a container recreate via the agent; that round-trip only works when compose owns the Ollama container.
+Ollama is **always compose-managed** by this agent — host-managed Ollama is not supported. The Models page in the UI writes `ollama.ui.env` and triggers a container recreate via the agent; compose loads `ollama.env` (GitOps defaults) then `ollama.ui.env` (UI overrides), so UI values survive restarts/redeploys.
 
-## Mac Mini (Apple Silicon, native Ollama)
+## Deployment (Komodo)
 
-On the home-lab Mac Mini, Ollama runs **on the host** for Metal. Deploy **only** the agent via Docker using the dedicated stack in [`amerenda/mac-mini-compose`](https://github.com/amerenda/mac-mini-compose) (`llm/compose.yaml`): bridge networking, `OLLAMA_URL=http://host.docker.internal:11434`, and **no** `OLLAMA_CONTAINER` so the agent skips compose-managed Ollama checks. GitOps and Komodo wiring are documented in that repo’s README (separate stack + webhook so `llm` deploys do not touch core/automation/monitoring/runners).
+In this homelab, **the llm-agent and Ollama are installed and updated through Komodo**, not via helper scripts in this repo. Compose lives in **[`komodo-dean-gitops`](https://github.com/amerenda/komodo-dean-gitops)** under each host’s `llm/` directory (e.g. `murderbot/llm/`, `archlinux/llm/`, `mac-mini-m4/llm/`). **Periphery** pulls the repo, runs `pre-deploy` (Bitwarden → `.env`), and `docker compose up`. Host bootstrap (Docker, BWS token, Periphery) is in **[`ansible-playbooks`](https://github.com/amerenda/ansible-playbooks)** (`setup-debian-komodo.yml`, `setup-archlinux-komodo.yml`, `setup-macmini.yml`).
 
-Set **`RUNNER_HOSTNAME`** (or `AGENT_NODE_NAME`) to the Mac’s stable name (e.g. `mac-mini-m4`). Otherwise Docker sets the container hostname to a short id and llm-manager shows that hex as the runner name.
+Redeploy or pull new images by syncing stacks in Komodo or pushing to the tracked branch (see `komodo-dean-gitops` docs).
 
-**Ollama tunables (Runners UI):** for native Homebrew Ollama, set **`OLLAMA_BREW_SERVICE_PLIST`** to the path (inside the container) of `homebrew.mxcl.ollama.plist`, bind-mount that directory read-write, and set **`NATIVE_OLLAMA_RESTART_CMD`** if needed (OrbStack often works with `mac brew services restart ollama`). The agent writes **`ollama.env`** under **`COMPOSE_DIR_LOCAL`** and merges only changed keys into the plist’s `EnvironmentVariables`.
+## Mac Mini (`mac-mini-m4/llm/`)
 
-Enable **`AGENT_UNIFIED_MEMORY_VRAM=true`** so VRAM metrics use the **same pool as system RAM** (`psutil.virtual_memory()` used/total). There is no NVML/AMD sysfs for Metal from a Linux agent container. If `psutil`’s total does not match real unified RAM (some VM limits), set **`AGENT_UNIFIED_VRAM_TOTAL_BYTES`** to the pool size in bytes.
+The Mini uses a **bridge-network** stack (not `network_mode: host`): see [`komodo-dean-gitops/mac-mini-m4/llm/compose.yaml`](https://github.com/amerenda/komodo-dean-gitops/tree/main/mac-mini-m4/llm). Ollama and `llm-agent` are both compose services; the agent talks to Ollama over the compose network and uses **`AGENT_UNIFIED_MEMORY_VRAM=true`** for sensible “VRAM” metrics on Apple Silicon.
 
-**Note:** Registering under a new hostname creates a **new** llm-manager runner row; remove the old runner (short-id hostname) in the UI if it lingers.
+Set **`RUNNER_HOSTNAME`** (e.g. `mac-mini-m4`) so the runner name in llm-manager is stable. Registering under a new hostname creates a **new** runner row — remove stale entries in the UI if needed.
 
-For a manual compose file outside that repo, mirror the same pattern: publish `8090:8090`, `extra_hosts: host.docker.internal:host-gateway`, bind-mount the host Ollama models directory read-only at `/host-ollama-models`, set `MODEL_STORAGE_PATH=/host-ollama-models`. To enable **auto self-update** (heartbeat-driven `AGENT_IMAGE_TAG` pin + `compose up`): set **`COMPOSE_DIR`** to the **host** path of the directory that contains `compose.yaml`, **`COMPOSE_DIR_LOCAL`** to the **in-container** mount of that same directory (rw), bind-mount it, and leave **`COMPOSE_PROFILE`** empty if you do not use compose profiles. The [`mac-mini-compose` `llm` stack](https://github.com/amerenda/mac-mini-compose) does this via `HOST_LLM_COMPOSE_DIR` + `/host/llm-compose`; turn on **auto update** for the runner in llm-manager so the agent recreates itself when the global target changes.
+For **auto self-update** (heartbeat-driven image tag + compose recreate), the stack sets **`COMPOSE_DIR`** / **`COMPOSE_DIR_LOCAL`** and bind-mounts the compose directory; enable **auto update** for the runner in llm-manager.
 
-## Prerequisites
+## Prerequisites (manual / dev installs only)
 
 - Docker + Docker Compose plugin
-- One supported GPU:
-  - NVIDIA with [nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)
-  - AMD with `/dev/kfd` + `/dev/dri` present (ROCm)
+- NVIDIA ([nvidia-container-toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html)) or AMD (`/dev/kfd`, `/dev/dri`, ROCm)
 - Agent PSK from Bitwarden: `llm-manager-agent-psk`
 
-## Install
+## Manual install (`agent/compose.yaml` in this repo)
+
+For development or a one-off GPU host **without** Komodo:
 
 ```bash
 cd agent/
-LLM_AGENT_PSK=<psk> bash install.sh
+cp .env.example .env
+# Set LLM_MANAGER_AGENT_PSK, BACKEND_URL, AGENT_ADDRESS, OLLAMA_MODELS_PATH as needed.
+# AMD: set VIDEO_GID and RENDER_GID (e.g. getent group video; getent group render).
+cp ollama.env.example ollama.env
+
+docker compose --profile nvidia up -d    # or --profile amd
+docker compose logs -f
 ```
 
-What it does:
-1. Detects GPU vendor, sets compose profile (`nvidia` or `amd`).
-2. Stops any host Ollama (systemd or standalone `docker run`) and removes the container so compose can create a fresh, labeled one.
-3. Creates `/opt/ollama/models` (or `$MODEL_STORAGE_PATH` override) owned by the install user.
-4. Writes `.env` with the PSK, backend URL, compose dir/profile, and `OLLAMA_MODELS_PATH` (single source of truth for the models directory).
-5. Copies `ollama.env.example` → `ollama.env`. All tunables stay commented out; the UI writes into this file.
-6. `docker compose --profile <vendor> up -d` starts both `llm-agent` and `ollama`.
-
-Useful flags:
-
-| Flag | Purpose |
-|---|---|
-| `--update` / `-u` | Re-pull agent image, preserve config |
-| `--psk <value>` | Rotate PSK in existing `.env` |
-| `--model-storage <path>` | Override `OLLAMA_MODELS_PATH` |
-| `--migrate` | Stop + disable host systemd `ollama.service` without prompting |
-| `--ollama-tag <tag>` | Pin a different Ollama image tag |
-
-`--managed-ollama` and `--host-ollama` are accepted for backward compatibility but ignored — Ollama is always compose-managed now.
+This starts **llm-agent** and **Docker-managed Ollama** with `network_mode: host` on Linux (see `compose.yaml`).
 
 ## Models directory — single source of truth
 
@@ -65,15 +53,17 @@ Default: `/opt/ollama/models`. Change it by editing `.env` and running `docker c
 
 The agent logs a loud error at startup if it finds an `ollama` container that isn't labeled `com.docker.compose.project=agent` — that's the "pre-migration orphan" state where UI edits silently do nothing.
 
-## Ollama tunables
+## Ollama tunables (UI-wins contract)
 
-Every value the UI can set (`OLLAMA_NUM_CTX`, `OLLAMA_FLASH_ATTENTION`, `OLLAMA_KV_CACHE_TYPE`, `OLLAMA_KEEP_ALIVE`, etc.) lives in `ollama.env`, loaded by the Ollama service via compose's `env_file`. The agent:
+`ollama.env` is deployment-owned defaults; `ollama.ui.env` is UI-owned overrides. The agent only writes `ollama.ui.env`.
 
-1. Rewrites `ollama.env` with the new values.
-2. Calls `docker compose -f <compose.yaml> --profile <profile> up -d --force-recreate ollama`.
-3. Waits for `/api/tags` to come back.
+Every value the UI can set (`OLLAMA_NUM_CTX`, `OLLAMA_FLASH_ATTENTION`, `OLLAMA_KV_CACHE_TYPE`, `OLLAMA_KEEP_ALIVE`, `OLLAMA_DATA_HOST_PATH`, `OLLAMA_MODELS_HOST_PATH`, etc.) is merged as defaults + overrides, then applied. The agent:
 
-`.env` (agent credentials + paths) is intentionally **not** touched by the UI — mixing the two files was what motivated the split.
+1. Validates incoming keys against the allowlist.
+2. Rewrites `ollama.ui.env` with the requested overrides.
+3. Recreates the Ollama container.
+
+`.env` (agent credentials + stack identity) remains deployment-owned and is intentionally **not** touched by the UI.
 
 ## PSK auth
 
@@ -87,7 +77,7 @@ The backend pod injects this via the `agent-psk` ExternalSecret. To rotate:
 
 1. Update `llm-manager-agent-psk` in Bitwarden.
 2. Force-sync the ExternalSecret: `kubectl annotate externalsecret agent-psk -n llm-manager force-sync=$(date +%s)`.
-3. Per host: `bash install.sh --psk <new>` then `docker compose --profile <vendor> restart llm-agent`.
+3. On each host: update the agent’s `.env` (or BWS-fed env), then recreate the agent container — e.g. `docker compose --profile <vendor> up -d --no-deps --force-recreate llm-agent`, or redeploy the Komodo `llm` stack.
 
 ## Environment variables (`.env`)
 
@@ -96,8 +86,8 @@ The backend pod injects this via the `agent-psk` ExternalSecret. To rotate:
 | `LLM_MANAGER_AGENT_PSK` | *(required)* | PSK for backend auth |
 | `BACKEND_URL` | `https://llm-manager-backend.amer.dev` | Backend base URL |
 | `AGENT_ADDRESS` | *(auto-detected)* | Externally reachable `http://<ip>:8090`. Override if auto-detect picks the wrong NIC |
-| `COMPOSE_DIR` | *(set by install.sh)* | Host path to this directory (needed for agent self-update) |
-| `COMPOSE_PROFILE` | *(set by install.sh)* | `nvidia` or `amd` |
+| `COMPOSE_DIR` | *(optional)* | Host path to the compose project directory (agent self-update / UI-driven compose) |
+| `COMPOSE_PROFILE` | `nvidia-full` / `amd-full` | Active compose profile on Linux; Mac Mini stack often uses `""` |
 | `OLLAMA_MODELS_PATH` | `/opt/ollama/models` | Models directory (bind-mounted into Ollama) |
 | `MODEL_STORAGE_PATH` | same as above | Agent's view of the same path |
 | `AGENT_IMAGE_TAG` | `latest` | Pinned agent image tag (rewritten on self-update) |
@@ -109,20 +99,15 @@ The backend pod injects this via the `agent-psk` ExternalSecret. To rotate:
 ## Verify
 
 ```bash
-# mTLS health (install.sh already fingerprinted the backend)
 curl -sk https://localhost:8090/health
-# {"ok":true,"node":"murderbot","ollama":true,"comfyui":true}
+# {"ok":true,"node":"murderbot","ollama":true,"comfyui":true}  # comfyui false if not deployed
 
-# Ollama is compose-managed
 docker inspect ollama --format '{{index .Config.Labels "com.docker.compose.project"}}'
-# agent
+# expect your compose project name (this repo's default layout uses project "agent")
 
-# Mount matches OLLAMA_MODELS_PATH
 docker inspect ollama --format '{{(index .Mounts 0).Source}}'
-# /opt/ollama/models
+# should match OLLAMA_MODELS_PATH
 
-# Agent startup log should NOT contain:
-#   "Ollama container 'ollama' is NOT compose-managed"
 docker logs llm-agent 2>&1 | grep -i 'not compose-managed' || echo "ok"
 ```
 
@@ -134,7 +119,7 @@ docker logs llm-agent 2>&1 | grep -i 'not compose-managed' || echo "ok"
 | Stop | `docker compose --profile <vendor> down` |
 | Restart agent only | `docker compose --profile <vendor> up -d --no-deps --force-recreate llm-agent` |
 | Restart Ollama (apply tunable changes) | `docker compose --profile <vendor> up -d --force-recreate ollama` |
-| Update agent image | `bash install.sh --update` (or UI auto-update) |
+| Update agent image | Redeploy Komodo `llm` stack, or `docker compose pull && docker compose --profile <vendor> up -d`, or UI **auto update** |
 
 ## API
 
@@ -148,6 +133,6 @@ All routes except `/health` and `/metrics` require `X-Agent-PSK`.
 - `POST /v1/models/pull` — Ollama pull, streams NDJSON progress
 - `DELETE /v1/models/{model}` — unload from VRAM
 - `POST /v1/ollama/restart` — restart Ollama container (clears stuck VRAM)
-- `GET /v1/ollama/settings` — read current Ollama tunables + allowlist
-- `PUT /v1/ollama/settings` — rewrite `ollama.env` + recreate container
+- `GET /v1/ollama/settings` — read effective settings + source metadata (`default` vs `ui_override`)
+- `PUT /v1/ollama/settings` — write `ollama.ui.env` + recreate container
 - `GET /metrics` — Prometheus (no PSK)
