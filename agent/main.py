@@ -123,6 +123,25 @@ def _nvidia_driver_version_from_proc() -> str:
     return ""
 
 
+def _nvidia_driver_cuda_from_smi_banner() -> tuple[str, str]:
+    """Parse Driver Version + CUDA Version from default nvidia-smi header (GPU containers often have the binary)."""
+    smi = shutil.which("nvidia-smi")
+    if not smi:
+        return "", ""
+    try:
+        out = subprocess.check_output([smi], text=True, timeout=8, stderr=subprocess.STDOUT)
+    except Exception:
+        return "", ""
+    drv, cuda = "", ""
+    m = re.search(r"Driver Version:\s*(\d+\.\d+(?:\.\d+)?)", out)
+    if m:
+        drv = m.group(1).strip()
+    m = re.search(r"CUDA Version:\s*(\d+\.\d+)", out)
+    if m:
+        cuda = m.group(1).strip()
+    return drv, cuda
+
+
 def _detect_nvidia_versions() -> tuple[str, str]:
     """Return (nvidia_driver_version, cuda_driver_version) when available."""
     nvidia_driver = ""
@@ -211,6 +230,12 @@ def _refresh_gpu_driver_versions() -> None:
     old = (_NVIDIA_DRIVER_VERSION, _CUDA_DRIVER_VERSION, _AMD_DRIVER_VERSION, _ROCM_VERSION)
     if _GPU_BACKEND == "nvidia":
         _NVIDIA_DRIVER_VERSION, _CUDA_DRIVER_VERSION = _detect_nvidia_versions()
+        if not _NVIDIA_DRIVER_VERSION or not _CUDA_DRIVER_VERSION:
+            smi_drv, smi_cuda = _nvidia_driver_cuda_from_smi_banner()
+            if not _NVIDIA_DRIVER_VERSION:
+                _NVIDIA_DRIVER_VERSION = smi_drv
+            if not _CUDA_DRIVER_VERSION:
+                _CUDA_DRIVER_VERSION = smi_cuda
         if not _NVIDIA_DRIVER_VERSION:
             nvidia_smi = shutil.which("nvidia-smi")
             if nvidia_smi:
@@ -964,6 +989,20 @@ def _disk_stats() -> dict:
         path = parent
     try:
         usage = shutil.disk_usage(path)
+        report_path = logical_path
+        # Docker Desktop / Linux VM bind mounts often report a tiny synthetic size (~4 GiB)
+        # for the host path. On unified-memory (Mac) agents, prefer the VM root fs when larger.
+        if _unified_vram_enabled():
+            min_plausible = int(os.environ.get("AGENT_DISK_MIN_PLAUSIBLE_BYTES", str(12 * 1024 * 1024 * 1024)))
+            if usage.total < min_plausible:
+                for fb in ("/", "/tmp"):
+                    try:
+                        u2 = shutil.disk_usage(fb)
+                        if u2.total > usage.total:
+                            usage = u2
+                            report_path = f"{logical_path} (via {fb})"
+                    except OSError:
+                        pass
         return {
             "disk_total_bytes": usage.total,
             "disk_used_bytes": usage.used,
@@ -971,7 +1010,7 @@ def _disk_stats() -> dict:
             "disk_total_gb": round(usage.total / 1e9, 2),
             "disk_used_gb": round(usage.used / 1e9, 2),
             "disk_free_gb": round(usage.free / 1e9, 2),
-            "disk_path": logical_path,
+            "disk_path": report_path,
         }
     except Exception as exc:
         logger.warning("Disk stats failed for %s: %s", logical_path, exc)
