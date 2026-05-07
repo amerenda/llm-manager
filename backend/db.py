@@ -224,7 +224,10 @@ async def init_db(pool: asyncpg.Pool) -> None:
             await conn.execute(CREATE_TABLES_SQL)
             await conn.execute(CREATE_INDEXES_SQL)
 
-            # Migrations: add columns to existing tables if missing
+            # Migrations: add columns to existing tables if missing.
+            # Use IF NOT EXISTS (instead of DuplicateColumnError handling) so
+            # the enclosing transaction does not become aborted on replicas
+            # that race through init_db at startup.
             for col, default in [
                 ("status", "'active'"),
                 ("allow_profile_switch", "FALSE"),
@@ -239,23 +242,16 @@ async def init_db(pool: asyncpg.Pool) -> None:
                     else "TEXT[]" if col in ("allowed_categories", "excluded_categories")
                     else "BOOLEAN"
                 )
-                try:
-                    await conn.execute(
-                        f"ALTER TABLE registered_apps ADD COLUMN {col} "
-                        f"{col_type} NOT NULL DEFAULT {default}"
-                    )
-                    logger.info("Added column registered_apps.%s", col)
-                except asyncpg.DuplicateColumnError:
-                    pass
+                await conn.execute(
+                    f"ALTER TABLE registered_apps ADD COLUMN IF NOT EXISTS {col} "
+                    f"{col_type} NOT NULL DEFAULT {default}"
+                )
 
             # model_runner_params migrations
-            try:
-                await conn.execute(
-                    "ALTER TABLE model_runner_params ADD COLUMN do_not_evict BOOLEAN NOT NULL DEFAULT FALSE"
-                )
-                logger.info("Added column model_runner_params.do_not_evict")
-            except asyncpg.DuplicateColumnError:
-                pass
+            await conn.execute(
+                "ALTER TABLE model_runner_params "
+                "ADD COLUMN IF NOT EXISTS do_not_evict BOOLEAN NOT NULL DEFAULT FALSE"
+            )
 
             # Runner migrations
             for col, definition in [
@@ -264,13 +260,9 @@ async def init_db(pool: asyncpg.Pool) -> None:
                 ("pinned_model", "TEXT"),
                 ("draining", "BOOLEAN NOT NULL DEFAULT FALSE"),
             ]:
-                try:
-                    await conn.execute(
-                        f"ALTER TABLE llm_runners ADD COLUMN {col} {definition}"
-                    )
-                    logger.info("Added column llm_runners.%s", col)
-                except asyncpg.DuplicateColumnError:
-                    pass
+                await conn.execute(
+                    f"ALTER TABLE llm_runners ADD COLUMN IF NOT EXISTS {col} {definition}"
+                )
 
             # Ensure the Default profile always exists
             await conn.execute(
