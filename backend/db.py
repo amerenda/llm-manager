@@ -216,81 +216,86 @@ CREATE INDEX IF NOT EXISTS idx_profile_image_entries_profile
 async def init_db(pool: asyncpg.Pool) -> None:
     """Create tables and indexes if they don't exist."""
     async with pool.acquire() as conn:
-        await conn.execute(CREATE_TABLES_SQL)
-        await conn.execute(CREATE_INDEXES_SQL)
+        # Serialize migrations across API and scheduler pods: concurrent ALTER TABLE
+        # from multiple init_db callers can queue behind an unrelated long-lived
+        # transaction and wedge the whole app (see pg_blocking_pids on relation).
+        async with conn.transaction():
+            await conn.execute("SELECT pg_advisory_xact_lock(802154421, 1)")
+            await conn.execute(CREATE_TABLES_SQL)
+            await conn.execute(CREATE_INDEXES_SQL)
 
-        # Migrations: add columns to existing tables if missing
-        for col, default in [
-            ("status", "'active'"),
-            ("allow_profile_switch", "FALSE"),
-            ("allow_unsafe", "FALSE"),
-            ("allowed_runner_ids", "'{}'"),
-            ("allowed_categories", "'{}'"),
-            ("excluded_categories", "'{}'"),
-        ]:
-            col_type = (
-                "TEXT" if col == "status"
-                else "INTEGER[]" if col == "allowed_runner_ids"
-                else "TEXT[]" if col in ("allowed_categories", "excluded_categories")
-                else "BOOLEAN"
-            )
+            # Migrations: add columns to existing tables if missing
+            for col, default in [
+                ("status", "'active'"),
+                ("allow_profile_switch", "FALSE"),
+                ("allow_unsafe", "FALSE"),
+                ("allowed_runner_ids", "'{}'"),
+                ("allowed_categories", "'{}'"),
+                ("excluded_categories", "'{}'"),
+            ]:
+                col_type = (
+                    "TEXT" if col == "status"
+                    else "INTEGER[]" if col == "allowed_runner_ids"
+                    else "TEXT[]" if col in ("allowed_categories", "excluded_categories")
+                    else "BOOLEAN"
+                )
+                try:
+                    await conn.execute(
+                        f"ALTER TABLE registered_apps ADD COLUMN {col} "
+                        f"{col_type} NOT NULL DEFAULT {default}"
+                    )
+                    logger.info("Added column registered_apps.%s", col)
+                except asyncpg.DuplicateColumnError:
+                    pass
+
+            # model_runner_params migrations
             try:
                 await conn.execute(
-                    f"ALTER TABLE registered_apps ADD COLUMN {col} "
-                    f"{col_type} NOT NULL DEFAULT {default}"
+                    "ALTER TABLE model_runner_params ADD COLUMN do_not_evict BOOLEAN NOT NULL DEFAULT FALSE"
                 )
-                logger.info("Added column registered_apps.%s", col)
+                logger.info("Added column model_runner_params.do_not_evict")
             except asyncpg.DuplicateColumnError:
                 pass
 
-        # model_runner_params migrations
-        try:
-            await conn.execute(
-                "ALTER TABLE model_runner_params ADD COLUMN do_not_evict BOOLEAN NOT NULL DEFAULT FALSE"
-            )
-            logger.info("Added column model_runner_params.do_not_evict")
-        except asyncpg.DuplicateColumnError:
-            pass
+            # Runner migrations
+            for col, definition in [
+                ("enabled", "BOOLEAN NOT NULL DEFAULT TRUE"),
+                ("auto_update", "BOOLEAN NOT NULL DEFAULT FALSE"),
+                ("pinned_model", "TEXT"),
+                ("draining", "BOOLEAN NOT NULL DEFAULT FALSE"),
+            ]:
+                try:
+                    await conn.execute(
+                        f"ALTER TABLE llm_runners ADD COLUMN {col} {definition}"
+                    )
+                    logger.info("Added column llm_runners.%s", col)
+                except asyncpg.DuplicateColumnError:
+                    pass
 
-        # Runner migrations
-        for col, definition in [
-            ("enabled", "BOOLEAN NOT NULL DEFAULT TRUE"),
-            ("auto_update", "BOOLEAN NOT NULL DEFAULT FALSE"),
-            ("pinned_model", "TEXT"),
-            ("draining", "BOOLEAN NOT NULL DEFAULT FALSE"),
-        ]:
-            try:
-                await conn.execute(
-                    f"ALTER TABLE llm_runners ADD COLUMN {col} {definition}"
-                )
-                logger.info("Added column llm_runners.%s", col)
-            except asyncpg.DuplicateColumnError:
-                pass
-
-        # Ensure the Default profile always exists
-        await conn.execute(
-            """
-            INSERT INTO profiles (name, is_default)
-            VALUES ('Default', TRUE)
-            ON CONFLICT (name) DO NOTHING
-            """
-        )
-
-        # Seed default safety tags
-        for pattern, reason in [
-            ("*uncensored*", "Model trained without safety restrictions"),
-            ("dolphin-*", "Dolphin models are uncensored by design"),
-            ("wizard-vicuna*", "WizardVicuna uncensored variant"),
-            ("*abliterated*", "Model with safety training removed"),
-        ]:
+            # Ensure the Default profile always exists
             await conn.execute(
                 """
-                INSERT INTO model_safety_tags (pattern, classification, reason)
-                VALUES ($1, 'unsafe', $2)
-                ON CONFLICT (pattern) DO NOTHING
-                """,
-                pattern, reason,
+                INSERT INTO profiles (name, is_default)
+                VALUES ('Default', TRUE)
+                ON CONFLICT (name) DO NOTHING
+                """
             )
+
+            # Seed default safety tags
+            for pattern, reason in [
+                ("*uncensored*", "Model trained without safety restrictions"),
+                ("dolphin-*", "Dolphin models are uncensored by design"),
+                ("wizard-vicuna*", "WizardVicuna uncensored variant"),
+                ("*abliterated*", "Model with safety training removed"),
+            ]:
+                await conn.execute(
+                    """
+                    INSERT INTO model_safety_tags (pattern, classification, reason)
+                    VALUES ($1, 'unsafe', $2)
+                    ON CONFLICT (pattern) DO NOTHING
+                    """,
+                    pattern, reason,
+                )
     logger.info("Database tables initialized")
 
 
