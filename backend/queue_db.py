@@ -5,6 +5,11 @@ import asyncpg
 
 logger = logging.getLogger(__name__)
 
+_TRANSIENT_PG = (
+    asyncpg.exceptions.ConnectionDoesNotExistError,
+    asyncpg.exceptions.InterfaceError,
+)
+
 QUEUE_TABLES_SQL = """
 
 CREATE TABLE IF NOT EXISTS queue_jobs (
@@ -112,9 +117,16 @@ async def insert_job(pool: asyncpg.Pool, job_id: str, batch_id: Optional[str],
 
 
 async def get_job(pool: asyncpg.Pool, job_id: str) -> Optional[dict]:
-    async with pool.acquire() as conn:
-        row = await conn.fetchrow("SELECT * FROM queue_jobs WHERE id = $1", job_id)
-    return dict(row) if row else None
+    for _attempt in range(2):
+        try:
+            async with pool.acquire() as conn:
+                row = await conn.fetchrow("SELECT * FROM queue_jobs WHERE id = $1", job_id)
+            return dict(row) if row else None
+        except (asyncpg.exceptions.ConnectionDoesNotExistError,
+                asyncpg.exceptions.InterfaceError):
+            if _attempt == 0:
+                continue
+            raise
 
 
 async def get_batch_jobs(pool: asyncpg.Pool, batch_id: str) -> list[dict]:
@@ -124,6 +136,86 @@ async def get_batch_jobs(pool: asyncpg.Pool, batch_id: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+async def _execute_update_job_status(
+    conn: asyncpg.Connection, job_id: str, status: str,
+    result: Optional[dict], error: Optional[str], runner_id: Optional[int],
+) -> None:
+    import json
+    if status == "running":
+        if runner_id is not None:
+            await conn.execute("""
+                UPDATE queue_jobs SET status = $2, runner_id = $3,
+                    started_at = now(), loading_model_at = NULL
+                WHERE id = $1
+            """, job_id, status, runner_id)
+        else:
+            await conn.execute("""
+                UPDATE queue_jobs SET status = $2, started_at = now(),
+                    loading_model_at = NULL
+                WHERE id = $1
+            """, job_id, status)
+    elif status in ("completed", "failed", "cancelled"):
+        if result is not None and status == "completed":
+            from result_slim import slim_stored_result
+            result = slim_stored_result(result)
+        await conn.execute("""
+            UPDATE queue_jobs SET status = $2, result = $3::jsonb, error = $4,
+                completed_at = now(), loading_model_at = NULL
+            WHERE id = $1
+            AND status NOT IN ('completed', 'failed', 'cancelled')
+        """, job_id, status, json.dumps(result) if result else None, error)
+    elif status == "queued":
+        # Re-queue after retry: must not keep a runner assignment — UI and
+        # placement logic assume queued jobs have no host yet.
+        if error is not None:
+            await conn.execute("""
+                UPDATE queue_jobs SET status = $2, error = $3,
+                    loading_model_at = NULL, runner_id = NULL
+                WHERE id = $1
+            """, job_id, status, error)
+        else:
+            await conn.execute("""
+                UPDATE queue_jobs SET status = $2,
+                    loading_model_at = NULL, runner_id = NULL
+                WHERE id = $1
+            """, job_id, status)
+    else:
+        if status == "loading_model":
+            if runner_id is not None:
+                await conn.execute("""
+                    UPDATE queue_jobs SET status = $2, runner_id = $3,
+                        loading_model_at = now()
+                    WHERE id = $1
+                """, job_id, status, runner_id)
+            else:
+                await conn.execute("""
+                    UPDATE queue_jobs SET status = $2, loading_model_at = now()
+                    WHERE id = $1
+                """, job_id, status)
+        elif runner_id is not None and error is not None:
+            await conn.execute("""
+                UPDATE queue_jobs SET status = $2, runner_id = $3, error = $4,
+                    loading_model_at = NULL
+                WHERE id = $1
+            """, job_id, status, runner_id, error)
+        elif runner_id is not None:
+            await conn.execute("""
+                UPDATE queue_jobs SET status = $2, runner_id = $3,
+                    loading_model_at = NULL
+                WHERE id = $1
+            """, job_id, status, runner_id)
+        elif error is not None:
+            await conn.execute("""
+                UPDATE queue_jobs SET status = $2, error = $3, loading_model_at = NULL
+                WHERE id = $1
+            """, job_id, status, error)
+        else:
+            await conn.execute("""
+                UPDATE queue_jobs SET status = $2, loading_model_at = NULL
+                WHERE id = $1
+            """, job_id, status)
+
+
 async def update_job_status(pool: asyncpg.Pool, job_id: str, status: str,
                             result: Optional[dict] = None, error: Optional[str] = None,
                             runner_id: Optional[int] = None):
@@ -131,82 +223,16 @@ async def update_job_status(pool: asyncpg.Pool, job_id: str, status: str,
     UPDATE — used by the scheduler to stamp the dispatched runner on the
     loading_model → running transitions so the Active Queue UI can show it.
     Terminal transitions (completed/failed/cancelled) leave runner_id alone."""
-    import json
-    async with pool.acquire() as conn:
-        if status == "running":
-            if runner_id is not None:
-                await conn.execute("""
-                    UPDATE queue_jobs SET status = $2, runner_id = $3,
-                        started_at = now(), loading_model_at = NULL
-                    WHERE id = $1
-                """, job_id, status, runner_id)
-            else:
-                await conn.execute("""
-                    UPDATE queue_jobs SET status = $2, started_at = now(),
-                        loading_model_at = NULL
-                    WHERE id = $1
-                """, job_id, status)
-        elif status in ("completed", "failed", "cancelled"):
-            if result is not None and status == "completed":
-                from result_slim import slim_stored_result
-
-                result = slim_stored_result(result)
-            await conn.execute("""
-                UPDATE queue_jobs SET status = $2, result = $3::jsonb, error = $4,
-                    completed_at = now(), loading_model_at = NULL
-                WHERE id = $1
-                AND status NOT IN ('completed', 'failed', 'cancelled')
-            """, job_id, status, json.dumps(result) if result else None, error)
-        elif status == "queued":
-            # Re-queue after retry: must not keep a runner assignment — UI and
-            # placement logic assume queued jobs have no host yet.
-            if error is not None:
-                await conn.execute("""
-                    UPDATE queue_jobs SET status = $2, error = $3,
-                        loading_model_at = NULL, runner_id = NULL
-                    WHERE id = $1
-                """, job_id, status, error)
-            else:
-                await conn.execute("""
-                    UPDATE queue_jobs SET status = $2,
-                        loading_model_at = NULL, runner_id = NULL
-                    WHERE id = $1
-                """, job_id, status)
-        else:
-            if status == "loading_model":
-                if runner_id is not None:
-                    await conn.execute("""
-                        UPDATE queue_jobs SET status = $2, runner_id = $3,
-                            loading_model_at = now()
-                        WHERE id = $1
-                    """, job_id, status, runner_id)
-                else:
-                    await conn.execute("""
-                        UPDATE queue_jobs SET status = $2, loading_model_at = now()
-                        WHERE id = $1
-                    """, job_id, status)
-            elif runner_id is not None and error is not None:
-                await conn.execute("""
-                    UPDATE queue_jobs SET status = $2, runner_id = $3, error = $4,
-                        loading_model_at = NULL
-                    WHERE id = $1
-                """, job_id, status, runner_id, error)
-            elif runner_id is not None:
-                await conn.execute("""
-                    UPDATE queue_jobs SET status = $2, runner_id = $3,
-                        loading_model_at = NULL
-                    WHERE id = $1
-                """, job_id, status, runner_id)
-            elif error is not None:
-                await conn.execute("""
-                    UPDATE queue_jobs SET status = $2, error = $3, loading_model_at = NULL
-                    WHERE id = $1
-                """, job_id, status, error)
-            else:
-                await conn.execute("""
-                    UPDATE queue_jobs SET status = $2, loading_model_at = NULL
-                    WHERE id = $1
-                """, job_id, status)
+    for _attempt in range(2):
+        try:
+            async with pool.acquire() as conn:
+                await _execute_update_job_status(conn, job_id, status, result, error, runner_id)
+            return
+        except _TRANSIENT_PG as exc:
+            if _attempt == 0:
+                logger.warning("update_job_status: retrying after transient DB error: %s", exc)
+                continue
+            raise
 
 
 async def increment_job_retry(pool: asyncpg.Pool, job_id: str) -> int:

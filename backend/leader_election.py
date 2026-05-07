@@ -116,35 +116,46 @@ class PostgresLeaderElector(LeaderElector):
         self._stop.set()
 
     async def _try_acquire_or_renew(self) -> bool:
-        async with self.pool.acquire() as conn:
-            row = await conn.fetchrow(
-                """
-                UPDATE scheduler_leader_lease
-                SET holder_id = $1,
-                    lease_until = NOW() + ($2 * interval '1 second')
-                WHERE id = 1
-                  AND (
-                      lease_until < NOW()
-                      OR holder_id = $1
-                      OR holder_id = ''
-                  )
-                RETURNING holder_id
-                """,
-                self.holder_id,
-                self.ttl_sec,
-            )
-        return row is not None and row["holder_id"] == self.holder_id
+        try:
+            async with self.pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    """
+                    UPDATE scheduler_leader_lease
+                    SET holder_id = $1,
+                        lease_until = NOW() + ($2 * interval '1 second')
+                    WHERE id = 1
+                      AND (
+                          lease_until < NOW()
+                          OR holder_id = $1
+                          OR holder_id = ''
+                      )
+                    RETURNING holder_id
+                    """,
+                    self.holder_id,
+                    self.ttl_sec,
+                )
+            return row is not None and row["holder_id"] == self.holder_id
+        except (
+            asyncpg.exceptions.ConnectionDoesNotExistError,
+            asyncpg.exceptions.InterfaceError,
+            asyncpg.exceptions.TooManyConnectionsError,
+        ) as exc:
+            logger.warning("Leader election DB error (will retry next tick): %s", exc)
+            return False
 
     async def _release(self) -> None:
-        async with self.pool.acquire() as conn:
-            await conn.execute(
-                """
-                UPDATE scheduler_leader_lease
-                SET lease_until = NOW()
-                WHERE id = 1 AND holder_id = $1
-                """,
-                self.holder_id,
-            )
+        try:
+            async with self.pool.acquire() as conn:
+                await conn.execute(
+                    """
+                    UPDATE scheduler_leader_lease
+                    SET lease_until = NOW()
+                    WHERE id = 1 AND holder_id = $1
+                    """,
+                    self.holder_id,
+                )
+        except Exception as exc:
+            logger.warning("Leader election release failed (lease will expire naturally): %s", exc)
 
     async def run(
         self,

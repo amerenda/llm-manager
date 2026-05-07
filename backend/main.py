@@ -673,6 +673,15 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="LLM Manager Backend", version="3.0.0", lifespan=lifespan)
+
+from fastapi.responses import JSONResponse as _JSONResponse
+
+@app.exception_handler(asyncpg.exceptions.ConnectionDoesNotExistError)
+@app.exception_handler(asyncpg.exceptions.TooManyConnectionsError)
+async def _asyncpg_connection_error_handler(request: Request, exc: Exception) -> _JSONResponse:
+    logger.warning("DB connection error on %s %s: %s", request.method, request.url.path, exc)
+    return _JSONResponse(status_code=503, content={"detail": "Database connection error, please retry"})
+
 UI_ORIGIN = os.environ.get("UI_ORIGIN", "https://llm-manager.amer.dev")
 app.add_middleware(
     CORSMiddleware,
