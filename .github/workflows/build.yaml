@@ -59,7 +59,7 @@ jobs:
       - name: Run tests
         run: |
           cd backend
-          .venv/bin/python -m pytest test_backend.py test_queue.py -v
+          .venv/bin/python -m pytest test_backend.py test_queue.py test_leader_election.py test_queue_strategies.py test_result_slim.py test_runner_diagnostics.py test_scheduler_v2.py -v
 
   set-tag:
     if: github.event_name != 'pull_request'

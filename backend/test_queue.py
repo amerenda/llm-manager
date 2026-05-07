@@ -259,6 +259,113 @@ class TestUpdateJobStatus:
         assert "completed_at" not in sql
 
 
+# ── Retry-on-transient-error tests ───────────────────────────────────────────
+
+import asyncpg as _asyncpg
+
+
+def _make_flaky_pool(exc, success_conn=None):
+    """Pool whose first acquired connection raises exc; second returns success_conn."""
+    call_count = [0]
+    if success_conn is None:
+        success_conn = AsyncMock()
+
+    class _FlakyCtx:
+        async def __aenter__(self):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                failing = AsyncMock()
+                failing.fetchrow.side_effect = exc
+                failing.execute.side_effect = exc
+                return failing
+            return success_conn
+
+        async def __aexit__(self, *_):
+            return False
+
+    pool = MagicMock()
+    pool.acquire.return_value = _FlakyCtx()
+    return pool, success_conn, call_count
+
+
+class TestGetJobRetry:
+    def test_retries_once_on_connection_error_and_succeeds(self):
+        success_conn = AsyncMock()
+        success_conn.fetchrow.return_value = {"id": "j1", "status": "queued", "model": "m"}
+        exc = _asyncpg.exceptions.ConnectionDoesNotExistError("stale")
+        pool, _, call_count = _make_flaky_pool(exc, success_conn)
+
+        result = _run(queue_db.get_job(pool, "j1"))
+
+        assert result == {"id": "j1", "status": "queued", "model": "m"}
+        assert call_count[0] == 2
+
+    def test_retries_once_on_interface_error_and_succeeds(self):
+        success_conn = AsyncMock()
+        success_conn.fetchrow.return_value = {"id": "j2", "status": "running", "model": "m"}
+        exc = _asyncpg.exceptions.InterfaceError("pool blip")
+        pool, _, call_count = _make_flaky_pool(exc, success_conn)
+
+        result = _run(queue_db.get_job(pool, "j2"))
+
+        assert result["id"] == "j2"
+        assert call_count[0] == 2
+
+    def test_reraises_after_second_connection_error(self):
+        exc = _asyncpg.exceptions.ConnectionDoesNotExistError("still gone")
+
+        class _AlwaysFailCtx:
+            async def __aenter__(self):
+                conn = AsyncMock()
+                conn.fetchrow.side_effect = exc
+                return conn
+
+            async def __aexit__(self, *_):
+                return False
+
+        pool = MagicMock()
+        pool.acquire.return_value = _AlwaysFailCtx()
+
+        with pytest.raises(_asyncpg.exceptions.ConnectionDoesNotExistError):
+            _run(queue_db.get_job(pool, "j1"))
+
+
+class TestUpdateJobStatusRetry:
+    def test_retries_once_on_connection_error_and_succeeds(self):
+        exc = _asyncpg.exceptions.ConnectionDoesNotExistError("stale")
+        pool, _, call_count = _make_flaky_pool(exc)
+
+        _run(queue_db.update_job_status(pool, "j1", "running"))
+
+        assert call_count[0] == 2
+
+    def test_retries_on_interface_error(self):
+        exc = _asyncpg.exceptions.InterfaceError("blip")
+        pool, _, call_count = _make_flaky_pool(exc)
+
+        _run(queue_db.update_job_status(pool, "j1", "failed", error="runner timeout"))
+
+        assert call_count[0] == 2
+
+    def test_reraises_after_second_connection_error(self):
+        exc = _asyncpg.exceptions.ConnectionDoesNotExistError("still gone")
+
+        class _AlwaysFailCtx:
+            async def __aenter__(self):
+                conn = AsyncMock()
+                conn.execute.side_effect = exc
+                return conn
+
+            async def __aexit__(self, *_):
+                return False
+
+        pool = MagicMock()
+        pool.acquire.return_value = _AlwaysFailCtx()
+
+        with pytest.raises(_asyncpg.exceptions.ConnectionDoesNotExistError):
+            _run(queue_db.update_job_status(pool, "j1", "running"))
+
+
 class TestRecoverStaleInProgressJobs:
     def test_invokes_update_with_thresholds(self):
         pool, conn = _make_mock_pool()

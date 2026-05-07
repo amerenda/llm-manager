@@ -2,8 +2,11 @@
 
 import asyncio
 
+import asyncpg
+
 from leader_election import (
     K8sLeaseLeaderElector,
+    NoopLeaderElector,
     PostgresLeaderElector,
 )
 
@@ -26,6 +29,19 @@ class _FakeConn:
     async def fetchrow(self, sql, holder_id, ttl_sec):
         self.fetchrow_calls.append((holder_id, ttl_sec))
         return self.fetchrow_result
+
+
+class _FakeConnRaises:
+    """Connection whose fetchrow/execute always raises the given exception."""
+
+    def __init__(self, exc):
+        self._exc = exc
+
+    async def fetchrow(self, *_a, **_kw):
+        raise self._exc
+
+    async def execute(self, *_a, **_kw):
+        raise self._exc
 
 
 class _FakeAcquire:
@@ -129,3 +145,72 @@ def test_k8s_release_clears_holder():
     }
     merged = el._lease_put_body_from_get(lease, renew_time="2099-01-01T00:00:00.000Z", holder_identity="")
     assert merged["spec"]["holderIdentity"] == ""
+
+
+# ── PostgresLeaderElector resilience (transient DB errors) ───────────────────
+
+def test_postgres_try_acquire_returns_false_on_connection_does_not_exist():
+    """Stale TCP socket raises ConnectionDoesNotExistError: elector should
+    return False (retry next tick) instead of propagating the exception."""
+    exc = asyncpg.exceptions.ConnectionDoesNotExistError("connection was closed")
+    elector = PostgresLeaderElector(_FakePool(_FakeConnRaises(exc)), holder_id="pod-x", ttl_sec=30)
+
+    async def job():
+        result = await elector._try_acquire_or_renew()
+        assert result is False
+
+    _run(job())
+
+
+def test_postgres_try_acquire_returns_false_on_interface_error():
+    """Pool closing or other interface errors must not crash the elector loop."""
+    exc = asyncpg.exceptions.InterfaceError("pool is closing")
+    elector = PostgresLeaderElector(_FakePool(_FakeConnRaises(exc)), holder_id="pod-x", ttl_sec=30)
+
+    async def job():
+        assert not await elector._try_acquire_or_renew()
+
+    _run(job())
+
+
+def test_postgres_try_acquire_returns_false_on_too_many_connections():
+    exc = asyncpg.exceptions.TooManyConnectionsError("too many connections")
+    elector = PostgresLeaderElector(_FakePool(_FakeConnRaises(exc)), holder_id="pod-x", ttl_sec=30)
+
+    async def job():
+        assert not await elector._try_acquire_or_renew()
+
+    _run(job())
+
+
+def test_postgres_release_swallows_db_errors():
+    """_release() must not raise even when the DB is unreachable, so that the
+    finally block in elector.run() doesn't crash the process on shutdown."""
+    exc = asyncpg.exceptions.ConnectionDoesNotExistError("gone")
+    elector = PostgresLeaderElector(_FakePool(_FakeConnRaises(exc)), holder_id="pod-x", ttl_sec=30)
+
+    async def job():
+        await elector._release()  # must not raise
+
+    _run(job())
+
+
+def test_noop_elector_is_always_leader_until_shutdown():
+    elector = NoopLeaderElector()
+    gained = []
+    lost = []
+
+    async def job():
+        async def _gain():
+            gained.append(True)
+            await elector.shutdown()
+
+        async def _lose():
+            lost.append(True)
+
+        await elector.run(_gain, _lose)
+
+    _run(job())
+    assert gained == [True]
+    assert lost == [True]
+    assert not elector.is_leader()
