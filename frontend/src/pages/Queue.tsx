@@ -26,6 +26,23 @@ function waitTime(iso: string | null): string {
   return formatDuration(diffSec)
 }
 
+function getJobContextLabel(job: QueueJob): string | null {
+  const metadata = job.metadata
+  if (!metadata || typeof metadata !== 'object') return null
+
+  const slot = metadata['slot']
+  if (slot !== undefined && slot !== null && String(slot).trim() !== '') {
+    return `slot ${String(slot)}`
+  }
+
+  const source = metadata['source']
+  if (typeof source === 'string' && source.trim()) {
+    return source.trim()
+  }
+
+  return null
+}
+
 function statusBadge(status: string) {
   const styles: Record<string, string> = {
     running: 'bg-blue-900/40 text-blue-400',
@@ -58,6 +75,7 @@ function JobRow({ job, onCancel, onPriorityUp, onPriorityDown, isPending }: {
     (job.status === 'loading_model' ||
       job.status === 'running' ||
       job.status === 'waiting_for_eviction')
+  const contextLabel = getJobContextLabel(job)
 
   return (
     <div className="flex items-center gap-3 bg-gray-950 rounded-lg px-3 py-2.5">
@@ -76,7 +94,7 @@ function JobRow({ job, onCancel, onPriorityUp, onPriorityDown, isPending }: {
         </p>
         <p className="text-xs text-gray-500 truncate">
           {job.app_name || 'unknown'} · {job.id}
-          {job.metadata?.slot !== undefined && <span> · slot {String(job.metadata.slot)}</span>}
+          {contextLabel && <span> · {contextLabel}</span>}
         </p>
       </div>
       <div className="text-xs text-gray-500 tabular-nums w-16 text-right flex-shrink-0">
@@ -259,6 +277,7 @@ export function Queue() {
                 const duration = job.started_at && job.completed_at
                   ? (new Date(job.completed_at).getTime() - new Date(job.started_at).getTime()) / 1000
                   : null
+                const contextLabel = getJobContextLabel(job)
                 return (
                   <div key={job.id} className="flex items-center gap-3 bg-gray-950 rounded-lg px-3 py-2">
                     <div className="flex-shrink-0">
@@ -271,8 +290,18 @@ export function Queue() {
                       )}
                     </div>
                     <div className="min-w-0 flex-1">
-                      <p className="text-sm text-gray-300 truncate">{job.model}</p>
-                      <p className="text-xs text-gray-500 truncate">{job.app_name || 'unknown'} · {job.id}</p>
+                      <p className="text-sm text-gray-300 truncate">
+                        {job.model}
+                        {job.runner_hostname && (
+                          <span className="ml-2 text-xs font-normal text-gray-500">
+                            on <span className="text-gray-300">{job.runner_hostname}</span>
+                          </span>
+                        )}
+                      </p>
+                      <p className="text-xs text-gray-500 truncate">
+                        {job.app_name || 'unknown'} · {job.id}
+                        {contextLabel && <span> · {contextLabel}</span>}
+                      </p>
                     </div>
                     <div className="text-xs text-gray-500 tabular-nums flex-shrink-0">
                       {duration !== null && <span>{formatDuration(duration)} · </span>}
