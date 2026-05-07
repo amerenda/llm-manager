@@ -144,6 +144,7 @@ export function Queue() {
   const cancelJob = useCancelQueueJob()
   const setPriority = useSetJobPriority()
   const [showHistory, setShowHistory] = useState(false)
+  const [expandedHistoryJobId, setExpandedHistoryJobId] = useState<string | null>(null)
 
   const m = metrics.data
   const jobList = jobs.data ?? []
@@ -278,35 +279,57 @@ export function Queue() {
                   ? (new Date(job.completed_at).getTime() - new Date(job.started_at).getTime()) / 1000
                   : null
                 const contextLabel = getJobContextLabel(job)
+                const isExpanded = expandedHistoryJobId === job.id
+                const canShowFailureReason = job.status === 'failed' || job.status === 'cancelled'
                 return (
-                  <div key={job.id} className="flex items-center gap-3 bg-gray-950 rounded-lg px-3 py-2">
-                    <div className="flex-shrink-0">
-                      {job.status === 'completed' ? (
-                        <CheckCircle2 className="w-3.5 h-3.5 text-green-500" />
-                      ) : job.status === 'cancelled' ? (
-                        <X className="w-3.5 h-3.5 text-gray-500" />
-                      ) : (
-                        <XCircle className="w-3.5 h-3.5 text-red-500" />
-                      )}
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <p className="text-sm text-gray-300 truncate">
-                        {job.model}
-                        {job.runner_hostname && (
-                          <span className="ml-2 text-xs font-normal text-gray-500">
-                            on <span className="text-gray-300">{job.runner_hostname}</span>
-                          </span>
+                  <div key={job.id} className="bg-gray-950 rounded-lg">
+                    <button
+                      type="button"
+                      onClick={() => setExpandedHistoryJobId(prev => prev === job.id ? null : job.id)}
+                      className="w-full flex items-center gap-3 px-3 py-2 text-left hover:bg-gray-900/60 rounded-lg transition-colors"
+                    >
+                      <div className="flex-shrink-0">
+                        {job.status === 'completed' ? (
+                          <CheckCircle2 className="w-3.5 h-3.5 text-green-500" />
+                        ) : job.status === 'cancelled' ? (
+                          <X className="w-3.5 h-3.5 text-gray-500" />
+                        ) : (
+                          <XCircle className="w-3.5 h-3.5 text-red-500" />
                         )}
-                      </p>
-                      <p className="text-xs text-gray-500 truncate">
-                        {job.app_name || 'unknown'} · {job.id}
-                        {contextLabel && <span> · {contextLabel}</span>}
-                      </p>
-                    </div>
-                    <div className="text-xs text-gray-500 tabular-nums flex-shrink-0">
-                      {duration !== null && <span>{formatDuration(duration)} · </span>}
-                      {timeAgo(job.completed_at ?? job.started_at ?? job.created_at)}
-                    </div>
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm text-gray-300 truncate">
+                          {job.model}
+                          {job.runner_hostname && (
+                            <span className="ml-2 text-xs font-normal text-gray-500">
+                              on <span className="text-gray-300">{job.runner_hostname}</span>
+                            </span>
+                          )}
+                        </p>
+                        <p className="text-xs text-gray-500 truncate">
+                          {job.app_name || 'unknown'} · {job.id}
+                          {contextLabel && <span> · {contextLabel}</span>}
+                        </p>
+                      </div>
+                      <div className="text-xs text-gray-500 tabular-nums flex-shrink-0">
+                        {duration !== null && <span>{formatDuration(duration)} · </span>}
+                        {timeAgo(job.completed_at ?? job.started_at ?? job.created_at)}
+                      </div>
+                    </button>
+                    {isExpanded && canShowFailureReason && (
+                      <div className="px-3 pb-2">
+                        <div className="text-xs text-red-300 bg-red-950/30 border border-red-900/50 rounded p-2 break-words">
+                          {job.error?.trim() ? job.error : 'No failure reason provided.'}
+                        </div>
+                      </div>
+                    )}
+                    {isExpanded && !canShowFailureReason && (
+                      <div className="px-3 pb-2">
+                        <div className="text-xs text-gray-400 bg-gray-900/50 border border-gray-800 rounded p-2">
+                          No failure reason — this job {job.status}.
+                        </div>
+                      </div>
+                    )}
                   </div>
                 )
               })
