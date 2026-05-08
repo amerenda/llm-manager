@@ -166,6 +166,11 @@ class RunnerState:
     # Ollama cooldown: set when Ollama returns 503 on this runner. _pick_runner
     # skips the runner until the timestamp expires, giving Ollama time to recover.
     ollama_down_until: Optional[float] = None
+    # Inference backend reported by the agent heartbeat.
+    backend_type: str = "ollama"  # "ollama" | "vllm"
+    # For vLLM runners: the single model the vLLM process was started with.
+    # current_model is set to this on heartbeat so _pick_runner matches correctly.
+    vllm_model: Optional[str] = None
 
     @property
     def is_idle(self) -> bool:
@@ -478,21 +483,29 @@ class SimplifiedScheduler:
                     hostname=r["hostname"],
                     pinned_model=r.get("pinned_model"),
                     draining=bool(r.get("draining")),
+                    backend_type=caps.get("backend_type", "ollama"),
+                    vllm_model=caps.get("vllm_model"),
                 )
                 # Try to poll for initial state
                 try:
                     client = await self.get_runner_client(runner_id=r["id"])
                     status = await client.status()
                     rs.gpu_total_gb = status.get("gpu_vram_total_gb", 0.0)
-                    loaded = status.get("loaded_ollama_models") or []
-                    if loaded:
-                        rs.current_model = loaded[0].get("name") or None
-                        if rs.current_model:
-                            rs.model_loaded_at = time.time()
+                    if rs.backend_type == "vllm":
+                        rs.current_model = status.get("vllm_model") or rs.vllm_model
+                    else:
+                        loaded = status.get("loaded_ollama_models") or []
+                        if loaded:
+                            rs.current_model = loaded[0].get("name") or None
+                    if rs.current_model:
+                        rs.model_loaded_at = time.time()
                 except Exception:
                     total_bytes = caps.get("gpu_vram_total_bytes", 0)
                     if total_bytes:
                         rs.gpu_total_gb = round(total_bytes / 1e9, 2)
+                    if rs.backend_type == "vllm" and rs.vllm_model:
+                        rs.current_model = rs.vllm_model
+                        rs.model_loaded_at = time.time()
                 rs.downloaded_models = _dl_set_from_caps(caps)
                 self._runners[r["id"]] = rs
             else:
@@ -505,6 +518,15 @@ class SimplifiedScheduler:
                 # models in the background and we need _pick_runner to see it
                 # as soon as the heartbeat lands.
                 rs.downloaded_models = _dl_set_from_caps(caps)
+                # Refresh backend type and vLLM model from heartbeat caps.
+                if caps.get("backend_type"):
+                    rs.backend_type = caps["backend_type"]
+                if rs.backend_type == "vllm" and caps.get("vllm_model"):
+                    rs.vllm_model = caps["vllm_model"]
+                    # Keep current_model in sync with the static vLLM model.
+                    if rs.current_model != rs.vllm_model:
+                        rs.current_model = rs.vllm_model
+                        rs.model_loaded_at = time.time()
 
             # Update static gauges from capabilities (applies to new and existing runners).
             # vram_used is NOT in capabilities — it's live state updated by
@@ -528,6 +550,8 @@ class SimplifiedScheduler:
         for rs in self._runners.values():
             if not rs.is_idle:
                 continue
+            if rs.backend_type == "vllm":
+                continue  # vLLM model is static; no reconcile needed
             try:
                 client = await self.get_runner_client(runner_id=rs.runner_id)
                 status = await client.status()
@@ -994,6 +1018,9 @@ class SimplifiedScheduler:
 
         # 3. Idle + has it downloaded + fits (VRAM-wise).
         #
+        # vLLM runners only ever serve their one static model and cannot swap;
+        # they must have matched in step 2 or not at all.
+        #
         # Some agents omit gpu_vram_total_gb in /v1/status while still reporting
         # models via heartbeat; gpu_total_gb stays 0 and we used to skip here
         # forever — jobs sat queued with idle GPUs and the model on disk.
@@ -1002,6 +1029,8 @@ class SimplifiedScheduler:
         for r in self._runners.values():
             if r.pinned_model is not None or _skip(r):
                 continue
+            if r.backend_type == "vllm":
+                continue  # already handled (or rejected) in step 2
             if not r.is_idle:
                 continue
             if not r.has_downloaded(model):

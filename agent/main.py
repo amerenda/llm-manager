@@ -344,6 +344,10 @@ OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 # Ollama model storage — used for disk space reporting
 # MODEL_STORAGE_PATH takes priority, then OLLAMA_MODELS, then default
 OLLAMA_MODELS_DIR = os.environ.get("MODEL_STORAGE_PATH") or os.environ.get("OLLAMA_MODELS", os.path.expanduser("~/.ollama/models"))
+
+# Inference backend — "ollama" (default) or "vllm"
+BACKEND_TYPE = os.environ.get("BACKEND_TYPE", "ollama").strip().lower()
+VLLM_URL = os.environ.get("VLLM_URL", "http://localhost:8000").rstrip("/")
 AGENT_DISK_STAT_PATH = (os.environ.get("AGENT_DISK_STAT_PATH") or "").strip()
 COMFYUI_URL = os.environ.get("COMFYUI_URL", "http://localhost:8188")
 COMFYUI_OUTPUT_DIR = os.environ.get("COMFYUI_OUTPUT_DIR", "/outputs")
@@ -765,15 +769,22 @@ async def lifespan(app: FastAPI):
 
 async def _build_capabilities() -> dict:
     _refresh_gpu_driver_versions()
-    loaded = await _ollama_loaded_models()
+    if BACKEND_TYPE == "vllm":
+        loaded = []
+        vllm_model = await _vllm_loaded_model()
+        downloaded = [{"name": vllm_model, "digest": "", "size_bytes": 0, "modified_at": ""}] if vllm_model else []
+    else:
+        loaded = await _ollama_loaded_models()
+        vllm_model = None
+        downloaded = await _ollama_downloaded_models()
     ollama_loaded_bytes = sum(int(m.get("size_bytes", 0) or 0) for m in loaded)
     gpu = _gpu_stats(ollama_loaded_bytes=ollama_loaded_bytes)
     disk = _disk_stats()
-    downloaded = await _ollama_downloaded_models()
     comfyui_ok = await _comfyui_ok()
     defaults_path = _ollama_env_file()
     ui_path = _ollama_ui_env_file()
     caps = {
+        "backend_type": BACKEND_TYPE,
         "gpu_vendor": gpu.get("gpu_vendor", "none"),
         "nvidia_driver_version": _NVIDIA_DRIVER_VERSION,
         "cuda_driver_version": _CUDA_DRIVER_VERSION,
@@ -802,6 +813,8 @@ async def _build_capabilities() -> dict:
             "ollama_ui_overrides_present": os.path.isfile(ui_path),
         },
     }
+    if BACKEND_TYPE == "vllm" and vllm_model:
+        caps["vllm_model"] = vllm_model
     # Always include TLS cert so heartbeats don't wipe it
     try:
         caps["tls_cert"] = _read_cert_pem()
@@ -1181,6 +1194,60 @@ async def _comfyui_ok() -> bool:
         return False
 
 
+def _vllm_chat_http_timeout() -> httpx.Timeout:
+    read = _parse_float_env("VLLM_CHAT_READ_TIMEOUT", 600.0)
+    connect = _parse_float_env("VLLM_CHAT_CONNECT_TIMEOUT", 30.0)
+    return httpx.Timeout(connect=connect, read=read, write=connect, pool=45.0)
+
+
+async def _vllm_loaded_model() -> str | None:
+    """Return the model ID currently loaded in vLLM, or None if unreachable."""
+    try:
+        async with httpx.AsyncClient(timeout=5) as c:
+            r = await c.get(f"{VLLM_URL}/v1/models")
+            if r.status_code == 200:
+                data = r.json().get("data", [])
+                return data[0]["id"] if data else None
+    except Exception:
+        pass
+    return None
+
+
+async def _vllm_chat_proxy(body: dict, stream: bool, model: str, t0: float):
+    """Pass an OpenAI-format chat request through to vLLM unchanged."""
+    timeout = _vllm_chat_http_timeout()
+    if stream:
+        async def _stream_gen() -> AsyncGenerator[bytes, None]:
+            try:
+                async with httpx.AsyncClient(timeout=timeout) as c:
+                    async with c.stream("POST", f"{VLLM_URL}/v1/chat/completions", json=body) as resp:
+                        if resp.status_code != 200:
+                            err = await resp.aread()
+                            yield b"data: " + json.dumps({"error": err.decode()}).encode() + b"\n\n"
+                            return
+                        async for chunk in resp.aiter_bytes():
+                            yield chunk
+            except Exception as e:
+                yield b"data: " + json.dumps({"error": str(e)}).encode() + b"\n\n"
+            finally:
+                request_duration.labels(node=NODE, endpoint="/v1/chat/completions", model=model).observe(time.time() - t0)
+        return StreamingResponse(_stream_gen(), media_type="text/event-stream")
+
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as c:
+            r = await c.post(f"{VLLM_URL}/v1/chat/completions", json=body)
+            if r.status_code != 200:
+                raise HTTPException(status_code=r.status_code, detail=r.text)
+            data = r.json()
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=503, detail=f"vLLM unavailable: {e}")
+    finally:
+        request_duration.labels(node=NODE, endpoint="/v1/chat/completions", model=model).observe(time.time() - t0)
+    return data
+
+
 async def _ollama_downloaded_models() -> list[dict]:
     """Return list of on-disk Ollama models with manifest digest + size.
     Used by the backend to authoritatively track what each runner has
@@ -1269,7 +1336,12 @@ async def health():
 async def status():
     _refresh_gpu_driver_versions()
     t0 = time.time()
-    loaded = await _ollama_loaded_models()
+    if BACKEND_TYPE == "vllm":
+        loaded = []
+        vllm_model = await _vllm_loaded_model()
+    else:
+        loaded = await _ollama_loaded_models()
+        vllm_model = None
     ollama_loaded_bytes = sum(int(m.get("size_bytes", 0) or 0) for m in loaded)
     gpu = _gpu_stats(ollama_loaded_bytes=ollama_loaded_bytes)
     sys = _sys_stats()
@@ -1282,8 +1354,9 @@ async def status():
     requests_total.labels(node=NODE, endpoint="/v1/status", model="").inc()
     request_duration.labels(node=NODE, endpoint="/v1/status", model="").observe(time.time() - t0)
 
-    return {
+    resp = {
         "node": NODE,
+        "backend_type": BACKEND_TYPE,
         "gpu_vendor": gpu.get("gpu_vendor", "none"),
         "nvidia_driver_version": _NVIDIA_DRIVER_VERSION,
         "cuda_driver_version": _CUDA_DRIVER_VERSION,
@@ -1306,6 +1379,9 @@ async def status():
         "comfyui_checkpoints": checkpoints,
         "comfyui_active_checkpoint": active_ckpt,
     }
+    if vllm_model:
+        resp["vllm_model"] = vllm_model
+    return resp
 
 
 @app.get("/v1/models")
@@ -1313,21 +1389,38 @@ async def list_models():
     t0 = time.time()
     result = []
 
-    # Ollama text models
-    try:
-        async with httpx.AsyncClient(timeout=5) as c:
-            r = await c.get(f"{OLLAMA_URL}/api/tags")
-            if r.status_code == 200:
-                for m in r.json().get("models", []):
-                    result.append({
-                        "id": m["name"],
-                        "object": "model",
-                        "created": int(time.time()),
-                        "owned_by": "ollama",
-                        "type": "text",
-                    })
-    except Exception as e:
-        logger.warning("Ollama models unavailable: %s", e)
+    if BACKEND_TYPE == "vllm":
+        # vLLM returns OpenAI-format model list directly
+        try:
+            async with httpx.AsyncClient(timeout=5) as c:
+                r = await c.get(f"{VLLM_URL}/v1/models")
+                if r.status_code == 200:
+                    for m in r.json().get("data", []):
+                        result.append({
+                            "id": m["id"],
+                            "object": "model",
+                            "created": m.get("created", int(time.time())),
+                            "owned_by": "vllm",
+                            "type": "text",
+                        })
+        except Exception as e:
+            logger.warning("vLLM models unavailable: %s", e)
+    else:
+        # Ollama text models
+        try:
+            async with httpx.AsyncClient(timeout=5) as c:
+                r = await c.get(f"{OLLAMA_URL}/api/tags")
+                if r.status_code == 200:
+                    for m in r.json().get("models", []):
+                        result.append({
+                            "id": m["name"],
+                            "object": "model",
+                            "created": int(time.time()),
+                            "owned_by": "ollama",
+                            "type": "text",
+                        })
+        except Exception as e:
+            logger.warning("Ollama models unavailable: %s", e)
 
     # ComfyUI image models
     for ckpt in await _comfyui_checkpoints():
@@ -1353,6 +1446,9 @@ async def chat_completions(request: Request):
     t0 = time.time()
 
     requests_total.labels(node=NODE, endpoint="/v1/chat/completions", model=model).inc()
+
+    if BACKEND_TYPE == "vllm":
+        return await _vllm_chat_proxy(body, stream, model, t0)
 
     # When tools are present, use Ollama's OpenAI-compatible endpoint directly
     # to avoid format conversion issues with tool_calls
@@ -1667,6 +1763,9 @@ async def pull_model(req: PullRequest):
 async def unload_model(model: str):
     """Unload a model from VRAM by setting keep_alive=0."""
     requests_total.labels(node=NODE, endpoint="/v1/models/delete", model=model).inc()
+    if BACKEND_TYPE == "vllm":
+        # vLLM does not support dynamic unload; model lifetime = process lifetime
+        return {"ok": True, "message": f"vLLM: unload is a no-op (model {model} stays resident)"}
     try:
         async with httpx.AsyncClient(timeout=30) as c:
             r = await c.post(
@@ -1714,6 +1813,13 @@ async def load_model(req: LoadRequest):
     """Load a model into VRAM by sending a minimal generate request with keep_alive."""
     requests_total.labels(node=NODE, endpoint="/v1/models/load", model=req.model).inc()
     t0 = time.time()
+    if BACKEND_TYPE == "vllm":
+        # vLLM model is loaded at process start; validate the request matches
+        loaded = await _vllm_loaded_model()
+        request_duration.labels(node=NODE, endpoint="/v1/models/load", model=req.model).observe(time.time() - t0)
+        if loaded and loaded != req.model:
+            raise HTTPException(status_code=409, detail=f"vLLM runner serves {loaded!r}, not {req.model!r}")
+        return {"ok": True, "message": f"vLLM: {req.model} already resident"}
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(30.0, read=600.0)) as c:
             r = await c.post(
