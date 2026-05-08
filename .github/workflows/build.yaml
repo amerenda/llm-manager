@@ -130,6 +130,18 @@ jobs:
         if: steps.check.outputs.skip != 'true'
         run: |
           docker build ${{ matrix.build_args }} --build-arg BUILDTIME="${GITHUB_SHA}" -t "${IMAGE}:${{ matrix.component }}-${TAG}-amd64" -f ${{ matrix.dockerfile }} ${{ matrix.context }}
+          if [[ "${{ matrix.component }}" == "frontend" ]]; then
+            docker run --rm "${IMAGE}:${{ matrix.component }}-${TAG}-amd64" sh -c '
+              set -e
+              html=/usr/share/nginx/html/index.html
+              refs=$(grep -oE "assets/[^\"()]+\.(js|css)" "$html" | sort -u)
+              [ -n "$refs" ] || { echo "ERROR: no asset refs found in index.html"; exit 1; }
+              for ref in $refs; do
+                path="/usr/share/nginx/html/${ref}"
+                [ -f "$path" ] && echo "OK: $ref" || { echo "MISSING: $path (referenced in index.html but not in image)"; exit 1; }
+              done
+            '
+          fi
           docker push "${IMAGE}:${{ matrix.component }}-${TAG}-amd64"
 
       - name: Build and push agent-amd (amd64 only)
@@ -167,6 +179,16 @@ jobs:
         if: needs.changes.outputs.frontend == 'true'
         run: |
           docker build --build-arg BUILDTIME="${GITHUB_SHA}" -t "${IMAGE}:frontend-${TAG}-arm64" -f frontend/Dockerfile frontend
+          docker run --rm "${IMAGE}:frontend-${TAG}-arm64" sh -c '
+            set -e
+            html=/usr/share/nginx/html/index.html
+            refs=$(grep -oE "assets/[^\"()]+\.(js|css)" "$html" | sort -u)
+            [ -n "$refs" ] || { echo "ERROR: no asset refs found in index.html"; exit 1; }
+            for ref in $refs; do
+              path="/usr/share/nginx/html/${ref}"
+              [ -f "$path" ] && echo "OK: $ref" || { echo "MISSING: $path (referenced in index.html but not in image)"; exit 1; }
+            done
+          '
           docker push "${IMAGE}:frontend-${TAG}-arm64"
 
       - name: Build and push agent (arm64)
