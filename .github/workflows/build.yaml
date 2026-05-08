@@ -129,7 +129,7 @@ jobs:
       - name: Build and push ${{ matrix.component }} (amd64)
         if: steps.check.outputs.skip != 'true'
         run: |
-          docker build ${{ matrix.build_args }} -t "${IMAGE}:${{ matrix.component }}-${TAG}-amd64" -f ${{ matrix.dockerfile }} ${{ matrix.context }}
+          docker build ${{ matrix.build_args }} --build-arg BUILDTIME="${GITHUB_SHA}" -t "${IMAGE}:${{ matrix.component }}-${TAG}-amd64" -f ${{ matrix.dockerfile }} ${{ matrix.context }}
           docker push "${IMAGE}:${{ matrix.component }}-${TAG}-amd64"
 
       - name: Build and push agent-amd (amd64 only)
@@ -166,7 +166,7 @@ jobs:
       - name: Build and push frontend (arm64)
         if: needs.changes.outputs.frontend == 'true'
         run: |
-          docker build -t "${IMAGE}:frontend-${TAG}-arm64" -f frontend/Dockerfile frontend
+          docker build --build-arg BUILDTIME="${GITHUB_SHA}" -t "${IMAGE}:frontend-${TAG}-arm64" -f frontend/Dockerfile frontend
           docker push "${IMAGE}:frontend-${TAG}-arm64"
 
       - name: Build and push agent (arm64)
