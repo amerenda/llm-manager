@@ -259,6 +259,7 @@ async def init_db(pool: asyncpg.Pool) -> None:
                 ("auto_update", "BOOLEAN NOT NULL DEFAULT FALSE"),
                 ("pinned_model", "TEXT"),
                 ("draining", "BOOLEAN NOT NULL DEFAULT FALSE"),
+                ("schedulable", "BOOLEAN NOT NULL DEFAULT TRUE"),
             ]:
                 await conn.execute(
                     f"ALTER TABLE llm_runners ADD COLUMN IF NOT EXISTS {col} {definition}"
@@ -593,7 +594,7 @@ async def get_active_runners(pool: asyncpg.Pool) -> list[dict]:
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT id, hostname, address, port, capabilities, enabled, auto_update, pinned_model, draining, last_seen, created_at
+            SELECT id, hostname, address, port, capabilities, enabled, auto_update, pinned_model, draining, schedulable, last_seen, created_at
             FROM llm_runners
             WHERE last_seen > NOW() - INTERVAL '90 seconds'
               AND enabled = TRUE
@@ -613,7 +614,7 @@ async def get_all_runners(pool: asyncpg.Pool) -> list[dict]:
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """
-            SELECT id, hostname, address, port, capabilities, enabled, auto_update, pinned_model, draining, last_seen, created_at
+            SELECT id, hostname, address, port, capabilities, enabled, auto_update, pinned_model, draining, schedulable, last_seen, created_at
             FROM llm_runners
             WHERE last_seen > NOW() - INTERVAL '7 days'
             ORDER BY hostname
@@ -669,12 +670,27 @@ async def set_runner_draining(
     return result.endswith("1")
 
 
+async def set_runner_schedulable(
+    pool: asyncpg.Pool, runner_id: int, schedulable: bool
+) -> bool:
+    """Mark a runner as schedulable (or unschedulable). An unschedulable
+    runner is excluded from ALL scheduling paths — no queued jobs and no
+    fast-path claims. Set True to resume normal scheduling.
+    Returns False if runner not found."""
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "UPDATE llm_runners SET schedulable = $1 WHERE id = $2",
+            schedulable, runner_id,
+        )
+    return result.endswith("1")
+
+
 async def get_runner_by_id(pool: asyncpg.Pool, runner_id: int) -> Optional[dict]:
     """Return a runner by id, or None if not found."""
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            SELECT id, hostname, address, port, capabilities, enabled, auto_update, pinned_model, draining, last_seen, created_at
+            SELECT id, hostname, address, port, capabilities, enabled, auto_update, pinned_model, draining, schedulable, last_seen, created_at
             FROM llm_runners
             WHERE id = $1
             """,

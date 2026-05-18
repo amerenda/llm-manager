@@ -701,6 +701,8 @@ app.include_router(safety_router)
 _PUBLIC_PATHS = {
     "/health", "/metrics", "/auth/login", "/auth/callback", "/auth/me",
     "/auth/logout", "/api/stats",
+    # Library cache refresh endpoint (called by CronJob)
+    "/api/library/refresh",
 }
 
 _APP_KEY_AUTH_PREFIXES = (
@@ -1481,11 +1483,16 @@ class RunnerUpdateRequest(BaseModel):
     # jobs to this runner; in-flight job runs to completion. False = resume
     # normal scheduling. Persists in llm_runners.draining.
     draining: Optional[bool] = None
+    # schedulable: True = scheduler can route to this runner. False = no jobs
+    # at all (not even fast-path), useful when a backend like vLLM is eating
+    # all VRAM and we want routing only to other engines/hosts. Persists in
+    # llm_runners.schedulable.
+    schedulable: Optional[bool] = None
 
 
 @app.patch("/api/runners/{runner_id}")
 async def update_runner(runner_id: int, req: RunnerUpdateRequest):
-    """Update runner settings (enable/disable, auto_update, pinned_model, draining)."""
+    """Update runner settings (enable/disable, auto_update, pinned_model, draining, schedulable)."""
     if req.enabled is not None:
         found = await db.set_runner_enabled(app.state.db, runner_id, req.enabled)
         if not found:
@@ -1501,6 +1508,10 @@ async def update_runner(runner_id: int, req: RunnerUpdateRequest):
             raise HTTPException(404, "Runner not found")
     if req.draining is not None:
         found = await db.set_runner_draining(app.state.db, runner_id, req.draining)
+        if not found:
+            raise HTTPException(404, "Runner not found")
+    if req.schedulable is not None:
+        found = await db.set_runner_schedulable(app.state.db, runner_id, req.schedulable)
         if not found:
             raise HTTPException(404, "Runner not found")
     return {"ok": True}
