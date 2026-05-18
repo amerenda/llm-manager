@@ -488,6 +488,7 @@ class SimplifiedScheduler:
                     hostname=r["hostname"],
                     pinned_model=r.get("pinned_model"),
                     draining=bool(r.get("draining")),
+                    schedulable=bool(r.get("schedulable", True)),
                     backend_type=caps.get("backend_type", "ollama"),
                     vllm_model=caps.get("vllm_model"),
                 )
@@ -519,6 +520,7 @@ class SimplifiedScheduler:
                 # don't touch those.
                 rs.pinned_model = r.get("pinned_model")
                 rs.draining = bool(r.get("draining"))
+                rs.schedulable = bool(r.get("schedulable", True))
                 # Downloaded set refreshes every heartbeat — the agent pulls
                 # models in the background and we need _pick_runner to see it
                 # as soon as the heartbeat lands.
