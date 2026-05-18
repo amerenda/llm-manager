@@ -259,6 +259,7 @@ async def init_db(pool: asyncpg.Pool) -> None:
                 ("auto_update", "BOOLEAN NOT NULL DEFAULT FALSE"),
                 ("pinned_model", "TEXT"),
                 ("draining", "BOOLEAN NOT NULL DEFAULT FALSE"),
+                ("schedulable", "BOOLEAN NOT NULL DEFAULT TRUE"),
             ]:
                 await conn.execute(
                     f"ALTER TABLE llm_runners ADD COLUMN IF NOT EXISTS {col} {definition}"

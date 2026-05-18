@@ -156,6 +156,11 @@ class RunnerState:
     # runner. The flag persists in llm_runners.draining; it clears only when
     # an admin explicitly un-drains.
     draining: bool = False
+    # Schedulable: admin has disabled ALL scheduling to this host. Acts like
+    # draining but more aggressive — the scheduler skips schedulable=false
+    # runners entirely (no jobs, no fast-path). Persists in llm_runners.
+    # schedulable; clears only when an admin explicitly re-enables it.
+    schedulable: bool = True
     # Names (base + tag, e.g. "qwen3:14b") of models currently on disk. Sourced
     # from agent heartbeat capabilities.downloaded_models. Used by _pick_runner
     # so we don't pick a runner for a model it doesn't have — that would force
@@ -995,7 +1000,12 @@ class SimplifiedScheduler:
             return not allowed_runner_ids or r.runner_id in allowed_runner_ids
 
         def _skip(r: RunnerState) -> bool:
-            return r.draining or r.is_ollama_down or not _eligible(r)
+            return (
+                not r.schedulable
+                or r.draining
+                or r.is_ollama_down
+                or not _eligible(r)
+            )
 
         # 1. Pinned match (skip draining/down pinned runners — wait for drain to clear)
         # If the model is already loaded, trust live scheduler state even if
@@ -1323,7 +1333,7 @@ class SimplifiedScheduler:
         pinned = [r for r in self._runners.values() if r.pinned_model == model]
         if pinned:
             for r in pinned:
-                if r.draining or not r.is_idle or r.current_model != model:
+                if not r.schedulable or r.draining or not r.is_idle or r.current_model != model:
                     continue
                 if allowed_runner_ids and r.runner_id not in allowed_runner_ids:
                     continue
