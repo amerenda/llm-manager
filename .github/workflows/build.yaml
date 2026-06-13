@@ -15,7 +15,7 @@ env:
 jobs:
   changes:
     name: Detect changes
-    runs-on: arc-runner-set
+    runs-on: arc-runner-llm-manager
     outputs:
       backend: ${{ steps.filter.outputs.backend }}
       frontend: ${{ steps.filter.outputs.frontend }}
@@ -63,7 +63,7 @@ jobs:
 
   set-tag:
     if: github.event_name != 'pull_request'
-    runs-on: arc-runner-set
+    runs-on: arc-runner-llm-manager
     outputs:
       tag: ${{ steps.tag.outputs.tag }}
       pr_prefix: ${{ steps.tag.outputs.pr_prefix }}
@@ -89,7 +89,7 @@ jobs:
       needs.set-tag.result == 'success' &&
       (needs.test.result == 'success' || needs.test.result == 'skipped') &&
       (needs.changes.outputs.backend == 'true' || needs.changes.outputs.frontend == 'true' || needs.changes.outputs.agent == 'true')
-    runs-on: arc-runner-set
+    runs-on: arc-runner-llm-manager
     strategy:
       fail-fast: false
       matrix:
@@ -203,7 +203,7 @@ jobs:
       always() &&
       needs.build-amd64.result == 'success' &&
       needs.build-arm64.result == 'success'
-    runs-on: arc-runner-set
+    runs-on: arc-runner-llm-manager
     env:
       TAG: ${{ needs.set-tag.outputs.tag }}
     steps:
@@ -235,7 +235,7 @@ jobs:
       always() &&
       needs.manifest.result == 'success' &&
       (needs.changes.outputs.backend == 'true' || needs.changes.outputs.frontend == 'true')
-    runs-on: arc-runner-set
+    runs-on: arc-runner-llm-manager
     steps:
       - uses: actions/checkout@v6
 
@@ -334,7 +334,7 @@ jobs:
       always() &&
       needs.manifest.result == 'success' &&
       needs.changes.outputs.agent == 'true'
-    runs-on: arc-runner-set
+    runs-on: arc-runner-llm-manager
     steps:
       - name: Set target version on llm-manager
         env:
